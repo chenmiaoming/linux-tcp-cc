@@ -13,9 +13,10 @@
 
 /*
  * Provide the corresponding 64-bit primitives using the same single-vCPU
- * serialization rule. The acquire/release/relaxed variants are derived by
- * include/linux/atomic/atomic-arch-fallback.h from these fully ordered base
- * operations.
+ * serialization rule. Linux's atomic fallback discovers architecture
+ * primitives with preprocessor defined() checks, so the implementation names
+ * are kept private and explicitly exported through arch_atomic64_* macros,
+ * matching the pattern used by asm-generic/atomic.h.
  *
  * Correctness of these operations depends on arch_local_irq_save/restore
  * serializing all kernel execution contexts for the virtual CPU. M2 only
@@ -23,7 +24,7 @@
  * later runtime milestone.
  */
 #define TCPCC_ATOMIC64_OP(op, c_op)                                      \
-static inline void arch_atomic64_##op(s64 i, atomic64_t *v)               \
+static inline void tcpcc_atomic64_##op(s64 i, atomic64_t *v)              \
 {                                                                         \
 	unsigned long flags;                                                  \
 	                                                                        \
@@ -33,7 +34,7 @@ static inline void arch_atomic64_##op(s64 i, atomic64_t *v)               \
 }
 
 #define TCPCC_ATOMIC64_OP_RETURN(op, c_op)                               \
-static inline s64 arch_atomic64_##op##_return(s64 i, atomic64_t *v)       \
+static inline s64 tcpcc_atomic64_##op##_return(s64 i, atomic64_t *v)      \
 {                                                                         \
 	unsigned long flags;                                                  \
 	s64 ret;                                                              \
@@ -46,7 +47,7 @@ static inline s64 arch_atomic64_##op##_return(s64 i, atomic64_t *v)       \
 }
 
 #define TCPCC_ATOMIC64_FETCH_OP(op, c_op)                                \
-static inline s64 arch_atomic64_fetch_##op(s64 i, atomic64_t *v)          \
+static inline s64 tcpcc_atomic64_fetch_##op(s64 i, atomic64_t *v)         \
 {                                                                         \
 	unsigned long flags;                                                  \
 	s64 ret;                                                              \
@@ -59,12 +60,12 @@ static inline s64 arch_atomic64_fetch_##op(s64 i, atomic64_t *v)          \
 	return ret;                                                           \
 }
 
-static inline s64 arch_atomic64_read(const atomic64_t *v)
+static inline s64 tcpcc_atomic64_read(const atomic64_t *v)
 {
 	return READ_ONCE(v->counter);
 }
 
-static inline void arch_atomic64_set(atomic64_t *v, s64 i)
+static inline void tcpcc_atomic64_set(atomic64_t *v, s64 i)
 {
 	WRITE_ONCE(v->counter, i);
 }
@@ -83,6 +84,21 @@ TCPCC_ATOMIC64_OP(sub, -)
 TCPCC_ATOMIC64_OP(and, &)
 TCPCC_ATOMIC64_OP(or, |)
 TCPCC_ATOMIC64_OP(xor, ^)
+
+#define arch_atomic64_read tcpcc_atomic64_read
+#define arch_atomic64_set tcpcc_atomic64_set
+#define arch_atomic64_add tcpcc_atomic64_add
+#define arch_atomic64_sub tcpcc_atomic64_sub
+#define arch_atomic64_and tcpcc_atomic64_and
+#define arch_atomic64_or tcpcc_atomic64_or
+#define arch_atomic64_xor tcpcc_atomic64_xor
+#define arch_atomic64_add_return tcpcc_atomic64_add_return
+#define arch_atomic64_sub_return tcpcc_atomic64_sub_return
+#define arch_atomic64_fetch_add tcpcc_atomic64_fetch_add
+#define arch_atomic64_fetch_sub tcpcc_atomic64_fetch_sub
+#define arch_atomic64_fetch_and tcpcc_atomic64_fetch_and
+#define arch_atomic64_fetch_or tcpcc_atomic64_fetch_or
+#define arch_atomic64_fetch_xor tcpcc_atomic64_fetch_xor
 
 #undef TCPCC_ATOMIC64_FETCH_OP
 #undef TCPCC_ATOMIC64_OP_RETURN
