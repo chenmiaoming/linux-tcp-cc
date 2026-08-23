@@ -1,0 +1,2 @@
+# Paths in upstream/protected.sha256 may only be listed here through a
+# dedicated design/review decision. The list is intentionally empty.
