@@ -30,8 +30,6 @@ SECTIONS
 	_text = .;
 	_stext = .;
 	HEAD_TEXT_SECTION
-	INIT_TEXT_SECTION(PAGE_SIZE)
-
 	.text : {
 		TEXT_TEXT
 		SCHED_TEXT
@@ -41,10 +39,13 @@ SECTIONS
 	}
 	_etext = .;
 
+	/* All discardable initialization code/data must share these bounds. */
 	. = ALIGN(PAGE_SIZE);
 	__init_begin = .;
+	INIT_TEXT_SECTION(PAGE_SIZE)
 	INIT_DATA_SECTION(PAGE_SIZE)
 	PERCPU_SECTION(L1_CACHE_BYTES)
+	. = ALIGN(PAGE_SIZE);
 	__init_end = .;
 
 	_sdata = .;
