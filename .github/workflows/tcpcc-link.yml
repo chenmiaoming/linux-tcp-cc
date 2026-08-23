@@ -49,6 +49,20 @@ jobs:
       - name: Link ARCH=tcpcc vmlinux
         run: bash scripts/validate-tcpcc-link.sh
 
+      # Final-link failures are expected while the architecture contract is
+      # being brought up. Preserve the exact Kbuild/ld transcript and generated
+      # linker script even when the link step fails, so the next fix is based on
+      # evidence rather than inferred missing symbols.
+      - name: Upload link diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-link-diagnostics
+          path: |
+            .build/tcpcc-vmlinux.link.log
+            .build/tcpcc-link-out/arch/tcpcc/kernel/vmlinux.lds
+          if-no-files-found: warn
+
       - name: Show linked image provenance
         run: |
           cat .build/tcpcc-link.env
