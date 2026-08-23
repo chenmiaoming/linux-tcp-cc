@@ -1,0 +1,61 @@
+name: TCPCC kernel link
+
+on:
+  pull_request:
+    branches:
+      - 6.18.y
+    paths:
+      - '.github/workflows/tcpcc-link.yml'
+      - 'linux-overlay/**'
+      - 'patches/**'
+      - 'scripts/prepare-linux.sh'
+      - 'scripts/validate-tcpcc-link.sh'
+      - 'upstream/**'
+      - 'protected/**'
+  push:
+    branches:
+      - 6.18.y
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vmlinux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex build-essential libelf-dev libssl-dev
+
+      - name: Validate scripts
+        run: |
+          bash -n scripts/fetch-linux.sh
+          bash -n scripts/verify-protected.sh
+          bash -n scripts/prepare-linux.sh
+          bash -n scripts/validate-tcpcc-link.sh
+
+      - name: Link ARCH=tcpcc vmlinux
+        run: bash scripts/validate-tcpcc-link.sh
+
+      - name: Show linked image provenance
+        run: |
+          cat .build/tcpcc-link.env
+          cat .build/tcpcc-vmlinux.elf-header
+
+      - name: Upload link provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-link-m2-2
+          path: |
+            .build/tcpcc-link.env
+            .build/tcpcc-vmlinux.elf-header
+            .build/prepared.env
+            .build/patches.sha256
+            .build/overlay.sha256
+          if-no-files-found: error
