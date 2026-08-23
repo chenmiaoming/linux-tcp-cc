@@ -6,6 +6,7 @@ generic-y += cmpxchg.h
 generic-y += extable.h
 generic-y += ioctl.h
 generic-y += irqflags.h
+generic-y += kvm_para.h
 generic-y += mcs_spinlock.h
 generic-y += param.h
 generic-y += resource.h
