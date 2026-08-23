@@ -55,7 +55,10 @@ grep -F 'tcpcc: M3.2 host one-shot clockevent registered' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.2 one-shot hrtimer stress passed (32 rounds,' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.3 task-switch stress passed (4 workers x 32 sleep/wake rounds)' \
   "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M3.3 reached task-switch boundary after scheduler stress' \
+grep -F 'tcpcc: M3.4 host epoll event loop initialized' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M3.4 IRQ/softirq event-loop stress passed (64 rounds)' \
+  "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc: M3.4 reached event-loop boundary after IRQ/softirq stress' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
@@ -63,6 +66,10 @@ if grep -Fq 'tcpcc: M3.2 reached timer boundary after hrtimer stress' "$BOOT_LOG
   echo "hosted boot stopped at the obsolete M3.2 boundary" >&2
   exit 1
 fi
+if grep -Fq 'tcpcc: M3.3 reached task-switch boundary after scheduler stress' "$BOOT_LOG"; then
+  echo "hosted boot stopped at the obsolete M3.3 boundary" >&2
+  exit 1
+fi
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M3.3 single-vCPU task-switch/sleep-wakeup validation succeeded\n'
+printf 'M3.4 host event-loop/IRQ/softirq validation succeeded\n'
