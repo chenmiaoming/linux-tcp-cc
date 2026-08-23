@@ -1,0 +1,81 @@
+diff --git a/arch/tcpcc/Kconfig b/arch/tcpcc/Kconfig
+new file mode 100644
+--- /dev/null
++++ b/arch/tcpcc/Kconfig
+@@ -0,0 +1,47 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++config TCPCC
++	def_bool y
++	depends on !SMP && !COREDUMP && !COMPAT
++	select ARCH_THREAD_STACK_ALLOCATOR
++	select FLATMEM
++	select GENERIC_ATOMIC64
++	select GENERIC_CALIBRATE_DELAY
++	select GENERIC_CLOCKEVENTS
++	select GENERIC_CPU_DEVICES
++	select GENERIC_HWEIGHT
++	select NO_PREEMPT
++	select UACCESS_MEMCPY
++	select GENERIC_STRNCPY_FROM_USER
++	select GENERIC_STRNLEN_USER
++
++config 64BIT
++	def_bool y
++
++config MMU
++	def_bool n
++
++config CPU_BIG_ENDIAN
++	def_bool n
++
++config GENERIC_CSUM
++	def_bool y
++
++config NO_IOPORT_MAP
++	def_bool y
++
++config HZ
++	int
++	default 100
++
++config NR_CPUS
++	int
++	range 1 1
++	default 1
++
++config STACKTRACE_SUPPORT
++	def_bool n
++
++config BUILTIN_CMDLINE
++	string "Built-in kernel command string"
++	default ""
++diff --git a/arch/tcpcc/Kconfig.debug b/arch/tcpcc/Kconfig.debug
++new file mode 100644
++--- /dev/null
+++++ b/arch/tcpcc/Kconfig.debug
++@@ -0,0 +1 @@
+++# SPDX-License-Identifier: GPL-2.0-only
++diff --git a/arch/tcpcc/Makefile b/arch/tcpcc/Makefile
++new file mode 100644
++--- /dev/null
+++++ b/arch/tcpcc/Makefile
++@@ -0,0 +1,6 @@
+++# SPDX-License-Identifier: GPL-2.0-only
+++
+++KBUILD_DEFCONFIG := defconfig
+++KBUILD_CFLAGS += -fno-builtin -fPIC
+++
+++core-y += arch/tcpcc/kernel/
++diff --git a/arch/tcpcc/configs/defconfig b/arch/tcpcc/configs/defconfig
++new file mode 100644
++--- /dev/null
+++++ b/arch/tcpcc/configs/defconfig
++@@ -0,0 +1,7 @@
+++CONFIG_EMBEDDED=y
+++CONFIG_EXPERT=y
+++CONFIG_PRINTK=y
+++CONFIG_BUG=y
+++# CONFIG_MODULES is not set
+++# CONFIG_SMP is not set
+++# CONFIG_NET is not set
