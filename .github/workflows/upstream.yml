@@ -1,0 +1,41 @@
+name: Upstream provenance
+
+on:
+  pull_request:
+    branches:
+      - 6.18.y
+  push:
+    branches:
+      - 6.18.y
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Validate scripts
+        run: bash -n scripts/fetch-linux.sh
+
+      - name: Fetch pinned Linux stable source
+        run: bash scripts/fetch-linux.sh
+
+      - name: Show provenance
+        run: |
+          cat .build/upstream.env
+          cat .build/protected-upstream.sha256
+
+      - name: Upload provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-upstream-provenance
+          path: |
+            .build/upstream.env
+            .build/protected-upstream.sha256
+          if-no-files-found: error
