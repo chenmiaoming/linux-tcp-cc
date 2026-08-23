@@ -11,10 +11,13 @@
 #define TCPCC_HOST_NR_READ            0
 #define TCPCC_HOST_NR_WRITE           1
 #define TCPCC_HOST_NR_MMAP            9
+#define TCPCC_HOST_NR_EPOLL_WAIT      232
+#define TCPCC_HOST_NR_EPOLL_CTL       233
 #define TCPCC_HOST_NR_CLOCK_GETTIME   228
 #define TCPCC_HOST_NR_EXIT_GROUP      231
 #define TCPCC_HOST_NR_TIMERFD_CREATE  283
 #define TCPCC_HOST_NR_TIMERFD_SETTIME 286
+#define TCPCC_HOST_NR_EPOLL_CREATE1   291
 #define TCPCC_HOST_STDERR_FILENO      2
 
 #define TCPCC_HOST_CLOCK_MONOTONIC 1
@@ -25,6 +28,10 @@
 #define TCPCC_HOST_PROT_WRITE     0x2
 #define TCPCC_HOST_MAP_PRIVATE    0x02
 #define TCPCC_HOST_MAP_ANONYMOUS  0x20
+
+#define TCPCC_HOST_EPOLLIN      0x001
+#define TCPCC_HOST_EPOLL_CTL_ADD 1
+#define TCPCC_HOST_EPOLL_CTL_DEL 2
 
 #define TCPCC_HOST_NSEC_PER_SEC 1000000000ULL
 
@@ -37,6 +44,14 @@ struct tcpcc_host_itimerspec {
 	struct tcpcc_host_timespec it_interval;
 	struct tcpcc_host_timespec it_value;
 };
+
+/* x86-64 UAPI struct epoll_event is packed to 12 bytes. */
+struct tcpcc_host_epoll_event {
+	u32 events;
+	u64 data;
+} __packed;
+
+static int tcpcc_host_epoll_fd = -1;
 
 static __always_inline long tcpcc_host_syscall1(long nr, long arg0)
 {
@@ -186,6 +201,75 @@ int tcpcc_host_timer_wait(int fd, u64 *expirations)
 		return (int)ret;
 	if (ret != sizeof(*expirations))
 		return -TCPCC_HOST_EIO;
+	return 0;
+}
+
+int __init tcpcc_host_event_loop_init(void)
+{
+	long ret;
+
+	if (tcpcc_host_epoll_fd >= 0)
+		return 0;
+
+	ret = tcpcc_host_syscall1(TCPCC_HOST_NR_EPOLL_CREATE1, 0);
+	if (ret < 0)
+		return (int)ret;
+
+	tcpcc_host_epoll_fd = (int)ret;
+	return 0;
+}
+
+int tcpcc_host_event_add(int fd, u64 token)
+{
+	struct tcpcc_host_epoll_event event = {
+		.events = TCPCC_HOST_EPOLLIN,
+		.data = token,
+	};
+	long ret;
+
+	if (tcpcc_host_epoll_fd < 0)
+		return -TCPCC_HOST_EIO;
+
+	ret = tcpcc_host_syscall4(TCPCC_HOST_NR_EPOLL_CTL,
+				  tcpcc_host_epoll_fd,
+				  TCPCC_HOST_EPOLL_CTL_ADD, fd,
+				  (long)&event);
+	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_event_del(int fd)
+{
+	long ret;
+
+	if (tcpcc_host_epoll_fd < 0)
+		return -TCPCC_HOST_EIO;
+
+	ret = tcpcc_host_syscall4(TCPCC_HOST_NR_EPOLL_CTL,
+				  tcpcc_host_epoll_fd,
+				  TCPCC_HOST_EPOLL_CTL_DEL, fd, 0);
+	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_event_wait(u64 *token)
+{
+	struct tcpcc_host_epoll_event event;
+	long ret;
+
+	if (tcpcc_host_epoll_fd < 0)
+		return -TCPCC_HOST_EIO;
+
+	do {
+		ret = tcpcc_host_syscall4(TCPCC_HOST_NR_EPOLL_WAIT,
+					  tcpcc_host_epoll_fd,
+					  (long)&event, 1, -1);
+	} while (ret == -TCPCC_HOST_EINTR);
+
+	if (ret < 0)
+		return (int)ret;
+	if (ret != 1 || !(event.events & TCPCC_HOST_EPOLLIN))
+		return -TCPCC_HOST_EIO;
+
+	*token = event.data;
 	return 0;
 }
 
