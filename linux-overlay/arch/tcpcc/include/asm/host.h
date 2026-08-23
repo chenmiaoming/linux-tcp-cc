@@ -28,6 +28,14 @@ int tcpcc_host_timer_arm(int fd, u64 delta_ns);
 int tcpcc_host_timer_cancel(int fd);
 int tcpcc_host_timer_wait(int fd, u64 *expirations);
 
+/*
+ * M3.3 idle bridge. The Linux idle task enters this with local IRQs masked;
+ * the implementation atomically crosses to the synchronous host timer wait
+ * model by enabling local IRQs and dispatching the pending clockevent on wake.
+ * General multi-fd host event multiplexing remains outside this milestone.
+ */
+void tcpcc_host_idle_wait(void);
+
 void __init tcpcc_host_console_init(void);
 void __init tcpcc_host_install_panic_exit(void);
 
