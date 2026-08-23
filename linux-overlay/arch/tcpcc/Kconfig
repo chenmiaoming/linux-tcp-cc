@@ -3,17 +3,23 @@
 config TCPCC
 	def_bool y
 	depends on !SMP && !COREDUMP && !COMPAT
-	select ARCH_THREAD_STACK_ALLOCATOR
 	select FLATMEM
-	select GENERIC_CALIBRATE_DELAY
 	select GENERIC_CLOCKEVENTS
 	select GENERIC_CPU_DEVICES
-	select GENERIC_HWEIGHT
 	select NO_PREEMPT
 	select THREAD_INFO_IN_TASK
 	select UACCESS_MEMCPY
 	select GENERIC_STRNCPY_FROM_USER
 	select GENERIC_STRNLEN_USER
+
+# These are architecture-owned capability symbols in Linux 6.18.  Defining
+# them, rather than selecting otherwise-undefined symbols, pulls in the generic
+# delay calibration and software hweight implementations from the core tree.
+config GENERIC_CALIBRATE_DELAY
+	def_bool y
+
+config GENERIC_HWEIGHT
+	def_bool y
 
 config 64BIT
 	def_bool y

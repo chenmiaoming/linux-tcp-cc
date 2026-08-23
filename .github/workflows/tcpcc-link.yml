@@ -1,0 +1,81 @@
+name: TCPCC kernel link
+
+on:
+  pull_request:
+    branches:
+      - 6.18.y
+    paths:
+      - '.github/workflows/tcpcc-link.yml'
+      - 'linux-overlay/**'
+      - 'patches/**'
+      - 'scripts/prepare-linux.sh'
+      - 'scripts/validate-tcpcc-link.sh'
+      - 'upstream/**'
+      - 'protected/**'
+  push:
+    branches:
+      - 6.18.y
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Full kernel builds are expensive. Keep only the newest link validation for a
+# given PR/ref; a newer commit supersedes any in-flight result from the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vmlinux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex build-essential libelf-dev libssl-dev
+
+      - name: Validate scripts
+        run: |
+          bash -n scripts/fetch-linux.sh
+          bash -n scripts/verify-protected.sh
+          bash -n scripts/prepare-linux.sh
+          bash -n scripts/validate-tcpcc-link.sh
+
+      - name: Link ARCH=tcpcc vmlinux
+        run: bash scripts/validate-tcpcc-link.sh
+
+      # Final-link failures are expected while the architecture contract is
+      # being brought up. Preserve the exact Kbuild/ld transcript and generated
+      # linker script even when the link step fails, so the next fix is based on
+      # evidence rather than inferred missing symbols.
+      - name: Upload link diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-link-diagnostics
+          path: |
+            .build/tcpcc-vmlinux.link.log
+            .build/tcpcc-link-out/arch/tcpcc/kernel/vmlinux.lds
+          if-no-files-found: warn
+
+      - name: Show linked image provenance
+        run: |
+          cat .build/tcpcc-link.env
+          cat .build/tcpcc-vmlinux.elf-header
+
+      - name: Upload link provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-link-m2-2
+          path: |
+            .build/tcpcc-link.env
+            .build/tcpcc-vmlinux.elf-header
+            .build/prepared.env
+            .build/patches.sha256
+            .build/overlay.sha256
+          if-no-files-found: error

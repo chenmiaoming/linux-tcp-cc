@@ -2,12 +2,12 @@
 #ifndef _ASM_TCPCC_THREAD_INFO_H
 #define _ASM_TCPCC_THREAD_INFO_H
 
+/* M2 uses one 4 KiB kernel stack page per task. */
+#define THREAD_SIZE_ORDER 0
 #define THREAD_SIZE 4096
 
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
-
-struct task_struct;
 
 /*
  * CONFIG_THREAD_INFO_IN_TASK keeps this structure at offset zero in
@@ -26,26 +26,41 @@ struct thread_info {
 	.cpu = 0,                                    \
 	.preempt_count = INIT_PREEMPT_COUNT,         \
 }
-
-unsigned long *arch_alloc_thread_stack_node(struct task_struct *tsk, int node);
-void arch_free_thread_stack(struct task_struct *tsk);
 #endif /* !__ASSEMBLY__ */
 
-/* Low-level work flags. Keep reschedule and signal bits explicit because the
- * generic scheduler tests their mask forms directly. */
-#define TIF_SIGPENDING      0
-#define TIF_NEED_RESCHED    1
-#define TIF_NOTIFY_SIGNAL   2
-#define TIF_NOTIFY_RESUME   3
-#define TIF_MEMDIE          4
+/*
+ * Generic Linux code names several syscall-work bits even when a particular
+ * architecture does not implement a userspace syscall entry path. Keep the
+ * numbering aligned with Linux 6.18 UML so task/fork bookkeeping compiles
+ * without implying any guest userspace ABI for tcpcc.
+ */
+#define TIF_SYSCALL_TRACE          0
+#define TIF_SIGPENDING             1
+#define TIF_NEED_RESCHED           2
+#define TIF_NOTIFY_SIGNAL          3
+#define TIF_RESTART_BLOCK          4
+#define TIF_MEMDIE                 5
+#define TIF_SYSCALL_AUDIT          6
+#define TIF_RESTORE_SIGMASK        7
+#define TIF_NOTIFY_RESUME          8
+#define TIF_SECCOMP                9
+#define TIF_SINGLESTEP            10
+#define TIF_SYSCALL_TRACEPOINT    11
 
-#define _TIF_SIGPENDING     (1UL << TIF_SIGPENDING)
-#define _TIF_NEED_RESCHED   (1UL << TIF_NEED_RESCHED)
-#define _TIF_NOTIFY_SIGNAL  (1UL << TIF_NOTIFY_SIGNAL)
-#define _TIF_NOTIFY_RESUME  (1UL << TIF_NOTIFY_RESUME)
-#define _TIF_MEMDIE         (1UL << TIF_MEMDIE)
+#define _TIF_SYSCALL_TRACE        (1UL << TIF_SYSCALL_TRACE)
+#define _TIF_SIGPENDING           (1UL << TIF_SIGPENDING)
+#define _TIF_NEED_RESCHED         (1UL << TIF_NEED_RESCHED)
+#define _TIF_NOTIFY_SIGNAL        (1UL << TIF_NOTIFY_SIGNAL)
+#define _TIF_RESTART_BLOCK        (1UL << TIF_RESTART_BLOCK)
+#define _TIF_MEMDIE               (1UL << TIF_MEMDIE)
+#define _TIF_SYSCALL_AUDIT        (1UL << TIF_SYSCALL_AUDIT)
+#define _TIF_RESTORE_SIGMASK      (1UL << TIF_RESTORE_SIGMASK)
+#define _TIF_NOTIFY_RESUME        (1UL << TIF_NOTIFY_RESUME)
+#define _TIF_SECCOMP              (1UL << TIF_SECCOMP)
+#define _TIF_SINGLESTEP           (1UL << TIF_SINGLESTEP)
+#define _TIF_SYSCALL_TRACEPOINT   (1UL << TIF_SYSCALL_TRACEPOINT)
 
-#define _TIF_WORK_MASK (_TIF_SIGPENDING | _TIF_NEED_RESCHED | \
+#define _TIF_WORK_MASK (_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
                         _TIF_NOTIFY_SIGNAL | _TIF_NOTIFY_RESUME)
 
 #endif /* _ASM_TCPCC_THREAD_INFO_H */
