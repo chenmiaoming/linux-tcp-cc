@@ -21,6 +21,12 @@ config 64BIT
 config MMU
 	def_bool n
 
+# The first userspace port has no process coredump ABI. Keeping this disabled is
+# also required by the architecture contract above; a later change must add a
+# real implementation before enabling it.
+config COREDUMP
+	def_bool n
+
 config CPU_BIG_ENDIAN
 	def_bool n
 
