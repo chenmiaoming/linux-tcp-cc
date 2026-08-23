@@ -5,15 +5,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOT_LOG="$ROOT/.build/tcpcc-bootstrap.log"
 
+require_log()
+{
+  local marker="$1"
+
+  if ! grep -F -- "$marker" "$BOOT_LOG" >/dev/null; then
+    printf 'missing M3.1 memory log marker: %s\n' "$marker" >&2
+    exit 1
+  fi
+}
+
 bash "$ROOT/scripts/validate-tcpcc-bootstrap.sh"
 
-grep -F 'tcpcc: M3.1 host memory [0x100000-0x10000000), image reserved through ' \
-  "$BOOT_LOG" >/dev/null
-grep -F 'tcpcc: M3.1 memblock probe passed at ' "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M3.1 deterministic stop after memblock bootstrap' \
-  "$BOOT_LOG" >/dev/null
+# Keep the M3.1 wrapper aligned with the current resource model: the hosted ELF
+# image is separate from a fixed 16 MiB [16 MiB, 32 MiB) allocatable RAM arena.
+require_log 'tcpcc: M3.1 host RAM [0x1000000-0x2000000), kernel image '
+require_log 'tcpcc: M3.1 memblock probe passed at '
+require_log 'Kernel panic - not syncing: tcpcc: M3.1 deterministic stop after memblock bootstrap'
 
-if grep -Fq 'tcpcc: host RAM mapping ' "$BOOT_LOG"; then
+if grep -Fq 'tcpcc: host RAM mapping [' "$BOOT_LOG" && \
+   grep -Fq ' failed:' "$BOOT_LOG"; then
   echo "host RAM mapping reported a failure" >&2
   exit 1
 fi
