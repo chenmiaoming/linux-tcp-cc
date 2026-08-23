@@ -5,10 +5,14 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irqflags.h>
+#include <linux/jiffies.h>
 #include <linux/panic.h>
 #include <linux/printk.h>
+#include <linux/sched.h>
 #include <linux/timekeeping.h>
 #include <asm/host.h>
+#include <asm/irq_regs.h>
+#include <asm/ptrace.h>
 
 #define TCPCC_CLOCK_HZ              NSEC_PER_SEC
 #define TCPCC_TIMER_MIN_DELTA_NS    1000UL
@@ -21,6 +25,9 @@
 static int tcpcc_timer_fd = -1;
 static unsigned int tcpcc_test_fired;
 static u64 tcpcc_test_fired_ns;
+static bool tcpcc_m33_trace;
+static unsigned int tcpcc_m33_program_trace;
+static unsigned int tcpcc_m33_idle_trace;
 
 static u64 tcpcc_clocksource_read(struct clocksource *cs)
 {
@@ -71,10 +78,20 @@ static int tcpcc_clockevent_oneshot(struct clock_event_device *evt)
 static int tcpcc_clockevent_next(unsigned long delta,
 				 struct clock_event_device *evt)
 {
+	int ret;
+
 	/* timerfd value zero means disarm, never a zero-length event. */
 	if (!delta)
 		delta = 1;
-	return tcpcc_host_timer_arm(tcpcc_timer_fd, delta);
+
+	ret = tcpcc_host_timer_arm(tcpcc_timer_fd, delta);
+	if (tcpcc_m33_trace && tcpcc_m33_program_trace < 8) {
+		pr_notice("tcpcc: M3.3 clockevent program #%u delta=%lu ns ret=%d\n",
+			  tcpcc_m33_program_trace, delta, ret);
+		tcpcc_m33_program_trace++;
+	}
+
+	return ret;
 }
 
 static struct clock_event_device tcpcc_clockevent = {
@@ -88,14 +105,15 @@ static struct clock_event_device tcpcc_clockevent = {
 };
 
 /*
- * M3.2 deliberately has no asynchronous host -> Linux entry. timerfd expiry is
- * level-like pending state in the host. The one Linux vCPU blocks here only at
- * an explicit safe point, then enters the normal Linux clockevent handler with
- * local IRQs masked and hardirq accounting active. M3.4 will fold this fd into
- * the general IRQ/softirq event loop.
+ * timerfd expiry is level-like pending state in the host. The one Linux vCPU
+ * blocks only at an explicit safe point, then enters the normal Linux
+ * clockevent handler with local IRQs masked and hardirq accounting active.
+ * M3.4/#27 will fold this fd into the general host IRQ/softirq event loop.
  */
 static void tcpcc_timer_wait_and_dispatch(void)
 {
+	struct pt_regs regs = { 0 };
+	struct pt_regs *old_regs;
 	u64 expirations;
 	unsigned long flags;
 	int ret;
@@ -111,11 +129,49 @@ static void tcpcc_timer_wait_and_dispatch(void)
 	if (!tcpcc_clockevent.event_handler)
 		panic("tcpcc: clockevent fired before handler installation");
 
+	/*
+	 * High-resolution tick handling deliberately skips update_process_times()
+	 * when get_irq_regs() is NULL. A real architecture IRQ entry publishes a
+	 * pt_regs frame before irq_enter(); do the same for this synthetic hosted
+	 * timer interrupt so the generic tick path advances timer-wheel, scheduler
+	 * and accounting state exactly as it would for a hardware interrupt.
+	 */
 	local_irq_save(flags);
+	old_regs = set_irq_regs(&regs);
 	irq_enter();
 	tcpcc_clockevent.event_handler(&tcpcc_clockevent);
 	irq_exit();
+	set_irq_regs(old_regs);
 	local_irq_restore(flags);
+}
+
+void tcpcc_host_idle_wait(void)
+{
+	unsigned int trace = tcpcc_m33_idle_trace;
+	unsigned long before_jiffies = jiffies;
+
+	/*
+	 * default_idle_call() reaches arch_cpu_idle() with local IRQs disabled.
+	 * No host callback can race this transition: expiration merely becomes
+	 * readable on timerfd. Enable the Linux IRQ state first, then consume and
+	 * synchronously dispatch that pending event.
+	 */
+	if (!irqs_disabled())
+		panic("tcpcc: hosted idle wait entered with local IRQs enabled");
+
+	if (tcpcc_m33_trace && trace < 4) {
+		pr_notice("tcpcc: M3.3 idle wait #%u entering timerfd wait jiffies=%lu\n",
+			  trace, before_jiffies);
+		tcpcc_m33_idle_trace++;
+	}
+
+	local_irq_enable();
+	tcpcc_timer_wait_and_dispatch();
+
+	if (tcpcc_m33_trace && trace < 4)
+		pr_notice("tcpcc: M3.3 idle wait #%u dispatched: jiffies=%lu->%lu softirq=0x%x need_resched=%d\n",
+			  trace, before_jiffies, jiffies,
+			  local_softirq_pending(), need_resched());
 }
 
 static enum hrtimer_restart tcpcc_timer_test_callback(struct hrtimer *timer)
@@ -197,7 +253,9 @@ static void __init tcpcc_timer_selftest(void)
 
 	pr_notice("tcpcc: M3.2 one-shot hrtimer stress passed (%u rounds, worst lateness %llu ns)\n",
 		  TCPCC_TIMER_TEST_ROUNDS, (unsigned long long)worst_late);
-	panic("tcpcc: M3.2 reached timer boundary after hrtimer stress");
+
+	/* Enable bounded diagnostics only after the M3.2 test traffic is done. */
+	tcpcc_m33_trace = true;
 }
 
 void __init time_init(void)

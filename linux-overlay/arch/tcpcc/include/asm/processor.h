@@ -7,8 +7,26 @@
 struct task_struct;
 struct pt_regs;
 
-struct thread_struct { };
-#define INIT_THREAD { }
+/*
+ * A hosted task keeps its inactive x86-64 SysV context on the Linux kernel
+ * stack itself.  switch.S saves the six callee-saved registers and stores the
+ * resulting stack pointer here.  The remaining fields describe the synthetic
+ * first frame created by copy_thread() for kernel threads.
+ */
+struct thread_struct {
+	unsigned long sp;
+	struct task_struct *prev_sched;
+	int (*fn)(void *);
+	void *fn_arg;
+};
+
+#define INIT_THREAD { \
+	.sp = 0, \
+	.prev_sched = NULL, \
+	.fn = NULL, \
+	.fn_arg = NULL, \
+}
+
 #define TASK_SIZE (~0UL)
 #define TASK_UNMAPPED_BASE 0UL
 #define KSTK_EIP(tsk) 0UL

@@ -27,11 +27,15 @@ if ! nm "$OUT/vmlinux" | grep -Eq '[[:space:]]tcpcc_host_start$'; then
   echo "tcpcc host entry symbol is missing" >&2
   exit 1
 fi
+if ! nm "$OUT/vmlinux" | grep -Eq '[[:space:]]tcpcc_switch_context$'; then
+  echo "tcpcc hosted context-switch primitive is missing" >&2
+  exit 1
+fi
 
 rm -f "$BOOT_LOG"
 chmod u+x "$OUT/vmlinux"
 set +e
-timeout 10s "$OUT/vmlinux" >"$BOOT_LOG" 2>&1
+timeout 15s "$OUT/vmlinux" >"$BOOT_LOG" 2>&1
 boot_status=$?
 set -e
 
@@ -49,9 +53,16 @@ grep -F 'tcpcc: M3.1 setup_arch memory initialization complete' "$BOOT_LOG" >/de
 grep -F 'tcpcc: M3.2 host monotonic clocksource active' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.2 host one-shot clockevent registered' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.2 one-shot hrtimer stress passed (32 rounds,' "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M3.2 reached timer boundary after hrtimer stress' \
+grep -F 'tcpcc: M3.3 task-switch stress passed (4 workers x 32 sleep/wake rounds)' \
+  "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc: M3.3 reached task-switch boundary after scheduler stress' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
+if grep -Fq 'tcpcc: M3.2 reached timer boundary after hrtimer stress' "$BOOT_LOG"; then
+  echo "hosted boot stopped at the obsolete M3.2 boundary" >&2
+  exit 1
+fi
+
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M3.2 monotonic clock/one-shot hrtimer validation succeeded\n'
+printf 'M3.3 single-vCPU task-switch/sleep-wakeup validation succeeded\n'
