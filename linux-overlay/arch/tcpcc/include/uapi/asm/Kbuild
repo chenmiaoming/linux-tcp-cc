@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Linux 6.18 scripts/Makefile.asm-headers automatically generates wrappers for
+# every mandatory asm-generic UAPI header that this architecture does not
+# implement. Keep this file empty unless tcpcc has an actual exception.
