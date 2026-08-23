@@ -11,6 +11,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+#include <linux/uio.h>
 #include <net/net_namespace.h>
 
 #define TCPCC_LOOPBACK_TEST_ROUNDS  16
