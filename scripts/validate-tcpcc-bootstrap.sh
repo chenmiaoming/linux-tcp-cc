@@ -43,8 +43,14 @@ fi
 
 grep -F 'Linux version 6.18.45' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M2.3 reached setup_arch from hosted start_kernel' "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc:' "$BOOT_LOG" >/dev/null
+
+# M3.1 must prove that the bounded host RAM arena is distinct from the hosted
+# ELF image and that a real upstream memblock allocation can use that arena.
+grep -F 'tcpcc: M3.1 host RAM [0x1000000-0x2000000), kernel image ' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M3.1 memblock probe passed at ' "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc: M3.1 deterministic stop after memblock bootstrap' \
+  "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'hosted start_kernel/bootstrap validation succeeded\n'
+printf 'hosted start_kernel/M3.1 memory bootstrap validation succeeded\n'
