@@ -12,6 +12,8 @@ EXPECTED_STATUS=86
 LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
   bash "$ROOT/scripts/validate-tcpcc-link.sh"
 
+grep -Fx 'CONFIG_HIGH_RES_TIMERS=y' "$OUT/.config" >/dev/null
+
 readelf -lW "$OUT/vmlinux" > "$ELF_PROGRAM_HEADERS"
 if ! readelf -hW "$OUT/vmlinux" | grep -Eq 'Type:[[:space:]]+EXEC'; then
   echo "tcpcc requires an executable ET_EXEC hosted image" >&2
@@ -44,9 +46,12 @@ fi
 grep -F 'Linux version 6.18.45' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 host RAM 128 MiB at' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 setup_arch memory initialization complete' "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M3.1 reached IRQ boundary after host-backed MM init' \
+grep -F 'tcpcc: M3.2 host monotonic clocksource active' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M3.2 host one-shot clockevent registered' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M3.2 one-shot hrtimer stress passed (32 rounds,' "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc: M3.2 reached timer boundary after hrtimer stress' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M3.1 host-backed memory/bootstrap validation succeeded\n'
+printf 'M3.2 monotonic clock/one-shot hrtimer validation succeeded\n'

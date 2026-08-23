@@ -47,14 +47,14 @@ jobs:
           bash -n scripts/validate-tcpcc-link.sh
           bash -n scripts/validate-tcpcc-bootstrap.sh
 
-      - name: Execute hosted start_kernel milestone
+      - name: Execute hosted M3.2 timer milestone
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m2-3
+          name: tcpcc-bootstrap-m3-2
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-vmlinux.program-headers
