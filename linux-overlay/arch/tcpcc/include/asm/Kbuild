@@ -13,5 +13,6 @@ generic-y += seccomp.h
 generic-y += signal.h
 generic-y += statfs.h
 generic-y += string.h
+generic-y += syscall.h
 generic-y += tlb.h
 generic-y += user.h
