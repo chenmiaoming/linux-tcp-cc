@@ -5,8 +5,10 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irqflags.h>
+#include <linux/jiffies.h>
 #include <linux/panic.h>
 #include <linux/printk.h>
+#include <linux/sched.h>
 #include <linux/timekeeping.h>
 #include <asm/host.h>
 
@@ -133,6 +135,7 @@ static void tcpcc_timer_wait_and_dispatch(void)
 void tcpcc_host_idle_wait(void)
 {
 	unsigned int trace = tcpcc_m33_idle_trace;
+	unsigned long before_jiffies = jiffies;
 
 	/*
 	 * default_idle_call() reaches arch_cpu_idle() with local IRQs disabled.
@@ -144,7 +147,8 @@ void tcpcc_host_idle_wait(void)
 		panic("tcpcc: hosted idle wait entered with local IRQs enabled");
 
 	if (tcpcc_m33_trace && trace < 4) {
-		pr_notice("tcpcc: M3.3 idle wait #%u entering timerfd wait\n", trace);
+		pr_notice("tcpcc: M3.3 idle wait #%u entering timerfd wait jiffies=%lu\n",
+			  trace, before_jiffies);
 		tcpcc_m33_idle_trace++;
 	}
 
@@ -152,7 +156,9 @@ void tcpcc_host_idle_wait(void)
 	tcpcc_timer_wait_and_dispatch();
 
 	if (tcpcc_m33_trace && trace < 4)
-		pr_notice("tcpcc: M3.3 idle wait #%u dispatched timer event\n", trace);
+		pr_notice("tcpcc: M3.3 idle wait #%u dispatched: jiffies=%lu->%lu softirq=0x%x need_resched=%d\n",
+			  trace, before_jiffies, jiffies,
+			  local_softirq_pending(), need_resched());
 }
 
 static enum hrtimer_restart tcpcc_timer_test_callback(struct hrtimer *timer)
