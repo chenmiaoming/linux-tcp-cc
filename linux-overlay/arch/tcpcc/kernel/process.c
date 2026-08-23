@@ -174,6 +174,8 @@ static int __init tcpcc_task_switch_selftest(void)
 	unsigned int i;
 	int ret;
 
+	pr_notice("tcpcc: M3.3 scheduler stress starting\n");
+
 	for (i = 0; i < TCPCC_TASK_TEST_WORKERS; i++) {
 		struct tcpcc_task_test_slot *slot = &tcpcc_task_test[i];
 
@@ -228,7 +230,7 @@ static int __init tcpcc_task_switch_selftest(void)
 		  TCPCC_TASK_TEST_WORKERS, TCPCC_TASK_TEST_ROUNDS);
 	panic("tcpcc: M3.3 reached task-switch boundary after scheduler stress");
 }
-late_initcall(tcpcc_task_switch_selftest);
+core_initcall(tcpcc_task_switch_selftest);
 
 static void __noreturn tcpcc_m3_stop(void)
 {
