@@ -11,6 +11,15 @@
 #include <asm/cache.h>
 #include <asm/thread_info.h>
 
+/*
+ * asm/page.h is a C header and spells PAGE_SIZE as (1UL << PAGE_SHIFT).
+ * After CPP that C integer suffix is not valid GNU ld script syntax.  Keep the
+ * architecture C contract unchanged and use the equivalent pure linker
+ * constant while expanding vmlinux.lds.h macros.
+ */
+#undef PAGE_SIZE
+#define PAGE_SIZE 4096
+
 OUTPUT_FORMAT("elf64-x86-64")
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(start_kernel)
