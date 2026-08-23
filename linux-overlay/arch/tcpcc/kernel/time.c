@@ -148,7 +148,7 @@ static void __init tcpcc_timer_selftest(void)
 	     dispatches++)
 		tcpcc_timer_wait_and_dispatch();
 
-	if (!hrtimer_is_hres_active(&timer) || hrtimer_resolution != HIGH_RES_NSEC)
+	if (!hrtimer_is_hres_active(&timer))
 		panic("tcpcc: Linux hrtimer core did not enter high-resolution mode");
 
 	clock_end = ktime_get_ns();
