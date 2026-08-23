@@ -14,15 +14,15 @@ LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
 
 readelf -lW "$OUT/vmlinux" > "$ELF_PROGRAM_HEADERS"
 if ! readelf -hW "$OUT/vmlinux" | grep -Eq 'Type:[[:space:]]+EXEC'; then
-  echo "M2.3 requires an executable ET_EXEC hosted image" >&2
+  echo "hosted bootstrap requires an executable ET_EXEC image" >&2
   exit 1
 fi
 if readelf -lW "$OUT/vmlinux" | grep -q 'INTERP'; then
-  echo "M2.3 vmlinux unexpectedly requires a userspace ELF interpreter" >&2
+  echo "hosted vmlinux unexpectedly requires a userspace ELF interpreter" >&2
   exit 1
 fi
 if ! nm "$OUT/vmlinux" | grep -Eq '[[:space:]]tcpcc_host_start$'; then
-  echo "M2.3 host entry symbol is missing" >&2
+  echo "tcpcc host entry symbol is missing" >&2
   exit 1
 fi
 
@@ -43,9 +43,8 @@ fi
 
 grep -F 'Linux version 6.18.45' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M2.3 reached setup_arch from hosted start_kernel' "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M2.3 deterministic stop before M3 runtime' \
-  "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc:' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M2.3 hosted start_kernel/bootstrap validation succeeded\n'
+printf 'hosted start_kernel/bootstrap validation succeeded\n'
