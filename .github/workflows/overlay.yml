@@ -1,0 +1,51 @@
+name: Kernel overlay
+
+on:
+  pull_request:
+    branches:
+      - 6.18.y
+  push:
+    branches:
+      - 6.18.y
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-and-configure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Validate shell scripts
+        run: |
+          bash -n scripts/fetch-linux.sh
+          bash -n scripts/verify-protected.sh
+          bash -n scripts/prepare-linux.sh
+          bash -n scripts/validate-net-config.sh
+
+      - name: Prepare Linux tree and validate config
+        run: bash scripts/validate-net-config.sh
+
+      - name: Show prepared-tree provenance
+        run: |
+          cat .build/prepared.env
+          if [[ -s .build/patches.sha256 ]]; then
+            cat .build/patches.sha256
+          else
+            echo "No project patches in series yet."
+          fi
+
+      - name: Upload build provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-overlay-provenance
+          path: |
+            .build/upstream.env
+            .build/prepared.env
+            .build/patches.sha256
+            .build/protected-upstream.sha256
+          if-no-files-found: error
