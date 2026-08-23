@@ -61,6 +61,7 @@ jobs:
             .build/tcpcc-bootstrap.log
             .build/tcpcc-vmlinux.program-headers
             .build/tcpcc-vmlinux.elf-header
+            .build/tcpcc-vmlinux.symbols
             .build/tcpcc-link.env
             .build/prepared.env
             .build/patches.sha256
