@@ -1,3 +1,2 @@
 # One repository-relative patch path per line, applied in order.
-# Example:
-# arch/0001-linux-tcp-cc-userspace-arch.patch
+arch/0001-tcpcc-add-kbuild-kconfig.patch
