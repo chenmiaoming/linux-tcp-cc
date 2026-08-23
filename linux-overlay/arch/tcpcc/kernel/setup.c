@@ -8,8 +8,10 @@
 #include <asm/host.h>
 #include <asm/page.h>
 
-#define TCPCC_PHYS_MEMORY_BASE   0x00100000UL
-#define TCPCC_PHYS_MEMORY_LIMIT  0x10000000UL
+#define TCPCC_IMAGE_BASE          0x00100000UL
+#define TCPCC_HOST_RAM_BASE       0x01000000UL
+#define TCPCC_HOST_RAM_SIZE       (16UL * 1024 * 1024)
+#define TCPCC_HOST_RAM_LIMIT      (TCPCC_HOST_RAM_BASE + TCPCC_HOST_RAM_SIZE)
 #define TCPCC_MEMBLOCK_PROBE_BYTE 0xa5
 
 extern char _text[];
@@ -27,37 +29,43 @@ static void __init tcpcc_early_memory_init(void)
 	long host_ret;
 	int ret;
 
-	/* Keep the identity physical model tied to the linker contract. */
-	if (image_start != TCPCC_PHYS_MEMORY_BASE)
-		panic("tcpcc: image base %#lx != physical base %#lx",
-		      image_start, TCPCC_PHYS_MEMORY_BASE);
-	if (image_end >= TCPCC_PHYS_MEMORY_LIMIT)
-		panic("tcpcc: image end %#lx exceeds M3.1 memory limit %#lx",
-		      image_end, TCPCC_PHYS_MEMORY_LIMIT);
+	/* Keep the hosted ELF image and allocatable Linux RAM disjoint. */
+	if (image_start != TCPCC_IMAGE_BASE)
+		panic("tcpcc: image base %#lx != linker base %#lx",
+		      image_start, TCPCC_IMAGE_BASE);
+	if (image_end > TCPCC_HOST_RAM_BASE)
+		panic("tcpcc: image end %#lx overlaps host RAM base %#lx",
+		      image_end, TCPCC_HOST_RAM_BASE);
 
 	/*
-	 * The ELF loader already mapped [image_start, image_end). Map only the
-	 * anonymous tail. MAP_FIXED_NOREPLACE in the host boundary guarantees
-	 * that this cannot silently clobber another host mapping.
+	 * The host ELF loader owns the kernel image mappings. Linux physical RAM
+	 * is a separate, fixed 16 MiB anonymous arena. Keeping the resources
+	 * disjoint avoids coupling the runtime allocator to PT_LOAD alignment or
+	 * to linker orphan-section placement while preserving the M3 NOMMU
+	 * identity-mapping model.
 	 */
-	host_ret = tcpcc_host_map_memory(image_end, TCPCC_PHYS_MEMORY_LIMIT);
+	host_ret = tcpcc_host_map_memory(TCPCC_HOST_RAM_BASE,
+					 TCPCC_HOST_RAM_LIMIT);
 	if (host_ret)
 		panic("tcpcc: host RAM mapping [%#lx-%#lx) failed: %ld",
-		      image_end, TCPCC_PHYS_MEMORY_LIMIT, host_ret);
+		      TCPCC_HOST_RAM_BASE, TCPCC_HOST_RAM_LIMIT, host_ret);
 
-	ret = memblock_add(TCPCC_PHYS_MEMORY_BASE,
-			   TCPCC_PHYS_MEMORY_LIMIT - TCPCC_PHYS_MEMORY_BASE);
+	ret = memblock_add(TCPCC_HOST_RAM_BASE, TCPCC_HOST_RAM_SIZE);
 	if (ret)
 		panic("tcpcc: memblock_add failed: %d", ret);
 
-	/* Never allow an early allocator to reuse the loaded kernel image. */
-	ret = memblock_reserve(TCPCC_PHYS_MEMORY_BASE,
-			       image_end - TCPCC_PHYS_MEMORY_BASE);
+	/*
+	 * Record the loaded image as reserved even though it is deliberately
+	 * outside the usable RAM list. This makes the exclusion explicit in
+	 * memblock provenance and protects the contract if memory layout grows.
+	 */
+	ret = memblock_reserve(image_start, image_end - image_start);
 	if (ret)
 		panic("tcpcc: memblock_reserve image failed: %d", ret);
 
-	pr_notice("tcpcc: M3.1 host memory [%#lx-%#lx), image reserved through %#lx\n",
-		  TCPCC_PHYS_MEMORY_BASE, TCPCC_PHYS_MEMORY_LIMIT, image_end);
+	pr_notice("tcpcc: M3.1 host RAM [%#lx-%#lx), kernel image [%#lx-%#lx) excluded\n",
+		  TCPCC_HOST_RAM_BASE, TCPCC_HOST_RAM_LIMIT,
+		  image_start, image_end);
 
 	/*
 	 * Exercise the same upstream early allocator that setup_command_line()
@@ -66,8 +74,8 @@ static void __init tcpcc_early_memory_init(void)
 	probe = memblock_alloc(PAGE_SIZE, PAGE_SIZE);
 	if (!probe)
 		panic("tcpcc: M3.1 memblock probe allocation failed");
-	if ((unsigned long)probe < image_end ||
-	    (unsigned long)probe + PAGE_SIZE > TCPCC_PHYS_MEMORY_LIMIT)
+	if ((unsigned long)probe < TCPCC_HOST_RAM_BASE ||
+	    (unsigned long)probe + PAGE_SIZE > TCPCC_HOST_RAM_LIMIT)
 		panic("tcpcc: M3.1 memblock probe outside host RAM: %px", probe);
 
 	memset(probe, TCPCC_MEMBLOCK_PROBE_BYTE, PAGE_SIZE);
