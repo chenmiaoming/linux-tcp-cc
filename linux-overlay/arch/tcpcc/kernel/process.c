@@ -139,6 +139,7 @@ static int tcpcc_task_test_worker(void *arg)
 	unsigned int round;
 
 	slot->owner = current;
+	pr_notice("tcpcc: M3.3 worker %u entered\n", slot->id);
 	complete(&slot->started);
 
 	for (round = 0; round < TCPCC_TASK_TEST_ROUNDS; round++) {
@@ -154,9 +155,15 @@ static int tcpcc_task_test_worker(void *arg)
 		 * Linux clockevent wakeup path as well.
 		 */
 		schedule_timeout_uninterruptible(1);
+
+		if ((round + 1) % 8 == 0)
+			pr_notice("tcpcc: M3.3 worker %u woke through round %u\n",
+				  slot->id, round + 1);
 	}
 
 	complete(&slot->rounds_done);
+	pr_notice("tcpcc: M3.3 worker %u completed sleep/wake rounds\n",
+		  slot->id);
 
 	/* kthread_stop() must wake this task and collect its deterministic rc. */
 	while (!kthread_should_stop()) {
@@ -166,6 +173,7 @@ static int tcpcc_task_test_worker(void *arg)
 		schedule_timeout_uninterruptible(1);
 	}
 
+	pr_notice("tcpcc: M3.3 worker %u observed stop request\n", slot->id);
 	return TCPCC_TASK_TEST_RC_BASE + slot->id;
 }
 
@@ -186,30 +194,37 @@ static int __init tcpcc_task_switch_selftest(void)
 		slot->id = i;
 		slot->rounds = 0;
 
+		pr_notice("tcpcc: M3.3 creating worker %u\n", i);
 		slot->task = kthread_run(tcpcc_task_test_worker, slot,
 					 "tcpcc-m3.3/%u", i);
 		if (IS_ERR(slot->task))
 			panic("tcpcc: failed to create task-test worker %u: %ld",
 			      i, PTR_ERR(slot->task));
+		pr_notice("tcpcc: M3.3 created worker %u\n", i);
 	}
 
 	for (i = 0; i < TCPCC_TASK_TEST_WORKERS; i++) {
 		struct tcpcc_task_test_slot *slot = &tcpcc_task_test[i];
 
+		pr_notice("tcpcc: M3.3 waiting for worker %u first entry\n", i);
 		wait_for_completion(&slot->started);
 		if (slot->owner != slot->task)
 			panic("tcpcc: worker %u current pointer does not match task",
 			      i);
 	}
+	pr_notice("tcpcc: M3.3 all workers entered\n");
 
 	for (i = 0; i < TCPCC_TASK_TEST_WORKERS; i++) {
 		struct tcpcc_task_test_slot *slot = &tcpcc_task_test[i];
 
+		pr_notice("tcpcc: M3.3 waiting for worker %u sleep/wake completion\n",
+			  i);
 		wait_for_completion(&slot->rounds_done);
 		if (READ_ONCE(slot->rounds) != TCPCC_TASK_TEST_ROUNDS)
 			panic("tcpcc: worker %u completed only %u/%u rounds",
 			      i, READ_ONCE(slot->rounds), TCPCC_TASK_TEST_ROUNDS);
 	}
+	pr_notice("tcpcc: M3.3 all workers completed sleep/wake rounds\n");
 
 	/*
 	 * Stop and reap every context before declaring success. kthread_stop()
@@ -219,11 +234,13 @@ static int __init tcpcc_task_switch_selftest(void)
 	for (i = 0; i < TCPCC_TASK_TEST_WORKERS; i++) {
 		struct tcpcc_task_test_slot *slot = &tcpcc_task_test[i];
 
+		pr_notice("tcpcc: M3.3 stopping worker %u\n", i);
 		ret = kthread_stop(slot->task);
 		if (ret != TCPCC_TASK_TEST_RC_BASE + i)
 			panic("tcpcc: worker %u stop returned %d, expected %u",
 			      i, ret, TCPCC_TASK_TEST_RC_BASE + i);
 		slot->task = NULL;
+		pr_notice("tcpcc: M3.3 reaped worker %u with rc %d\n", i, ret);
 	}
 
 	pr_notice("tcpcc: M3.3 task-switch stress passed (%u workers x %u sleep/wake rounds)\n",
