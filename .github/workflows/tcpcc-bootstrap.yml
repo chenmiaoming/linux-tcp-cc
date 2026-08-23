@@ -12,6 +12,7 @@ on:
       - 'scripts/prepare-linux.sh'
       - 'scripts/validate-tcpcc-link.sh'
       - 'scripts/validate-tcpcc-bootstrap.sh'
+      - 'scripts/validate-tcpcc-memory.sh'
       - 'upstream/**'
       - 'protected/**'
   push:
@@ -46,15 +47,16 @@ jobs:
           bash -n scripts/prepare-linux.sh
           bash -n scripts/validate-tcpcc-link.sh
           bash -n scripts/validate-tcpcc-bootstrap.sh
+          bash -n scripts/validate-tcpcc-memory.sh
 
-      - name: Execute hosted start_kernel milestone
-        run: bash scripts/validate-tcpcc-bootstrap.sh
+      - name: Execute hosted M3.1 memory milestone
+        run: bash scripts/validate-tcpcc-memory.sh
 
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m2-3
+          name: tcpcc-bootstrap-m3-1
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-vmlinux.program-headers
