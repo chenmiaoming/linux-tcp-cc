@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 generic-y += cache.h
-generic-y += cacheflush.h
 generic-y += cmpxchg-local.h
 generic-y += cmpxchg.h
 generic-y += extable.h
@@ -15,5 +14,4 @@ generic-y += signal.h
 generic-y += statfs.h
 generic-y += string.h
 generic-y += tlb.h
-generic-y += tlbflush.h
 generic-y += user.h
