@@ -11,6 +11,10 @@
  */
 #include <asm-generic/atomic.h>
 
+/* atomic64_t itself comes from include/linux/types.h on 64-bit architectures;
+ * the architecture still owns its static initializer. */
+#define ATOMIC64_INIT(i) { (i) }
+
 /*
  * Provide the corresponding 64-bit primitives using the same single-vCPU
  * serialization rule. Linux's atomic fallback discovers architecture
