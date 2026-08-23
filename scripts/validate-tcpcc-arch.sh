@@ -14,13 +14,14 @@ make -s -C "$SRC" O="$OUT" ARCH=tcpcc defconfig
 
 # Always print the architecture gating symbols before assertions so a failed
 # CI run explains which Kconfig dependency disabled the port.
-grep -E '^(CONFIG_(TCPCC|64BIT|MMU|SMP|COREDUMP|COMPAT|NR_CPUS|PREEMPT|FLATMEM|GENERIC_ATOMIC64))' \
+grep -E '^(CONFIG_(TCPCC|64BIT|MMU|SMP|COREDUMP|COMPAT|NR_CPUS|PREEMPT|FLATMEM|GENERIC_ATOMIC64|THREAD_INFO_IN_TASK))' \
   "$OUT/.config" | sort || true
 
 required=(
   CONFIG_TCPCC=y
   CONFIG_64BIT=y
   CONFIG_NR_CPUS=1
+  CONFIG_THREAD_INFO_IN_TASK=y
 )
 for opt in "${required[@]}"; do
   if ! grep -qx "$opt" "$OUT/.config"; then
