@@ -12,4 +12,5 @@ generic-y += resource.h
 generic-y += seccomp.h
 generic-y += signal.h
 generic-y += statfs.h
+generic-y += string.h
 generic-y += user.h
