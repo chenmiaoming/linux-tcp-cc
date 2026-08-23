@@ -1,5 +1,6 @@
 diff --git a/arch/tcpcc/Kconfig b/arch/tcpcc/Kconfig
 new file mode 100644
+index 0000000..dc08749
 --- /dev/null
 +++ b/arch/tcpcc/Kconfig
 @@ -0,0 +1,47 @@
@@ -50,32 +51,196 @@ new file mode 100644
 +config BUILTIN_CMDLINE
 +	string "Built-in kernel command string"
 +	default ""
-+diff --git a/arch/tcpcc/Kconfig.debug b/arch/tcpcc/Kconfig.debug
-+new file mode 100644
-+--- /dev/null
-++++ b/arch/tcpcc/Kconfig.debug
-+@@ -0,0 +1 @@
-++# SPDX-License-Identifier: GPL-2.0-only
-+diff --git a/arch/tcpcc/Makefile b/arch/tcpcc/Makefile
-+new file mode 100644
-+--- /dev/null
-++++ b/arch/tcpcc/Makefile
-+@@ -0,0 +1,6 @@
-++# SPDX-License-Identifier: GPL-2.0-only
-++
-++KBUILD_DEFCONFIG := defconfig
-++KBUILD_CFLAGS += -fno-builtin -fPIC
-++
-++core-y += arch/tcpcc/kernel/
-+diff --git a/arch/tcpcc/configs/defconfig b/arch/tcpcc/configs/defconfig
-+new file mode 100644
-+--- /dev/null
-++++ b/arch/tcpcc/configs/defconfig
-+@@ -0,0 +1,7 @@
-++CONFIG_EMBEDDED=y
-++CONFIG_EXPERT=y
-++CONFIG_PRINTK=y
-++CONFIG_BUG=y
-++# CONFIG_MODULES is not set
-++# CONFIG_SMP is not set
-++# CONFIG_NET is not set
+diff --git a/arch/tcpcc/Kconfig.debug b/arch/tcpcc/Kconfig.debug
+new file mode 100644
+index 0000000..a4e40e5
+--- /dev/null
++++ b/arch/tcpcc/Kconfig.debug
+@@ -0,0 +1 @@
++# SPDX-License-Identifier: GPL-2.0-only
+diff --git a/arch/tcpcc/Makefile b/arch/tcpcc/Makefile
+new file mode 100644
+index 0000000..15baccd
+--- /dev/null
++++ b/arch/tcpcc/Makefile
+@@ -0,0 +1,6 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++KBUILD_DEFCONFIG := defconfig
++KBUILD_CFLAGS += -fno-builtin -fPIC
++
++core-y += arch/tcpcc/kernel/
+diff --git a/arch/tcpcc/configs/defconfig b/arch/tcpcc/configs/defconfig
+new file mode 100644
+index 0000000..d105b39
+--- /dev/null
++++ b/arch/tcpcc/configs/defconfig
+@@ -0,0 +1,7 @@
++CONFIG_EMBEDDED=y
++CONFIG_EXPERT=y
++CONFIG_PRINTK=y
++CONFIG_BUG=y
++CONFIG_MODULES=n
++CONFIG_SMP=n
++CONFIG_NET=n
+diff --git a/arch/tcpcc/include/asm/Kbuild b/arch/tcpcc/include/asm/Kbuild
+new file mode 100644
+index 0000000..5ed9671
+--- /dev/null
++++ b/arch/tcpcc/include/asm/Kbuild
+@@ -0,0 +1,15 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++generic-y += cache.h
++generic-y += cmpxchg-local.h
++generic-y += cmpxchg.h
++generic-y += extable.h
++generic-y += ioctl.h
++generic-y += irqflags.h
++generic-y += mcs_spinlock.h
++generic-y += param.h
++generic-y += resource.h
++generic-y += seccomp.h
++generic-y += signal.h
++generic-y += statfs.h
++generic-y += user.h
+diff --git a/arch/tcpcc/include/asm/bitsperlong.h b/arch/tcpcc/include/asm/bitsperlong.h
+new file mode 100644
+index 0000000..a850e33
+--- /dev/null
++++ b/arch/tcpcc/include/asm/bitsperlong.h
+@@ -0,0 +1,7 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_TCPCC_BITSPERLONG_H
++#define _ASM_TCPCC_BITSPERLONG_H
++#include <uapi/asm/bitsperlong.h>
++#define BITS_PER_LONG __BITS_PER_LONG
++#define BITS_PER_LONG_LONG 64
++#endif
+diff --git a/arch/tcpcc/include/asm/byteorder.h b/arch/tcpcc/include/asm/byteorder.h
+new file mode 100644
+index 0000000..1f7d5be
+--- /dev/null
++++ b/arch/tcpcc/include/asm/byteorder.h
+@@ -0,0 +1,5 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_TCPCC_BYTEORDER_H
++#define _ASM_TCPCC_BYTEORDER_H
++#include <linux/byteorder/little_endian.h>
++#endif
+diff --git a/arch/tcpcc/include/asm/page.h b/arch/tcpcc/include/asm/page.h
+new file mode 100644
+index 0000000..eb08c72
+--- /dev/null
++++ b/arch/tcpcc/include/asm/page.h
+@@ -0,0 +1,58 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_TCPCC_PAGE_H
++#define _ASM_TCPCC_PAGE_H
++
++#define PAGE_SHIFT 12
++#define PAGE_SIZE (1UL << PAGE_SHIFT)
++#define PAGE_MASK (~(PAGE_SIZE - 1))
++#define PAGE_OFFSET 0UL
++#define ARCH_PFN_OFFSET 0UL
++
++#ifndef __ASSEMBLY__
++#include <linux/types.h>
++#include <linux/string.h>
++
++#define clear_page(page) memset((page), 0, PAGE_SIZE)
++#define copy_page(to, from) memcpy((to), (from), PAGE_SIZE)
++#define clear_user_page(page, vaddr, pg) clear_page(page)
++#define copy_user_page(to, from, vaddr, pg) copy_page((to), (from))
++
++typedef struct { unsigned long pte; } pte_t;
++typedef struct { unsigned long pmd; } pmd_t;
++typedef struct { unsigned long pgd; } pgd_t;
++typedef struct { unsigned long pgprot; } pgprot_t;
++typedef struct page *pgtable_t;
++
++#define pte_val(x) ((x).pte)
++#define pmd_val(x) ((x).pmd)
++#define pgd_val(x) ((x).pgd)
++#define pgprot_val(x) ((x).pgprot)
++#define __pte(x) ((pte_t){ (x) })
++#define __pmd(x) ((pmd_t){ (x) })
++#define __pgd(x) ((pgd_t){ (x) })
++#define __pgprot(x) ((pgprot_t){ (x) })
++
++#define __pa(x) ((unsigned long)(x))
++#define __va(x) ((void *)((unsigned long)(x)))
++
++static inline unsigned long virt_to_pfn(const void *addr)
++{
++	return __pa(addr) >> PAGE_SHIFT;
++}
++#define virt_to_pfn virt_to_pfn
++
++static inline void *pfn_to_virt(unsigned long pfn)
++{
++	return __va(pfn << PAGE_SHIFT);
++}
++#define pfn_to_virt pfn_to_virt
++
++#define virt_to_page(addr) pfn_to_page(virt_to_pfn(addr))
++#define page_to_virt(page) pfn_to_virt(page_to_pfn(page))
++#define virt_addr_valid(addr) (1)
++#endif
++
++#include <asm-generic/memory_model.h>
++#include <asm-generic/getorder.h>
++
++#endif
+diff --git a/arch/tcpcc/include/asm/processor.h b/arch/tcpcc/include/asm/processor.h
+new file mode 100644
+index 0000000..194a190
+--- /dev/null
++++ b/arch/tcpcc/include/asm/processor.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_TCPCC_PROCESSOR_H
++#define _ASM_TCPCC_PROCESSOR_H
++
++struct task_struct;
++struct pt_regs;
++
++struct thread_struct { };
++#define INIT_THREAD { }
++#define TASK_SIZE (~0UL)
++#define TASK_UNMAPPED_BASE 0UL
++#define KSTK_EIP(tsk) 0UL
++#define KSTK_ESP(tsk) 0UL
++
++static inline void cpu_relax(void) { barrier(); }
++static inline unsigned long thread_saved_pc(struct task_struct *tsk) { return 0; }
++static inline unsigned long __get_wchan(struct task_struct *p) { return 0; }
++static inline void flush_thread(void) { }
++#define task_pt_regs(tsk) ((struct pt_regs *)0)
++
++#endif
+diff --git a/arch/tcpcc/include/asm/setup.h b/arch/tcpcc/include/asm/setup.h
+new file mode 100644
+index 0000000..25ac3d4
+--- /dev/null
++++ b/arch/tcpcc/include/asm/setup.h
+@@ -0,0 +1,5 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_TCPCC_SETUP_H
++#define _ASM_TCPCC_SETUP_H
++#define COMMAND_LINE_SIZE 4096
++#endif
+diff --git a/arch/tcpccc/include/asm/thread_info.h b/arch/tcpcc/include/asm/thread_info.h
+new file mode 100644
+index 0000000..db9a3fb
+--- /dev/null
++++ b/arch/tcpcc/include/asm/thread_info.h
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _ASM_TCPCC_THREAD_INFO_H
++#define _ASM_TCPCC_THREAD_INFO_H
++
++#define THREAD_SIZE 4096
++
++#ifndef __ASSEMBLY__
++#include <linux/types.h>
