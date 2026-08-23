@@ -2,13 +2,13 @@
 #include <linux/compiler.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/panic.h>
 #include <asm/irqflags.h>
 
 /*
- * The runtime still models one Linux vCPU.  M3.4 will connect host event
- * delivery to this state; host signals/threads must not enter Linux
- * asynchronously before that boundary exists.
+ * The runtime still models one Linux vCPU. M3.2 timer delivery is deliberately
+ * synchronous: host timer expiry becomes pending state and is dispatched only
+ * from an explicit safe point. M3.4 will connect the general host event loop to
+ * this local IRQ state and add non-timer IRQ/softirq delivery.
  */
 static unsigned long tcpcc_irq_state = ARCH_IRQ_ENABLED;
 
@@ -24,13 +24,7 @@ void arch_local_irq_restore(unsigned long flags)
 
 void __init init_IRQ(void)
 {
-	/*
-	 * M3.1 stops here deliberately. Reaching this architecture hook proves
-	 * that start_kernel() has completed generic MM, scheduler, workqueue and
-	 * early RCU initialization using the host-backed memory arena. M3.2-M3.4
-	 * replace this stop with timer/task/IRQ runtime semantics.
-	 */
-	panic("tcpcc: M3.1 reached IRQ boundary after host-backed MM init");
+	/* M3.2 needs no generic host IRQ lines; the timer is a clockevent source. */
 }
 
 int show_interrupts(struct seq_file *p, void *v)

@@ -9,13 +9,24 @@
 /*
  * tcpcc host boundary.
  *
- * The architecture is currently tied to an x86-64 Linux host process.  Keep
+ * The architecture is currently tied to an x86-64 Linux host process. Keep
  * these primitives private to arch/tcpcc: Linux core/TCP code must observe
  * normal kernel memory, time and scheduling semantics rather than host APIs.
  */
 void tcpcc_host_write(const char *buf, size_t len);
 void __noreturn tcpcc_host_exit(int status);
 void *__init tcpcc_host_map_anon(size_t len);
+
+/*
+ * M3.2 host time/event primitives. The timer fd is only a wakeup source: host
+ * execution must never enter Linux asynchronously. The single Linux vCPU
+ * explicitly waits for an expiration and dispatches it from a safe point.
+ */
+u64 tcpcc_host_monotonic_ns(void);
+int __init tcpcc_host_timer_create(void);
+int tcpcc_host_timer_arm(int fd, u64 delta_ns);
+int tcpcc_host_timer_cancel(int fd);
+int tcpcc_host_timer_wait(int fd, u64 *expirations);
 
 void __init tcpcc_host_console_init(void);
 void __init tcpcc_host_install_panic_exit(void);

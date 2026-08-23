@@ -8,15 +8,35 @@
 #endif
 
 /* Linux x86-64 host syscall ABI. Keep this private to arch/tcpcc. */
-#define TCPCC_HOST_NR_WRITE       1
-#define TCPCC_HOST_NR_MMAP        9
-#define TCPCC_HOST_NR_EXIT_GROUP  231
-#define TCPCC_HOST_STDERR_FILENO  2
+#define TCPCC_HOST_NR_READ            0
+#define TCPCC_HOST_NR_WRITE           1
+#define TCPCC_HOST_NR_MMAP            9
+#define TCPCC_HOST_NR_CLOCK_GETTIME   228
+#define TCPCC_HOST_NR_EXIT_GROUP      231
+#define TCPCC_HOST_NR_TIMERFD_CREATE  283
+#define TCPCC_HOST_NR_TIMERFD_SETTIME 286
+#define TCPCC_HOST_STDERR_FILENO      2
+
+#define TCPCC_HOST_CLOCK_MONOTONIC 1
+#define TCPCC_HOST_EINTR            4
+#define TCPCC_HOST_EIO              5
 
 #define TCPCC_HOST_PROT_READ      0x1
 #define TCPCC_HOST_PROT_WRITE     0x2
 #define TCPCC_HOST_MAP_PRIVATE    0x02
 #define TCPCC_HOST_MAP_ANONYMOUS  0x20
+
+#define TCPCC_HOST_NSEC_PER_SEC 1000000000ULL
+
+struct tcpcc_host_timespec {
+	long tv_sec;
+	long tv_nsec;
+};
+
+struct tcpcc_host_itimerspec {
+	struct tcpcc_host_timespec it_interval;
+	struct tcpcc_host_timespec it_value;
+};
 
 static __always_inline long tcpcc_host_syscall1(long nr, long arg0)
 {
@@ -29,6 +49,18 @@ static __always_inline long tcpcc_host_syscall1(long nr, long arg0)
 	return ret;
 }
 
+static __always_inline long tcpcc_host_syscall2(long nr, long arg0,
+					 long arg1)
+{
+	long ret;
+
+	asm volatile("syscall"
+		     : "=a" (ret)
+		     : "a" (nr), "D" (arg0), "S" (arg1)
+		     : "rcx", "r11", "memory");
+	return ret;
+}
+
 static __always_inline long tcpcc_host_syscall3(long nr, long arg0,
 					 long arg1, long arg2)
 {
@@ -37,6 +69,20 @@ static __always_inline long tcpcc_host_syscall3(long nr, long arg0,
 	asm volatile("syscall"
 		     : "=a" (ret)
 		     : "a" (nr), "D" (arg0), "S" (arg1), "d" (arg2)
+		     : "rcx", "r11", "memory");
+	return ret;
+}
+
+static __always_inline long tcpcc_host_syscall4(long nr, long arg0,
+					 long arg1, long arg2, long arg3)
+{
+	register long r10 asm("r10") = arg3;
+	long ret;
+
+	asm volatile("syscall"
+		     : "=a" (ret)
+		     : "a" (nr), "D" (arg0), "S" (arg1), "d" (arg2),
+		       "r" (r10)
 		     : "rcx", "r11", "memory");
 	return ret;
 }
@@ -87,6 +133,60 @@ void *__init tcpcc_host_map_anon(size_t len)
 		return NULL;
 
 	return (void *)ret;
+}
+
+u64 tcpcc_host_monotonic_ns(void)
+{
+	struct tcpcc_host_timespec ts;
+	long ret;
+
+	ret = tcpcc_host_syscall2(TCPCC_HOST_NR_CLOCK_GETTIME,
+				  TCPCC_HOST_CLOCK_MONOTONIC, (long)&ts);
+	if (unlikely(ret < 0 || ts.tv_sec < 0 || ts.tv_nsec < 0 ||
+		     ts.tv_nsec >= TCPCC_HOST_NSEC_PER_SEC))
+		tcpcc_host_exit(88);
+
+	return (u64)ts.tv_sec * TCPCC_HOST_NSEC_PER_SEC + (u64)ts.tv_nsec;
+}
+
+int __init tcpcc_host_timer_create(void)
+{
+	return (int)tcpcc_host_syscall2(TCPCC_HOST_NR_TIMERFD_CREATE,
+					TCPCC_HOST_CLOCK_MONOTONIC, 0);
+}
+
+int tcpcc_host_timer_arm(int fd, u64 delta_ns)
+{
+	struct tcpcc_host_itimerspec spec = { };
+	long ret;
+
+	spec.it_value.tv_sec = delta_ns / TCPCC_HOST_NSEC_PER_SEC;
+	spec.it_value.tv_nsec = delta_ns % TCPCC_HOST_NSEC_PER_SEC;
+
+	ret = tcpcc_host_syscall4(TCPCC_HOST_NR_TIMERFD_SETTIME, fd, 0,
+				  (long)&spec, 0);
+	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_timer_cancel(int fd)
+{
+	return tcpcc_host_timer_arm(fd, 0);
+}
+
+int tcpcc_host_timer_wait(int fd, u64 *expirations)
+{
+	long ret;
+
+	do {
+		ret = tcpcc_host_syscall3(TCPCC_HOST_NR_READ, fd,
+					 (long)expirations, sizeof(*expirations));
+	} while (ret == -TCPCC_HOST_EINTR);
+
+	if (ret < 0)
+		return (int)ret;
+	if (ret != sizeof(*expirations))
+		return -TCPCC_HOST_EIO;
+	return 0;
 }
 
 void __noreturn tcpcc_host_exit(int status)
