@@ -5,10 +5,8 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irqflags.h>
-#include <linux/jiffies.h>
 #include <linux/panic.h>
 #include <linux/printk.h>
-#include <linux/sched.h>
 #include <linux/timekeeping.h>
 #include <asm/host.h>
 #include <asm/irq_regs.h>
@@ -25,9 +23,6 @@
 static int tcpcc_timer_fd = -1;
 static unsigned int tcpcc_test_fired;
 static u64 tcpcc_test_fired_ns;
-static bool tcpcc_m33_trace;
-static unsigned int tcpcc_m33_program_trace;
-static unsigned int tcpcc_m33_idle_trace;
 
 static u64 tcpcc_clocksource_read(struct clocksource *cs)
 {
@@ -42,12 +37,6 @@ static struct clocksource tcpcc_clocksource = {
 	.flags = CLOCK_SOURCE_IS_CONTINUOUS,
 };
 
-/*
- * timekeeping_init() asks the architecture for its default clocksource before
- * time_init() runs. Override the weak jiffies fallback so Linux monotonic time
- * is host CLOCK_MONOTONIC-backed from the first timekeeper setup, rather than
- * switching clocks later in boot.
- */
 struct clocksource *__init clocksource_default_clock(void)
 {
 	static bool registered;
@@ -78,20 +67,10 @@ static int tcpcc_clockevent_oneshot(struct clock_event_device *evt)
 static int tcpcc_clockevent_next(unsigned long delta,
 				 struct clock_event_device *evt)
 {
-	int ret;
-
 	/* timerfd value zero means disarm, never a zero-length event. */
 	if (!delta)
 		delta = 1;
-
-	ret = tcpcc_host_timer_arm(tcpcc_timer_fd, delta);
-	if (tcpcc_m33_trace && tcpcc_m33_program_trace < 8) {
-		pr_notice("tcpcc: M3.3 clockevent program #%u delta=%lu ns ret=%d\n",
-			  tcpcc_m33_program_trace, delta, ret);
-		tcpcc_m33_program_trace++;
-	}
-
-	return ret;
+	return tcpcc_host_timer_arm(tcpcc_timer_fd, delta);
 }
 
 static struct clock_event_device tcpcc_clockevent = {
@@ -105,12 +84,11 @@ static struct clock_event_device tcpcc_clockevent = {
 };
 
 /*
- * timerfd expiry is level-like pending state in the host. The one Linux vCPU
- * blocks only at an explicit safe point, then enters the normal Linux
- * clockevent handler with local IRQs masked and hardirq accounting active.
- * M3.4/#27 will fold this fd into the general host IRQ/softirq event loop.
+ * Consume one pending timerfd expiration and enter the normal Linux clockevent
+ * path. M3.4 calls this from the shared host event dispatcher; the M3.2 early
+ * selftest also invokes it directly before the scheduler event loop is active.
  */
-static void tcpcc_timer_wait_and_dispatch(void)
+void tcpcc_timer_dispatch(void)
 {
 	struct pt_regs regs = { 0 };
 	struct pt_regs *old_regs;
@@ -130,11 +108,9 @@ static void tcpcc_timer_wait_and_dispatch(void)
 		panic("tcpcc: clockevent fired before handler installation");
 
 	/*
-	 * High-resolution tick handling deliberately skips update_process_times()
-	 * when get_irq_regs() is NULL. A real architecture IRQ entry publishes a
-	 * pt_regs frame before irq_enter(); do the same for this synthetic hosted
-	 * timer interrupt so the generic tick path advances timer-wheel, scheduler
-	 * and accounting state exactly as it would for a hardware interrupt.
+	 * High-resolution tick handling only runs update_process_times() when an
+	 * IRQ register frame is published. Model a real architecture IRQ entry so
+	 * timer-wheel, scheduler and softirq semantics remain generic Linux code.
 	 */
 	local_irq_save(flags);
 	old_regs = set_irq_regs(&regs);
@@ -143,35 +119,6 @@ static void tcpcc_timer_wait_and_dispatch(void)
 	irq_exit();
 	set_irq_regs(old_regs);
 	local_irq_restore(flags);
-}
-
-void tcpcc_host_idle_wait(void)
-{
-	unsigned int trace = tcpcc_m33_idle_trace;
-	unsigned long before_jiffies = jiffies;
-
-	/*
-	 * default_idle_call() reaches arch_cpu_idle() with local IRQs disabled.
-	 * No host callback can race this transition: expiration merely becomes
-	 * readable on timerfd. Enable the Linux IRQ state first, then consume and
-	 * synchronously dispatch that pending event.
-	 */
-	if (!irqs_disabled())
-		panic("tcpcc: hosted idle wait entered with local IRQs enabled");
-
-	if (tcpcc_m33_trace && trace < 4) {
-		pr_notice("tcpcc: M3.3 idle wait #%u entering timerfd wait jiffies=%lu\n",
-			  trace, before_jiffies);
-		tcpcc_m33_idle_trace++;
-	}
-
-	local_irq_enable();
-	tcpcc_timer_wait_and_dispatch();
-
-	if (tcpcc_m33_trace && trace < 4)
-		pr_notice("tcpcc: M3.3 idle wait #%u dispatched: jiffies=%lu->%lu softirq=0x%x need_resched=%d\n",
-			  trace, before_jiffies, jiffies,
-			  local_softirq_pending(), need_resched());
 }
 
 static enum hrtimer_restart tcpcc_timer_test_callback(struct hrtimer *timer)
@@ -191,18 +138,12 @@ static void __init tcpcc_timer_selftest(void)
 	hrtimer_setup(&timer, tcpcc_timer_test_callback, CLOCK_MONOTONIC,
 		      HRTIMER_MODE_REL);
 
-	/*
-	 * The clockevent is registered while early boot IRQs are disabled. Its
-	 * first periodic-emulation event is therefore already pending (or armed)
-	 * when late_time_init runs. Deliver it now so hrtimer_run_queues() can
-	 * perform Linux's normal transition into high-resolution mode.
-	 */
 	clock_start = ktime_get_ns();
 	for (dispatches = 0;
 	     dispatches < TCPCC_TIMER_MAX_DISPATCHES &&
 	     !hrtimer_is_hres_active(&timer);
 	     dispatches++)
-		tcpcc_timer_wait_and_dispatch();
+		tcpcc_timer_dispatch();
 
 	if (!hrtimer_is_hres_active(&timer))
 		panic("tcpcc: Linux hrtimer core did not enter high-resolution mode");
@@ -211,12 +152,6 @@ static void __init tcpcc_timer_selftest(void)
 	if (clock_end <= clock_start)
 		panic("tcpcc: host monotonic time did not advance");
 
-	/*
-	 * Exercise the Linux hrtimer -> clockevent -> timerfd path repeatedly.
-	 * Each round first arms a later timer and cancels it, then rearms the same
-	 * hrtimer for a 1ms expiration. Exactly one callback must be observed and
-	 * it must not run before its requested host-monotonic deadline.
-	 */
 	for (round = 0; round < TCPCC_TIMER_TEST_ROUNDS; round++) {
 		before = tcpcc_test_fired;
 		hrtimer_start(&timer, ns_to_ktime(TCPCC_TIMER_CANCEL_DELAY_NS),
@@ -233,7 +168,7 @@ static void __init tcpcc_timer_selftest(void)
 		     dispatches < TCPCC_TIMER_MAX_DISPATCHES &&
 		     tcpcc_test_fired == before;
 		     dispatches++)
-			tcpcc_timer_wait_and_dispatch();
+			tcpcc_timer_dispatch();
 
 		if (tcpcc_test_fired != before + 1)
 			panic("tcpcc: hrtimer round %u fired %u times",
@@ -253,17 +188,21 @@ static void __init tcpcc_timer_selftest(void)
 
 	pr_notice("tcpcc: M3.2 one-shot hrtimer stress passed (%u rounds, worst lateness %llu ns)\n",
 		  TCPCC_TIMER_TEST_ROUNDS, (unsigned long long)worst_late);
-
-	/* Enable bounded diagnostics only after the M3.2 test traffic is done. */
-	tcpcc_m33_trace = true;
 }
 
 void __init time_init(void)
 {
+	int ret;
+
 	tcpcc_timer_fd = tcpcc_host_timer_create();
 	if (tcpcc_timer_fd < 0)
 		panic("tcpcc: timerfd_create(CLOCK_MONOTONIC) failed: %d",
 		      tcpcc_timer_fd);
+
+	ret = tcpcc_host_event_add(tcpcc_timer_fd, TCPCC_HOST_EVENT_TIMER);
+	if (ret)
+		panic("tcpcc: failed to register timerfd with host event loop: %d",
+		      ret);
 
 	clockevents_config_and_register(&tcpcc_clockevent, TCPCC_CLOCK_HZ,
 					TCPCC_TIMER_MIN_DELTA_NS,
