@@ -10,11 +10,16 @@ possible architecture contract and aggressive use of `asm-generic`.
 
 Exit criteria:
 
-- `make ARCH=tcpcc defconfig` succeeds against the pinned Linux 6.18.y tree.
-- `make ARCH=tcpcc prepare` succeeds.
+- project-owned architecture sources live under `linux-overlay/arch/tcpcc/`;
+- `make ARCH=tcpcc defconfig` succeeds against the pinned Linux 6.18.y tree;
+- `make ARCH=tcpcc prepare` succeeds;
 - the architecture is single-CPU, 64-bit, little-endian, no-MMU for the first
   bring-up iteration;
 - no TCP/congestion-control source is modified.
+
+`linux-overlay/` is append-only relative to pristine upstream Linux. Any change
+to a path that already exists upstream must be an explicit patch in
+`patches/series`; `prepare-linux.sh` rejects overlay collisions.
 
 ## M2.2 — Link and early kernel substrate
 
