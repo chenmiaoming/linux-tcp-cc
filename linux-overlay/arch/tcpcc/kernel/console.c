@@ -16,7 +16,13 @@ static void tcpcc_console_write(struct console *con, const char *s,
 static struct console tcpcc_host_console = {
 	.name = "tcpcc",
 	.write = tcpcc_console_write,
-	.flags = CON_PRINTBUFFER | CON_BOOT | CON_ANYTIME | CON_ENABLED,
+	/*
+	 * This is the hosted kernel's persistent diagnostic console, not a
+	 * temporary boot console.  CON_BOOT makes the generic console core
+	 * unregister it when tty0 appears during console_init(), which hides all
+	 * later milestone diagnostics from the host/CI log.
+	 */
+	.flags = CON_PRINTBUFFER | CON_ANYTIME | CON_ENABLED,
 	.index = -1,
 };
 
