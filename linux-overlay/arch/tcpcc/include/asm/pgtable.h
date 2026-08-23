@@ -25,7 +25,8 @@
 
 #define swapper_pg_dir ((pgd_t *)0)
 
-extern void *empty_zero_page;
+/* setup.c provides one page-sized, page-aligned shared zero page. */
+extern unsigned long empty_zero_page[];
 #define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
 
 /* No separate vmalloc/kmap address space exists in the NOMMU hosted model. */
