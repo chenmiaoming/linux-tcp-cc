@@ -10,6 +10,7 @@
 /* Linux x86-64 host syscall ABI. Keep this private to arch/tcpcc. */
 #define TCPCC_HOST_NR_READ            0
 #define TCPCC_HOST_NR_WRITE           1
+#define TCPCC_HOST_NR_CLOSE           3
 #define TCPCC_HOST_NR_MMAP            9
 #define TCPCC_HOST_NR_EPOLL_WAIT      232
 #define TCPCC_HOST_NR_EPOLL_CTL       233
@@ -29,7 +30,7 @@
 #define TCPCC_HOST_MAP_PRIVATE    0x02
 #define TCPCC_HOST_MAP_ANONYMOUS  0x20
 
-#define TCPCC_HOST_EPOLLIN      0x001
+#define TCPCC_HOST_EPOLLIN       0x001
 #define TCPCC_HOST_EPOLL_CTL_ADD 1
 #define TCPCC_HOST_EPOLL_CTL_DEL 2
 
@@ -134,6 +135,13 @@ void tcpcc_host_write(const char *buf, size_t len)
 		buf += ret;
 		len -= ret;
 	}
+}
+
+int tcpcc_host_close(int fd)
+{
+	long ret = tcpcc_host_syscall1(TCPCC_HOST_NR_CLOSE, fd);
+
+	return ret < 0 ? (int)ret : 0;
 }
 
 void *__init tcpcc_host_map_anon(size_t len)
