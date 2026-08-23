@@ -33,6 +33,11 @@ if [[ "$actual_version" != "$LINUX_VERSION" ]]; then
 fi
 
 resolved_commit="$(git -C "$SRC" rev-parse HEAD)"
+if [[ "$resolved_commit" != "$LINUX_COMMIT" ]]; then
+  echo "upstream commit mismatch: expected $LINUX_COMMIT, got $resolved_commit" >&2
+  exit 1
+fi
+
 tag_type="$(git -C "$SRC" cat-file -t "$LINUX_TAG")"
 if [[ "$tag_type" != "tag" ]]; then
   echo "$LINUX_TAG is not an annotated upstream tag" >&2
