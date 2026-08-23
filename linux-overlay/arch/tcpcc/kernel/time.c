@@ -11,6 +11,8 @@
 #include <linux/sched.h>
 #include <linux/timekeeping.h>
 #include <asm/host.h>
+#include <asm/irq_regs.h>
+#include <asm/ptrace.h>
 
 #define TCPCC_CLOCK_HZ              NSEC_PER_SEC
 #define TCPCC_TIMER_MIN_DELTA_NS    1000UL
@@ -110,6 +112,8 @@ static struct clock_event_device tcpcc_clockevent = {
  */
 static void tcpcc_timer_wait_and_dispatch(void)
 {
+	struct pt_regs regs = { 0 };
+	struct pt_regs *old_regs;
 	u64 expirations;
 	unsigned long flags;
 	int ret;
@@ -125,10 +129,19 @@ static void tcpcc_timer_wait_and_dispatch(void)
 	if (!tcpcc_clockevent.event_handler)
 		panic("tcpcc: clockevent fired before handler installation");
 
+	/*
+	 * High-resolution tick handling deliberately skips update_process_times()
+	 * when get_irq_regs() is NULL. A real architecture IRQ entry publishes a
+	 * pt_regs frame before irq_enter(); do the same for this synthetic hosted
+	 * timer interrupt so the generic tick path advances timer-wheel, scheduler
+	 * and accounting state exactly as it would for a hardware interrupt.
+	 */
 	local_irq_save(flags);
+	old_regs = set_irq_regs(&regs);
 	irq_enter();
 	tcpcc_clockevent.event_handler(&tcpcc_clockevent);
 	irq_exit();
+	set_irq_regs(old_regs);
 	local_irq_restore(flags);
 }
 
