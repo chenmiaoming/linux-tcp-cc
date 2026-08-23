@@ -88,11 +88,10 @@ static struct clock_event_device tcpcc_clockevent = {
 };
 
 /*
- * M3.2 deliberately has no asynchronous host -> Linux entry. timerfd expiry is
- * level-like pending state in the host. The one Linux vCPU blocks here only at
- * an explicit safe point, then enters the normal Linux clockevent handler with
- * local IRQs masked and hardirq accounting active. M3.4 will fold this fd into
- * the general IRQ/softirq event loop.
+ * timerfd expiry is level-like pending state in the host. The one Linux vCPU
+ * blocks only at an explicit safe point, then enters the normal Linux
+ * clockevent handler with local IRQs masked and hardirq accounting active.
+ * M3.4/#27 will fold this fd into the general host IRQ/softirq event loop.
  */
 static void tcpcc_timer_wait_and_dispatch(void)
 {
@@ -116,6 +115,21 @@ static void tcpcc_timer_wait_and_dispatch(void)
 	tcpcc_clockevent.event_handler(&tcpcc_clockevent);
 	irq_exit();
 	local_irq_restore(flags);
+}
+
+void tcpcc_host_idle_wait(void)
+{
+	/*
+	 * default_idle_call() reaches arch_cpu_idle() with local IRQs disabled.
+	 * No host callback can race this transition: expiration merely becomes
+	 * readable on timerfd. Enable the Linux IRQ state first, then consume and
+	 * synchronously dispatch that pending event.
+	 */
+	if (!irqs_disabled())
+		panic("tcpcc: hosted idle wait entered with local IRQs enabled");
+
+	local_irq_enable();
+	tcpcc_timer_wait_and_dispatch();
 }
 
 static enum hrtimer_restart tcpcc_timer_test_callback(struct hrtimer *timer)
@@ -197,7 +211,6 @@ static void __init tcpcc_timer_selftest(void)
 
 	pr_notice("tcpcc: M3.2 one-shot hrtimer stress passed (%u rounds, worst lateness %llu ns)\n",
 		  TCPCC_TIMER_TEST_ROUNDS, (unsigned long long)worst_late);
-	panic("tcpcc: M3.2 reached timer boundary after hrtimer stress");
 }
 
 void __init time_init(void)
