@@ -20,6 +20,12 @@ on:
 permissions:
   contents: read
 
+# Full kernel builds are expensive. Keep only the newest link validation for a
+# given PR/ref; a newer commit supersedes any in-flight result from the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   vmlinux:
     runs-on: ubuntu-latest
