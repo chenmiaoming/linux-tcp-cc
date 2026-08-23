@@ -23,8 +23,7 @@ require_log 'tcpcc: M3.1 host RAM [0x1000000-0x2000000), kernel image '
 require_log 'tcpcc: M3.1 memblock probe passed at '
 require_log 'Kernel panic - not syncing: tcpcc: M3.1 deterministic stop after memblock bootstrap'
 
-if grep -Fq 'tcpcc: host RAM mapping [' "$BOOT_LOG" && \
-   grep -Fq ' failed:' "$BOOT_LOG"; then
+if grep -Eq 'tcpcc: host RAM mapping \[[^]]+\) failed:' "$BOOT_LOG"; then
   echo "host RAM mapping reported a failure" >&2
   exit 1
 fi
