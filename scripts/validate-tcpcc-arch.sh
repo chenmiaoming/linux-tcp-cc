@@ -14,7 +14,7 @@ make -s -C "$SRC" O="$OUT" ARCH=tcpcc defconfig
 
 # Always print the architecture gating symbols before assertions so a failed
 # CI run explains which Kconfig dependency disabled the port.
-grep -E '^(CONFIG_(TCPCC|64BIT|MMU|SMP|COREDUMP|COMPAT|NR_CPUS|PREEMPT|FLATMEM))' \
+grep -E '^(CONFIG_(TCPCC|64BIT|MMU|SMP|COREDUMP|COMPAT|NR_CPUS|PREEMPT|FLATMEM|GENERIC_ATOMIC64))' \
   "$OUT/.config" | sort || true
 
 required=(
@@ -35,6 +35,10 @@ if grep -qx 'CONFIG_SMP=y' "$OUT/.config"; then
 fi
 if grep -qx 'CONFIG_MMU=y' "$OUT/.config"; then
   echo "M2.1 requires the initial no-MMU bring-up configuration" >&2
+  exit 1
+fi
+if grep -qx 'CONFIG_GENERIC_ATOMIC64=y' "$OUT/.config"; then
+  echo "64-bit tcpcc must provide atomic64 primitives instead of GENERIC_ATOMIC64" >&2
   exit 1
 fi
 
