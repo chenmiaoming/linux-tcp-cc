@@ -21,6 +21,9 @@
 static int tcpcc_timer_fd = -1;
 static unsigned int tcpcc_test_fired;
 static u64 tcpcc_test_fired_ns;
+static bool tcpcc_m33_trace;
+static unsigned int tcpcc_m33_program_trace;
+static unsigned int tcpcc_m33_idle_trace;
 
 static u64 tcpcc_clocksource_read(struct clocksource *cs)
 {
@@ -71,10 +74,20 @@ static int tcpcc_clockevent_oneshot(struct clock_event_device *evt)
 static int tcpcc_clockevent_next(unsigned long delta,
 				 struct clock_event_device *evt)
 {
+	int ret;
+
 	/* timerfd value zero means disarm, never a zero-length event. */
 	if (!delta)
 		delta = 1;
-	return tcpcc_host_timer_arm(tcpcc_timer_fd, delta);
+
+	ret = tcpcc_host_timer_arm(tcpcc_timer_fd, delta);
+	if (tcpcc_m33_trace && tcpcc_m33_program_trace < 8) {
+		pr_notice("tcpcc: M3.3 clockevent program #%u delta=%lu ns ret=%d\n",
+			  tcpcc_m33_program_trace, delta, ret);
+		tcpcc_m33_program_trace++;
+	}
+
+	return ret;
 }
 
 static struct clock_event_device tcpcc_clockevent = {
@@ -119,6 +132,8 @@ static void tcpcc_timer_wait_and_dispatch(void)
 
 void tcpcc_host_idle_wait(void)
 {
+	unsigned int trace = tcpcc_m33_idle_trace;
+
 	/*
 	 * default_idle_call() reaches arch_cpu_idle() with local IRQs disabled.
 	 * No host callback can race this transition: expiration merely becomes
@@ -128,8 +143,16 @@ void tcpcc_host_idle_wait(void)
 	if (!irqs_disabled())
 		panic("tcpcc: hosted idle wait entered with local IRQs enabled");
 
+	if (tcpcc_m33_trace && trace < 4) {
+		pr_notice("tcpcc: M3.3 idle wait #%u entering timerfd wait\n", trace);
+		tcpcc_m33_idle_trace++;
+	}
+
 	local_irq_enable();
 	tcpcc_timer_wait_and_dispatch();
+
+	if (tcpcc_m33_trace && trace < 4)
+		pr_notice("tcpcc: M3.3 idle wait #%u dispatched timer event\n", trace);
 }
 
 static enum hrtimer_restart tcpcc_timer_test_callback(struct hrtimer *timer)
@@ -211,6 +234,9 @@ static void __init tcpcc_timer_selftest(void)
 
 	pr_notice("tcpcc: M3.2 one-shot hrtimer stress passed (%u rounds, worst lateness %llu ns)\n",
 		  TCPCC_TIMER_TEST_ROUNDS, (unsigned long long)worst_late);
+
+	/* Enable bounded diagnostics only after the M3.2 test traffic is done. */
+	tcpcc_m33_trace = true;
 }
 
 void __init time_init(void)
