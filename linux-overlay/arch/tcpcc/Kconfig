@@ -3,7 +3,6 @@
 config TCPCC
 	def_bool y
 	depends on !SMP && !COREDUMP && !COMPAT
-	select ARCH_THREAD_STACK_ALLOCATOR
 	select FLATMEM
 	select GENERIC_CALIBRATE_DELAY
 	select GENERIC_CLOCKEVENTS
