@@ -3,17 +3,12 @@
 #define _UAPI_ASM_TCPCC_SIGCONTEXT_H
 
 /*
- * Minimal hosted-kernel signal context for the M2 bring-up. tcpcc does not
- * expose a userspace register ABI yet; this mirrors the narrow shape used by
- * LKL until task/context semantics are implemented in a later milestone.
+ * tcpcc currently has no guest userspace execution ABI. Keep the mandatory
+ * UAPI signal-context type deliberately opaque until such an ABI is designed;
+ * kernel pt_regs belongs to the internal asm/ptrace.h contract instead.
  */
-struct pt_regs {
-	void *irq_data;
-};
-
 struct sigcontext {
-	struct pt_regs regs;
-	unsigned long oldmask;
+	unsigned long reserved;
 };
 
-#endif
+#endif /* _UAPI_ASM_TCPCC_SIGCONTEXT_H */
