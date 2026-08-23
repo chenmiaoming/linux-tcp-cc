@@ -2,9 +2,13 @@
 #ifndef _ASM_TCPCC_THREAD_INFO_H
 #define _ASM_TCPCC_THREAD_INFO_H
 
-/* M2 uses one 4 KiB kernel stack page per task. */
-#define THREAD_SIZE_ORDER 0
-#define THREAD_SIZE 4096
+/*
+ * Hosted kernel threads execute ordinary Linux scheduler/kthread call chains.
+ * Use a 16 KiB stack, matching the practical x86-64 kernel-stack scale rather
+ * than the 4 KiB M2 link/bootstrap placeholder.
+ */
+#define THREAD_SIZE_ORDER 2
+#define THREAD_SIZE 16384
 
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
