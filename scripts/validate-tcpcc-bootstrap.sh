@@ -16,7 +16,14 @@ LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
 grep -Fx 'CONFIG_HIGH_RES_TIMERS=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_NET=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_INET=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_TCP_CONG_ADVANCED=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_TCP_CONG_CUBIC=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_TCP_CONG_BBR=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_NET_SCHED=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_NET_SCH_FQ=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_NET_SCH_DEFAULT=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_DEFAULT_FQ=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_DEFAULT_NET_SCH="fq"' "$OUT/.config" >/dev/null
 
 readelf -lW "$OUT/vmlinux" > "$ELF_PROGRAM_HEADERS"
 if ! readelf -hW "$OUT/vmlinux" | grep -Eq 'Type:[[:space:]]+EXEC'; then
@@ -39,7 +46,7 @@ fi
 rm -f "$BOOT_LOG" "$CONTROL_RESPONSES" "$STRACE_LOG" "$STRACE_LOG".*
 chmod u+x "$OUT/vmlinux"
 strace -ff -ttt -s 256 -o "$STRACE_LOG" \
-  python3 "$ROOT/scripts/run-tcpcc-m5-diagnostic.py" \
+  python3 "$ROOT/scripts/run-tcpcc-m6-diagnostic.py" \
     --kernel "$OUT/vmlinux" \
     --boot-log "$BOOT_LOG" \
     --responses "$CONTROL_RESPONSES"
@@ -92,4 +99,4 @@ if grep -Fq 'tcpcc: M4.2 reached userspace control boundary after native TCP/CC 
 fi
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M5.1 hosted L3 netdevice and packet-fd validation succeeded\n'
+printf 'M6.1 hosted native BBR/default-fq configuration and packet-fd validation succeeded\n'
