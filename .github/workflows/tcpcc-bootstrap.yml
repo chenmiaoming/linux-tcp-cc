@@ -55,17 +55,17 @@ jobs:
           python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
           python3 -m py_compile scripts/run-tcpcc-tun-test.py
 
-      - name: Execute hosted M6.1 native BBR/default-fq milestone
+      - name: Execute hosted M6.1 native BBR/default-fq regression
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
-      - name: Execute hosted M5.2 real TUN regression
+      - name: Execute hosted M6.2 external TUN TCP milestone
         run: bash scripts/validate-tcpcc-tun.sh
 
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m6-1
+          name: tcpcc-bootstrap-m6-2
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-control.responses
@@ -73,6 +73,7 @@ jobs:
             .build/tcpcc-tun-bootstrap.log
             .build/tcpcc-tun-control.responses
             .build/tcpcc-tun-ping.log
+            .build/tcpcc-tun-tcp.log
             .build/tcpcc-tun-link.txt
             .build/tcpcc-vmlinux.program-headers
             .build/tcpcc-vmlinux.elf-header
