@@ -12,6 +12,7 @@ on:
       - 'scripts/prepare-linux.sh'
       - 'scripts/validate-tcpcc-link.sh'
       - 'scripts/validate-tcpcc-bootstrap.sh'
+      - 'scripts/run-tcpcc-control-test.py'
       - 'upstream/**'
       - 'protected/**'
   push:
@@ -46,17 +47,19 @@ jobs:
           bash -n scripts/prepare-linux.sh
           bash -n scripts/validate-tcpcc-link.sh
           bash -n scripts/validate-tcpcc-bootstrap.sh
+          python3 -m py_compile scripts/run-tcpcc-control-test.py
 
-      - name: Execute hosted M4.1 loopback TCP milestone
+      - name: Execute hosted M4.2 userspace TCP control milestone
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m4-1
+          name: tcpcc-bootstrap-m4-2
           path: |
             .build/tcpcc-bootstrap.log
+            .build/tcpcc-control.responses
             .build/tcpcc-vmlinux.program-headers
             .build/tcpcc-vmlinux.elf-header
             .build/tcpcc-link.env
