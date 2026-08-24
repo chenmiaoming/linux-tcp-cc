@@ -23,6 +23,7 @@ ssize_t tcpcc_host_write_fd(int fd, const void *buf, size_t len);
 void __noreturn tcpcc_host_exit(int status);
 void *__init tcpcc_host_map_anon(size_t len);
 int tcpcc_host_close(int fd);
+int tcpcc_host_set_nonblock(int fd);
 
 u64 tcpcc_host_monotonic_ns(void);
 int __init tcpcc_host_timer_create(void);
