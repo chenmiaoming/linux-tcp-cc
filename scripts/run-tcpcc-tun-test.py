@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 BASE = Path(__file__).with_name("run-tcpcc-control-test.py")
@@ -36,8 +37,9 @@ SMALL_PING_COUNT = 32
 SMALL_PING_PAYLOAD = 68       # 20-byte IPv4 + 8-byte ICMP + 68 = 96 bytes.
 MTU_PING_PAYLOAD = 1472       # 20 + 8 + 1472 = 1500 bytes.
 OVERSIZE_PING_PAYLOAD = 1473  # 20 + 8 + 1473 = 1501 bytes.
-TCP_TRANSFER_BYTES = 16 * 1024
+DEFAULT_TCP_TRANSFER_BYTES = 16 * 1024
 TCP_CHUNK_BYTES = control.MAX_PAYLOAD
+HOST_DRAIN_TIMEOUT = 30.0
 
 
 def attach_tun_queue(name: str) -> int:
@@ -113,8 +115,17 @@ def recv_exact(sock: socket.socket, length: int) -> bytes:
     return bytes(data)
 
 
+def drain_host_socket(sock: socket.socket, length: int,
+                      result: dict[str, object]) -> None:
+    try:
+        result["data"] = recv_exact(sock, length)
+    except Exception as exc:  # Propagate reader failures on the control thread.
+        result["error"] = exc
+
+
 def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
-                          cc_name: str) -> str:
+                          cc_name: str, guest_to_host_bytes: int,
+                          host_to_guest_bytes: int) -> str:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.settimeout(control.CONTROL_TIMEOUT)
@@ -125,12 +136,12 @@ def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
     conn: socket.socket | None = None
 
     guest_to_host = control.make_payload(
-        f"tcpcc-m6.2-{cc_name}-guest-to-host:".encode("ascii"),
-        TCP_TRANSFER_BYTES,
+        f"tcpcc-tun-{cc_name}-guest-to-host:".encode("ascii"),
+        guest_to_host_bytes,
     )
     host_to_guest = control.make_payload(
-        f"tcpcc-m6.2-{cc_name}-host-to-guest:".encode("ascii"),
-        TCP_TRANSFER_BYTES,
+        f"tcpcc-tun-{cc_name}-host-to-guest:".encode("ascii"),
+        host_to_guest_bytes,
     )
 
     try:
@@ -170,6 +181,16 @@ def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
                 f"{cc_name}: host accepted peer {peer[0]}, expected {GUEST_IPV4}"
             )
 
+        # Drain concurrently so enlarged M6.3 transfers cannot stall merely
+        # because the host application receive window fills while the control
+        # thread is still issuing guest-side kernel_sendmsg() requests.
+        host_result: dict[str, object] = {}
+        host_reader = threading.Thread(
+            target=drain_host_socket,
+            args=(conn, len(guest_to_host), host_result),
+            daemon=True,
+        )
+        host_reader.start()
         for offset in range(0, len(guest_to_host), TCP_CHUNK_BYTES):
             chunk = guest_to_host[offset:offset + TCP_CHUNK_BYTES]
             control.transact(
@@ -179,12 +200,19 @@ def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
                 control.request(control.OP_WRITE, guest_handle, data=chunk),
                 {"length": len(chunk)},
             )
-        received = recv_exact(conn, len(guest_to_host))
+        host_reader.join(HOST_DRAIN_TIMEOUT)
+        if host_reader.is_alive():
+            raise TimeoutError(
+                f"{cc_name}: host drain did not finish within {HOST_DRAIN_TIMEOUT:.0f}s"
+            )
+        if "error" in host_result:
+            raise RuntimeError(f"{cc_name}: host drain failed") from host_result["error"]
+        received = host_result.get("data")
         if received != guest_to_host:
             raise RuntimeError(f"{cc_name}: guest-to-host TCP payload mismatch")
 
         conn.sendall(host_to_guest)
-        received = bytearray()
+        received_guest = bytearray()
         for offset in range(0, len(host_to_guest), TCP_CHUNK_BYTES):
             chunk = host_to_guest[offset:offset + TCP_CHUNK_BYTES]
             _, _, data = control.transact(
@@ -194,8 +222,8 @@ def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
                 control.request(control.OP_READ, guest_handle, len(chunk)),
                 {"data": chunk},
             )
-            received.extend(data)
-        if bytes(received) != host_to_guest:
+            received_guest.extend(data)
+        if bytes(received_guest) != host_to_guest:
             raise RuntimeError(f"{cc_name}: host-to-guest TCP payload mismatch")
 
         control.transact(
@@ -223,7 +251,18 @@ def main() -> int:
     parser.add_argument("--responses", required=True, type=Path)
     parser.add_argument("--ping-log", required=True, type=Path)
     parser.add_argument("--tcp-log", required=True, type=Path)
+    parser.add_argument(
+        "--guest-to-host-bytes", type=int, default=DEFAULT_TCP_TRANSFER_BYTES,
+        help="bytes sent by each hosted CUBIC/BBR flow toward the host",
+    )
+    parser.add_argument(
+        "--host-to-guest-bytes", type=int, default=DEFAULT_TCP_TRANSFER_BYTES,
+        help="bytes returned by the host on each CUBIC/BBR connection",
+    )
     args = parser.parse_args()
+
+    if args.guest_to_host_bytes <= 0 or args.host_to_guest_bytes <= 0:
+        parser.error("TCP transfer sizes must be positive")
 
     tun_fd = attach_tun_queue(args.tun_name)
     responses = bytearray()
@@ -271,7 +310,15 @@ def main() -> int:
         )
 
         for cc_name in ("cubic", "bbr"):
-            tcp_log.append(exercise_external_tcp(proc, responses, cc_name))
+            tcp_log.append(
+                exercise_external_tcp(
+                    proc,
+                    responses,
+                    cc_name,
+                    args.guest_to_host_bytes,
+                    args.host_to_guest_bytes,
+                )
+            )
 
         # Temporarily let the host emit one 1501-byte IPv4 packet. The hosted
         # tcpcc0 MTU remains 1500, so M5.1 ingress validation must drop it.
@@ -317,7 +364,7 @@ def main() -> int:
         try:
             returncode = proc.wait(timeout=control.CONTROL_TIMEOUT)
         except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("hosted M6.2 kernel did not reach final boundary") from exc
+            raise TimeoutError("hosted real-TUN kernel did not reach final boundary") from exc
         if returncode != 86:
             raise RuntimeError(f"expected hosted kernel exit status 86, got {returncode}")
     except Exception as exc:
@@ -347,14 +394,16 @@ def main() -> int:
         args.tcp_log.write_text("\n".join(tcp_log) + ("\n" if tcp_log else ""), encoding="utf-8")
 
     if error is not None:
-        print(f"hosted M6.2 real-TUN TCP test failed: {error}", file=sys.stderr)
+        print(f"hosted real-TUN TCP test failed: {error}", file=sys.stderr)
         return 1
 
     assert stats is not None
     print(
-        "M6.2 real TUN TCP passed: CUBIC+BBR; "
+        "real TUN TCP passed: CUBIC+BBR; "
         f"rx={stats[0]} tx={stats[4]} rx_dropped={stats[2]} "
-        f"host={HOST_IPV4} guest={GUEST_IPV4}"
+        f"host={HOST_IPV4} guest={GUEST_IPV4} "
+        f"guest_to_host={args.guest_to_host_bytes} "
+        f"host_to_guest={args.host_to_guest_bytes}"
     )
     return 0
 
