@@ -37,7 +37,7 @@ fi
 
 rm -f "$BOOT_LOG" "$CONTROL_RESPONSES"
 chmod u+x "$OUT/vmlinux"
-python3 "$ROOT/scripts/run-tcpcc-control-test.py" \
+python3 "$ROOT/scripts/run-tcpcc-m5-diagnostic.py" \
   --kernel "$OUT/vmlinux" \
   --boot-log "$BOOT_LOG" \
   --responses "$CONTROL_RESPONSES"
