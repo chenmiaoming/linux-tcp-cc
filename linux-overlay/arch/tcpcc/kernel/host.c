@@ -12,6 +12,7 @@
 #define TCPCC_HOST_NR_WRITE           1
 #define TCPCC_HOST_NR_CLOSE           3
 #define TCPCC_HOST_NR_MMAP            9
+#define TCPCC_HOST_NR_FCNTL           72
 #define TCPCC_HOST_NR_EPOLL_WAIT      232
 #define TCPCC_HOST_NR_EPOLL_CTL       233
 #define TCPCC_HOST_NR_CLOCK_GETTIME   228
@@ -24,6 +25,10 @@
 #define TCPCC_HOST_CLOCK_MONOTONIC 1
 #define TCPCC_HOST_EINTR            4
 #define TCPCC_HOST_EIO              5
+
+#define TCPCC_HOST_F_GETFL    3
+#define TCPCC_HOST_F_SETFL    4
+#define TCPCC_HOST_O_NONBLOCK 0x800
 
 #define TCPCC_HOST_PROT_READ      0x1
 #define TCPCC_HOST_PROT_WRITE     0x2
@@ -164,6 +169,22 @@ int tcpcc_host_close(int fd)
 {
 	long ret = tcpcc_host_syscall1(TCPCC_HOST_NR_CLOSE, fd);
 
+	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_set_nonblock(int fd)
+{
+	long flags;
+	long ret;
+
+	flags = tcpcc_host_syscall2(TCPCC_HOST_NR_FCNTL, fd,
+				    TCPCC_HOST_F_GETFL);
+	if (flags < 0)
+		return (int)flags;
+
+	ret = tcpcc_host_syscall3(TCPCC_HOST_NR_FCNTL, fd,
+				  TCPCC_HOST_F_SETFL,
+				  flags | TCPCC_HOST_O_NONBLOCK);
 	return ret < 0 ? (int)ret : 0;
 }
 
