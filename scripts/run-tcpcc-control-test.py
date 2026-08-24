@@ -42,6 +42,7 @@ BURST_PACKETS = 32
 SMALL_PACKET_SIZE = 96
 MTU_PACKET_SIZE = 1500
 OVERSIZE_PACKET_SIZE = 1501
+MAX_IGNORED_L3_PACKETS = 128
 ICMP_IDENT = 0x4D51
 
 
@@ -93,6 +94,45 @@ def build_echo_request(total_size: int, sequence: int) -> tuple[bytes, bytes]:
         64, socket.IPPROTO_ICMP, ip_sum, HOST_IPV4, GUEST_IPV4,
     )
     return ip_header + icmp, payload
+
+
+def echo_reply_sequence(packet: bytes) -> int | None:
+    """Return our echo-reply sequence, or None for unrelated valid L3 traffic."""
+    if len(packet) < 20:
+        raise RuntimeError("received truncated L3 packet from tcpcc0")
+
+    version_ihl = packet[0]
+    if version_ihl >> 4 != 4:
+        raise RuntimeError(
+            f"received non-IPv4 L3 packet from tcpcc0: first byte 0x{version_ihl:02x}"
+        )
+    ihl = (version_ihl & 0x0F) * 4
+    if ihl < 20 or len(packet) < ihl:
+        raise RuntimeError("received L3 packet with invalid IPv4 IHL")
+
+    total_len = struct.unpack_from("!H", packet, 2)[0]
+    if total_len != len(packet):
+        raise RuntimeError(
+            f"received L3 packet with IPv4 length mismatch: {total_len} != {len(packet)}"
+        )
+    if checksum(packet[:ihl]) != 0:
+        raise RuntimeError("received L3 packet with bad IPv4 checksum")
+
+    if packet[9] != socket.IPPROTO_ICMP:
+        return None
+
+    icmp = packet[ihl:]
+    if len(icmp) < 8:
+        raise RuntimeError("received truncated ICMP packet from tcpcc0")
+    if checksum(icmp) != 0:
+        raise RuntimeError("received ICMP packet with bad checksum")
+
+    icmp_type, code, _sum, ident, sequence = struct.unpack_from(
+        "!BBHHH", icmp, 0
+    )
+    if (icmp_type, code, ident) != (0, 0, ICMP_IDENT):
+        return None
+    return sequence
 
 
 def validate_echo_reply(packet: bytes, sequence: int, payload: bytes) -> None:
@@ -240,16 +280,25 @@ def exercise_l3(proc: subprocess.Popen, responses: bytearray,
     expected[mtu_sequence] = payload
     host_sock.send(packet)
 
-    host_sock.settimeout(PACKET_TIMEOUT)
+    deadline = time.monotonic() + PACKET_TIMEOUT
     seen = set()
+    ignored = 0
     while len(seen) < len(expected):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout("timed out waiting for ICMP echo replies")
+        host_sock.settimeout(remaining)
         reply = host_sock.recv(65535)
-        ihl = (reply[0] & 0x0F) * 4 if reply else 0
-        if len(reply) < ihl + 8:
-            raise RuntimeError("received truncated packet from tcpcc0")
-        sequence = struct.unpack_from("!H", reply, ihl + 6)[0]
+        sequence = echo_reply_sequence(reply)
+        if sequence is None:
+            ignored += 1
+            if ignored > MAX_IGNORED_L3_PACKETS:
+                raise RuntimeError(
+                    f"too many unrelated L3 packets from tcpcc0 ({ignored})"
+                )
+            continue
         if sequence not in expected:
-            raise RuntimeError(f"unexpected ICMP sequence {sequence}")
+            raise RuntimeError(f"unexpected ICMP echo-reply sequence {sequence}")
         if sequence in seen:
             raise RuntimeError(f"duplicate ICMP sequence {sequence}")
         validate_echo_reply(reply, sequence, expected[sequence])
@@ -258,13 +307,22 @@ def exercise_l3(proc: subprocess.Popen, responses: bytearray,
     oversize_sequence = BURST_PACKETS + 2
     packet, _ = build_echo_request(OVERSIZE_PACKET_SIZE, oversize_sequence)
     host_sock.send(packet)
-    host_sock.settimeout(0.25)
-    try:
-        unexpected = host_sock.recv(65535)
-    except socket.timeout:
-        unexpected = b""
-    if unexpected:
-        raise RuntimeError("oversized packet unexpectedly produced an L3 reply")
+    oversize_deadline = time.monotonic() + 0.25
+    while True:
+        remaining = oversize_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        host_sock.settimeout(remaining)
+        try:
+            unexpected = host_sock.recv(65535)
+        except socket.timeout:
+            break
+        sequence = echo_reply_sequence(unexpected)
+        if sequence is None:
+            continue
+        if sequence == oversize_sequence:
+            raise RuntimeError("oversized packet unexpectedly produced an L3 reply")
+        raise RuntimeError(f"unexpected late ICMP echo-reply sequence {sequence}")
 
     _, length, raw_stats = transact(
         proc, responses, OP_L3_STATS, request(OP_L3_STATS)
