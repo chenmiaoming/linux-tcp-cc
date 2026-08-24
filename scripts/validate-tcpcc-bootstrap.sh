@@ -8,6 +8,7 @@ OUT="${TCPCC_LINK_OUT:-$ROOT/.build/tcpcc-bootstrap-out}"
 BOOT_LOG="$ROOT/.build/tcpcc-bootstrap.log"
 CONTROL_RESPONSES="$ROOT/.build/tcpcc-control.responses"
 ELF_PROGRAM_HEADERS="$ROOT/.build/tcpcc-vmlinux.program-headers"
+STRACE_LOG="$ROOT/.build/tcpcc-host.strace"
 
 LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
   bash "$ROOT/scripts/validate-tcpcc-link.sh"
@@ -35,12 +36,13 @@ if ! nm "$OUT/vmlinux" | grep -Eq '[[:space:]]tcpcc_switch_context$'; then
   exit 1
 fi
 
-rm -f "$BOOT_LOG" "$CONTROL_RESPONSES"
+rm -f "$BOOT_LOG" "$CONTROL_RESPONSES" "$STRACE_LOG" "$STRACE_LOG".*
 chmod u+x "$OUT/vmlinux"
-python3 "$ROOT/scripts/run-tcpcc-control-test.py" \
-  --kernel "$OUT/vmlinux" \
-  --boot-log "$BOOT_LOG" \
-  --responses "$CONTROL_RESPONSES"
+strace -ff -ttt -s 256 -o "$STRACE_LOG" \
+  python3 "$ROOT/scripts/run-tcpcc-m5-diagnostic.py" \
+    --kernel "$OUT/vmlinux" \
+    --boot-log "$BOOT_LOG" \
+    --responses "$CONTROL_RESPONSES"
 
 cat "$BOOT_LOG"
 
@@ -62,7 +64,9 @@ grep -F 'tcpcc: M4.1 loopback TCP stress passed (16 rounds, 65536 bytes each dir
 grep -F 'tcpcc: M4.2 host control bridge ready on stdin/stdout' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M4.2 host control bridge passed native loopback TCP and Reno/CUBIC control' \
   "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M4.2 reached userspace control boundary after native TCP/CC validation' \
+grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc: M5.1 reached hosted L3 netdevice boundary after packet-fd validation' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
@@ -82,6 +86,10 @@ if grep -Fq 'tcpcc: M4.1 reached loopback TCP boundary after in-runtime transfer
   echo "hosted boot stopped at the obsolete M4.1 boundary" >&2
   exit 1
 fi
+if grep -Fq 'tcpcc: M4.2 reached userspace control boundary after native TCP/CC validation' "$BOOT_LOG"; then
+  echo "hosted boot stopped at the obsolete M4.2 boundary" >&2
+  exit 1
+fi
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M4.2 userspace control and native TCP congestion-control validation succeeded\n'
+printf 'M5.1 hosted L3 netdevice and packet-fd validation succeeded\n'

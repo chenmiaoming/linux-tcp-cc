@@ -38,7 +38,7 @@ jobs:
       - name: Install kernel build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex build-essential libelf-dev libssl-dev
+          sudo apt-get install -y bc bison flex build-essential libelf-dev libssl-dev strace
 
       - name: Validate scripts
         run: |
@@ -49,17 +49,18 @@ jobs:
           bash -n scripts/validate-tcpcc-bootstrap.sh
           python3 -m py_compile scripts/run-tcpcc-control-test.py
 
-      - name: Execute hosted M4.2 userspace TCP control milestone
+      - name: Execute hosted M5.1 L3 packet netdevice milestone
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m4-2
+          name: tcpcc-bootstrap-m5-1
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-control.responses
+            .build/tcpcc-host.strace*
             .build/tcpcc-vmlinux.program-headers
             .build/tcpcc-vmlinux.elf-header
             .build/tcpcc-link.env

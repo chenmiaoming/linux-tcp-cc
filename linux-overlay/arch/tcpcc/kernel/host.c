@@ -12,6 +12,7 @@
 #define TCPCC_HOST_NR_WRITE           1
 #define TCPCC_HOST_NR_CLOSE           3
 #define TCPCC_HOST_NR_MMAP            9
+#define TCPCC_HOST_NR_FCNTL           72
 #define TCPCC_HOST_NR_EPOLL_WAIT      232
 #define TCPCC_HOST_NR_EPOLL_CTL       233
 #define TCPCC_HOST_NR_CLOCK_GETTIME   228
@@ -25,12 +26,17 @@
 #define TCPCC_HOST_EINTR            4
 #define TCPCC_HOST_EIO              5
 
+#define TCPCC_HOST_F_GETFL    3
+#define TCPCC_HOST_F_SETFL    4
+#define TCPCC_HOST_O_NONBLOCK 0x800
+
 #define TCPCC_HOST_PROT_READ      0x1
 #define TCPCC_HOST_PROT_WRITE     0x2
 #define TCPCC_HOST_MAP_PRIVATE    0x02
 #define TCPCC_HOST_MAP_ANONYMOUS  0x20
 
 #define TCPCC_HOST_EPOLLIN       0x001
+#define TCPCC_HOST_EPOLLET       0x80000000U
 #define TCPCC_HOST_EPOLL_CTL_ADD 1
 #define TCPCC_HOST_EPOLL_CTL_DEL 2
 
@@ -167,6 +173,22 @@ int tcpcc_host_close(int fd)
 	return ret < 0 ? (int)ret : 0;
 }
 
+int tcpcc_host_set_nonblock(int fd)
+{
+	long flags;
+	long ret;
+
+	flags = tcpcc_host_syscall2(TCPCC_HOST_NR_FCNTL, fd,
+				    TCPCC_HOST_F_GETFL);
+	if (flags < 0)
+		return (int)flags;
+
+	ret = tcpcc_host_syscall3(TCPCC_HOST_NR_FCNTL, fd,
+				  TCPCC_HOST_F_SETFL,
+				  flags | TCPCC_HOST_O_NONBLOCK);
+	return ret < 0 ? (int)ret : 0;
+}
+
 void *__init tcpcc_host_map_anon(size_t len)
 {
 	long ret = tcpcc_host_syscall6(TCPCC_HOST_NR_MMAP, 0, (long)len,
@@ -250,10 +272,10 @@ int __init tcpcc_host_event_loop_init(void)
 	return 0;
 }
 
-int tcpcc_host_event_add(int fd, u64 token)
+static int tcpcc_host_event_add_flags(int fd, u64 token, u32 flags)
 {
 	struct tcpcc_host_epoll_event event = {
-		.events = TCPCC_HOST_EPOLLIN,
+		.events = TCPCC_HOST_EPOLLIN | flags,
 		.data = token,
 	};
 	long ret;
@@ -266,6 +288,16 @@ int tcpcc_host_event_add(int fd, u64 token)
 				  TCPCC_HOST_EPOLL_CTL_ADD, fd,
 				  (long)&event);
 	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_event_add(int fd, u64 token)
+{
+	return tcpcc_host_event_add_flags(fd, token, 0);
+}
+
+int tcpcc_host_event_add_edge(int fd, u64 token)
+{
+	return tcpcc_host_event_add_flags(fd, token, TCPCC_HOST_EPOLLET);
 }
 
 int tcpcc_host_event_del(int fd)
