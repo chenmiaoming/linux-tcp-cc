@@ -410,8 +410,8 @@ int tcpcc_l3_attach(int host_fd, u32 ipv4_addr, u32 prefix_len, int *ifindex)
 		goto err_teardown;
 	priv->irq_registered = true;
 
-	ret = tcpcc_host_event_add(host_fd,
-				   TCPCC_HOST_EVENT_IRQ_BASE + TCPCC_L3_IRQ);
+	ret = tcpcc_host_event_add_edge(host_fd,
+					TCPCC_HOST_EVENT_IRQ_BASE + TCPCC_L3_IRQ);
 	if (ret)
 		goto err_teardown;
 	priv->event_registered = true;
