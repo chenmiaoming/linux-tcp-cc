@@ -38,7 +38,7 @@ jobs:
       - name: Install kernel build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex build-essential libelf-dev libssl-dev
+          sudo apt-get install -y bc bison flex build-essential libelf-dev libssl-dev strace
 
       - name: Validate scripts
         run: |
@@ -60,6 +60,7 @@ jobs:
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-control.responses
+            .build/tcpcc-host.strace*
             .build/tcpcc-vmlinux.program-headers
             .build/tcpcc-vmlinux.elf-header
             .build/tcpcc-link.env
