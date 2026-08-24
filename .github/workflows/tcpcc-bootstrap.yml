@@ -14,6 +14,7 @@ on:
       - 'scripts/validate-tcpcc-bootstrap.sh'
       - 'scripts/validate-tcpcc-tun.sh'
       - 'scripts/run-tcpcc-control-test.py'
+      - 'scripts/run-tcpcc-m6-diagnostic.py'
       - 'scripts/run-tcpcc-tun-test.py'
       - 'upstream/**'
       - 'protected/**'
@@ -51,19 +52,20 @@ jobs:
           bash -n scripts/validate-tcpcc-bootstrap.sh
           bash -n scripts/validate-tcpcc-tun.sh
           python3 -m py_compile scripts/run-tcpcc-control-test.py
+          python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
           python3 -m py_compile scripts/run-tcpcc-tun-test.py
 
-      - name: Execute hosted M5.1 L3 packet netdevice milestone
+      - name: Execute hosted M6.1 native BBR/default-fq milestone
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
-      - name: Execute hosted M5.2 real TUN milestone
+      - name: Execute hosted M5.2 real TUN regression
         run: bash scripts/validate-tcpcc-tun.sh
 
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m5-2
+          name: tcpcc-bootstrap-m6-1
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-control.responses
