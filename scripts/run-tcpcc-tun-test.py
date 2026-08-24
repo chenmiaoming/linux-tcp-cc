@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Exercise the hosted Linux L3 backend through a real host TUN queue."""
+"""Exercise hosted Linux ICMP and native TCP/CC through a real host TUN queue."""
 
 import argparse
 import fcntl
 import importlib.util
 import os
+import socket
 import struct
 import subprocess
 import sys
@@ -27,6 +28,7 @@ IFREQ_SIZE = 40
 IFNAMSIZ = 16
 
 HOST_IPV4 = "192.0.2.1"
+HOST_IPV4_U32 = 0xC0000201
 GUEST_IPV4 = "192.0.2.2"
 GUEST_IPV4_U32 = 0xC0000202
 GUEST_PREFIX = 24
@@ -34,6 +36,8 @@ SMALL_PING_COUNT = 32
 SMALL_PING_PAYLOAD = 68       # 20-byte IPv4 + 8-byte ICMP + 68 = 96 bytes.
 MTU_PING_PAYLOAD = 1472       # 20 + 8 + 1472 = 1500 bytes.
 OVERSIZE_PING_PAYLOAD = 1473  # 20 + 8 + 1473 = 1501 bytes.
+TCP_TRANSFER_BYTES = 16 * 1024
+TCP_CHUNK_BYTES = control.MAX_PAYLOAD
 
 
 def attach_tun_queue(name: str) -> int:
@@ -99,6 +103,118 @@ def query_stats(proc: subprocess.Popen, responses: bytearray) -> tuple[int, ...]
     return control.L3_STATS.unpack(raw_stats)
 
 
+def recv_exact(sock: socket.socket, length: int) -> bytes:
+    data = bytearray()
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            raise EOFError(f"host TCP EOF after {len(data)}/{length} bytes")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
+                          cc_name: str) -> str:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.settimeout(control.CONTROL_TIMEOUT)
+    listener.bind((HOST_IPV4, 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    guest_handle: int | None = None
+    conn: socket.socket | None = None
+
+    guest_to_host = control.make_payload(
+        f"tcpcc-m6.2-{cc_name}-guest-to-host:".encode("ascii"),
+        TCP_TRANSFER_BYTES,
+    )
+    host_to_guest = control.make_payload(
+        f"tcpcc-m6.2-{cc_name}-host-to-guest:".encode("ascii"),
+        TCP_TRANSFER_BYTES,
+    )
+
+    try:
+        guest_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_SOCKET,
+            control.request(control.OP_SOCKET),
+        )
+        if guest_handle <= 0:
+            raise RuntimeError(f"{cc_name}: invalid guest socket handle {guest_handle}")
+
+        control.transact(
+            proc,
+            responses,
+            control.OP_SET_CC,
+            control.request(control.OP_SET_CC, guest_handle, data=cc_name.encode("ascii")),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_GET_CC,
+            control.request(control.OP_GET_CC, guest_handle),
+            {"data": cc_name.encode("ascii")},
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_CONNECT,
+            control.request(control.OP_CONNECT, guest_handle, HOST_IPV4_U32, port),
+        )
+
+        conn, peer = listener.accept()
+        conn.settimeout(control.CONTROL_TIMEOUT)
+        if peer[0] != GUEST_IPV4:
+            raise RuntimeError(
+                f"{cc_name}: host accepted peer {peer[0]}, expected {GUEST_IPV4}"
+            )
+
+        for offset in range(0, len(guest_to_host), TCP_CHUNK_BYTES):
+            chunk = guest_to_host[offset:offset + TCP_CHUNK_BYTES]
+            control.transact(
+                proc,
+                responses,
+                control.OP_WRITE,
+                control.request(control.OP_WRITE, guest_handle, data=chunk),
+                {"length": len(chunk)},
+            )
+        received = recv_exact(conn, len(guest_to_host))
+        if received != guest_to_host:
+            raise RuntimeError(f"{cc_name}: guest-to-host TCP payload mismatch")
+
+        conn.sendall(host_to_guest)
+        received = bytearray()
+        for offset in range(0, len(host_to_guest), TCP_CHUNK_BYTES):
+            chunk = host_to_guest[offset:offset + TCP_CHUNK_BYTES]
+            _, _, data = control.transact(
+                proc,
+                responses,
+                control.OP_READ,
+                control.request(control.OP_READ, guest_handle, len(chunk)),
+                {"data": chunk},
+            )
+            received.extend(data)
+        if bytes(received) != host_to_guest:
+            raise RuntimeError(f"{cc_name}: host-to-guest TCP payload mismatch")
+
+        control.transact(
+            proc,
+            responses,
+            control.OP_CLOSE,
+            control.request(control.OP_CLOSE, guest_handle),
+        )
+        guest_handle = None
+        return (
+            f"{cc_name}: guest={GUEST_IPV4} host={HOST_IPV4}:{port} "
+            f"guest_to_host={len(guest_to_host)} host_to_guest={len(host_to_guest)}"
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+        listener.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--kernel", required=True, type=Path)
@@ -106,11 +222,13 @@ def main() -> int:
     parser.add_argument("--boot-log", required=True, type=Path)
     parser.add_argument("--responses", required=True, type=Path)
     parser.add_argument("--ping-log", required=True, type=Path)
+    parser.add_argument("--tcp-log", required=True, type=Path)
     args = parser.parse_args()
 
     tun_fd = attach_tun_queue(args.tun_name)
     responses = bytearray()
     ping_log: list[str] = []
+    tcp_log: list[str] = []
     proc: subprocess.Popen | None = None
     error: Exception | None = None
     stats: tuple[int, ...] | None = None
@@ -151,6 +269,9 @@ def main() -> int:
             ping_command(args.tun_name, 1, MTU_PING_PAYLOAD, df=True),
             expect_success=True,
         )
+
+        for cc_name in ("cubic", "bbr"):
+            tcp_log.append(exercise_external_tcp(proc, responses, cc_name))
 
         # Temporarily let the host emit one 1501-byte IPv4 packet. The hosted
         # tcpcc0 MTU remains 1500, so M5.1 ingress validation must drop it.
@@ -196,7 +317,7 @@ def main() -> int:
         try:
             returncode = proc.wait(timeout=control.CONTROL_TIMEOUT)
         except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("hosted M5.2 kernel did not reach final boundary") from exc
+            raise TimeoutError("hosted M6.2 kernel did not reach final boundary") from exc
         if returncode != 86:
             raise RuntimeError(f"expected hosted kernel exit status 86, got {returncode}")
     except Exception as exc:
@@ -223,14 +344,15 @@ def main() -> int:
         args.boot_log.write_bytes(stderr)
         args.responses.write_bytes(bytes(responses))
         args.ping_log.write_text("\n".join(ping_log), encoding="utf-8")
+        args.tcp_log.write_text("\n".join(tcp_log) + ("\n" if tcp_log else ""), encoding="utf-8")
 
     if error is not None:
-        print(f"hosted M5.2 real-TUN test failed: {error}", file=sys.stderr)
+        print(f"hosted M6.2 real-TUN TCP test failed: {error}", file=sys.stderr)
         return 1
 
     assert stats is not None
     print(
-        "M5.2 real TUN passed: "
+        "M6.2 real TUN TCP passed: CUBIC+BBR; "
         f"rx={stats[0]} tx={stats[4]} rx_dropped={stats[2]} "
         f"host={HOST_IPV4} guest={GUEST_IPV4}"
     )
