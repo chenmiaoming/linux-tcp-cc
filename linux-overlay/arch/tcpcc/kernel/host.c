@@ -36,6 +36,7 @@
 #define TCPCC_HOST_MAP_ANONYMOUS  0x20
 
 #define TCPCC_HOST_EPOLLIN       0x001
+#define TCPCC_HOST_EPOLLET       0x80000000U
 #define TCPCC_HOST_EPOLL_CTL_ADD 1
 #define TCPCC_HOST_EPOLL_CTL_DEL 2
 
@@ -271,10 +272,10 @@ int __init tcpcc_host_event_loop_init(void)
 	return 0;
 }
 
-int tcpcc_host_event_add(int fd, u64 token)
+static int tcpcc_host_event_add_flags(int fd, u64 token, u32 flags)
 {
 	struct tcpcc_host_epoll_event event = {
-		.events = TCPCC_HOST_EPOLLIN,
+		.events = TCPCC_HOST_EPOLLIN | flags,
 		.data = token,
 	};
 	long ret;
@@ -287,6 +288,16 @@ int tcpcc_host_event_add(int fd, u64 token)
 				  TCPCC_HOST_EPOLL_CTL_ADD, fd,
 				  (long)&event);
 	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_event_add(int fd, u64 token)
+{
+	return tcpcc_host_event_add_flags(fd, token, 0);
+}
+
+int tcpcc_host_event_add_edge(int fd, u64 token)
+{
+	return tcpcc_host_event_add_flags(fd, token, TCPCC_HOST_EPOLLET);
 }
 
 int tcpcc_host_event_del(int fd)
