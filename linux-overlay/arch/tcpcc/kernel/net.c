@@ -263,6 +263,6 @@ static int __init tcpcc_loopback_tcp_selftest(void)
 
 	pr_notice("tcpcc: M4.1 loopback TCP stress passed (%u rounds, %u bytes each direction)\n",
 		  TCPCC_LOOPBACK_TEST_ROUNDS, TCPCC_LOOPBACK_PAYLOAD_SIZE);
-	panic("tcpcc: M4.1 reached loopback TCP boundary after in-runtime transfer stress");
+	return 0;
 }
 fs_initcall_sync(tcpcc_loopback_tcp_selftest);

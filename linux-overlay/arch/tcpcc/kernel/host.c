@@ -121,12 +121,35 @@ static __always_inline long tcpcc_host_syscall6(long nr, long arg0,
 	return ret;
 }
 
+ssize_t tcpcc_host_read_fd(int fd, void *buf, size_t len)
+{
+	long ret;
+
+	do {
+		ret = tcpcc_host_syscall3(TCPCC_HOST_NR_READ, fd,
+					 (long)buf, (long)len);
+	} while (ret == -TCPCC_HOST_EINTR);
+
+	return (ssize_t)ret;
+}
+
+ssize_t tcpcc_host_write_fd(int fd, const void *buf, size_t len)
+{
+	long ret;
+
+	do {
+		ret = tcpcc_host_syscall3(TCPCC_HOST_NR_WRITE, fd,
+					 (long)buf, (long)len);
+	} while (ret == -TCPCC_HOST_EINTR);
+
+	return (ssize_t)ret;
+}
+
 void tcpcc_host_write(const char *buf, size_t len)
 {
 	while (len) {
-		long ret = tcpcc_host_syscall3(TCPCC_HOST_NR_WRITE,
-					       TCPCC_HOST_STDERR_FILENO,
-					       (long)buf, (long)len);
+		ssize_t ret = tcpcc_host_write_fd(TCPCC_HOST_STDERR_FILENO,
+						      buf, len);
 
 		/* A failed host write must never recurse back through printk. */
 		if (ret <= 0)

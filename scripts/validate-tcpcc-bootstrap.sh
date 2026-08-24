@@ -6,8 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${LINUX_SRC:-$ROOT/.deps/linux}"
 OUT="${TCPCC_LINK_OUT:-$ROOT/.build/tcpcc-bootstrap-out}"
 BOOT_LOG="$ROOT/.build/tcpcc-bootstrap.log"
+CONTROL_RESPONSES="$ROOT/.build/tcpcc-control.responses"
 ELF_PROGRAM_HEADERS="$ROOT/.build/tcpcc-vmlinux.program-headers"
-EXPECTED_STATUS=86
 
 LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
   bash "$ROOT/scripts/validate-tcpcc-link.sh"
@@ -15,6 +15,7 @@ LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
 grep -Fx 'CONFIG_HIGH_RES_TIMERS=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_NET=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_INET=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_TCP_CONG_CUBIC=y' "$OUT/.config" >/dev/null
 
 readelf -lW "$OUT/vmlinux" > "$ELF_PROGRAM_HEADERS"
 if ! readelf -hW "$OUT/vmlinux" | grep -Eq 'Type:[[:space:]]+EXEC'; then
@@ -34,20 +35,14 @@ if ! nm "$OUT/vmlinux" | grep -Eq '[[:space:]]tcpcc_switch_context$'; then
   exit 1
 fi
 
-rm -f "$BOOT_LOG"
+rm -f "$BOOT_LOG" "$CONTROL_RESPONSES"
 chmod u+x "$OUT/vmlinux"
-set +e
-timeout 20s "$OUT/vmlinux" >"$BOOT_LOG" 2>&1
-boot_status=$?
-set -e
+python3 "$ROOT/scripts/run-tcpcc-control-test.py" \
+  --kernel "$OUT/vmlinux" \
+  --boot-log "$BOOT_LOG" \
+  --responses "$CONTROL_RESPONSES"
 
 cat "$BOOT_LOG"
-
-if (( boot_status != EXPECTED_STATUS )); then
-  printf 'expected hosted kernel exit status %d, got %d\n' \
-    "$EXPECTED_STATUS" "$boot_status" >&2
-  exit 1
-fi
 
 grep -F 'Linux version 6.18.45' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 host RAM 128 MiB at' "$BOOT_LOG" >/dev/null
@@ -64,7 +59,10 @@ grep -F 'tcpcc: M4.1 loopback TCP stress starting (16 rounds x 65536 bytes each 
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M4.1 loopback TCP stress passed (16 rounds, 65536 bytes each direction)' \
   "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M4.1 reached loopback TCP boundary after in-runtime transfer stress' \
+grep -F 'tcpcc: M4.2 host control bridge ready on stdin/stdout' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M4.2 host control bridge passed native loopback TCP and Reno/CUBIC control' \
+  "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc: M4.2 reached userspace control boundary after native TCP/CC validation' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
@@ -80,6 +78,10 @@ if grep -Fq 'tcpcc: M3.4 reached event-loop boundary after IRQ/softirq stress' "
   echo "hosted boot stopped at the obsolete M3.4 boundary" >&2
   exit 1
 fi
+if grep -Fq 'tcpcc: M4.1 reached loopback TCP boundary after in-runtime transfer stress' "$BOOT_LOG"; then
+  echo "hosted boot stopped at the obsolete M4.1 boundary" >&2
+  exit 1
+fi
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M4.1 in-runtime loopback TCP validation succeeded\n'
+printf 'M4.2 userspace control and native TCP congestion-control validation succeeded\n'
