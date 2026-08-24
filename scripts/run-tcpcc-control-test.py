@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 import argparse
+import os
+import select
+import socket
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 MAGIC = 0x32434354
@@ -11,6 +15,9 @@ VERSION = 1
 MAX_PAYLOAD = 256
 LOOPBACK = 0x7F000001
 PORT = 41042
+HOST_IPV4 = 0x0A000001
+GUEST_IPV4 = 0x0A000002
+GUEST_PREFIX = 24
 
 OP_SOCKET = 1
 OP_BIND = 2
@@ -23,9 +30,19 @@ OP_CLOSE = 8
 OP_SET_CC = 9
 OP_GET_CC = 10
 OP_FINISH = 11
+OP_L3_ATTACH = 12
+OP_L3_STATS = 13
 
 REQUEST = struct.Struct("<IHHiIII256s")
 RESPONSE = struct.Struct("<IHHiiI256s")
+L3_STATS = struct.Struct("<QQQQQQQQ")
+CONTROL_TIMEOUT = 8.0
+PACKET_TIMEOUT = 3.0
+BURST_PACKETS = 32
+SMALL_PACKET_SIZE = 96
+MTU_PACKET_SIZE = 1500
+OVERSIZE_PACKET_SIZE = 1501
+ICMP_IDENT = 0x4D51
 
 
 def make_payload(prefix: bytes, size: int) -> bytes:
@@ -43,13 +60,133 @@ def request(op: int, handle: int = 0, arg0: int = 0, arg1: int = 0,
                         data.ljust(MAX_PAYLOAD, b"\0"))
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--kernel", required=True, type=Path)
-    parser.add_argument("--boot-log", required=True, type=Path)
-    parser.add_argument("--responses", required=True, type=Path)
-    args = parser.parse_args()
+def checksum(data: bytes) -> int:
+    if len(data) & 1:
+        data += b"\0"
+    words = struct.unpack(f"!{len(data) // 2}H", data)
+    total = sum(words)
+    total = (total & 0xFFFF) + (total >> 16)
+    total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
 
+
+def build_echo_request(total_size: int, sequence: int) -> tuple[bytes, bytes]:
+    if total_size < 28:
+        raise ValueError("IPv4 ICMP packet is too small")
+
+    payload_len = total_size - 20 - 8
+    payload = bytes(((sequence * 29 + index * 17 + 7) & 0xFF)
+                    for index in range(payload_len))
+    icmp = struct.pack("!BBHHH", 8, 0, 0, ICMP_IDENT, sequence) + payload
+    icmp_sum = checksum(icmp)
+    icmp = struct.pack("!BBHHH", 8, 0, icmp_sum, ICMP_IDENT, sequence) + payload
+
+    ip_header = struct.pack(
+        "!BBHHHBBHII",
+        0x45, 0, total_size, sequence & 0xFFFF, 0x4000,
+        64, socket.IPPROTO_ICMP, 0, HOST_IPV4, GUEST_IPV4,
+    )
+    ip_sum = checksum(ip_header)
+    ip_header = struct.pack(
+        "!BBHHHBBHII",
+        0x45, 0, total_size, sequence & 0xFFFF, 0x4000,
+        64, socket.IPPROTO_ICMP, ip_sum, HOST_IPV4, GUEST_IPV4,
+    )
+    return ip_header + icmp, payload
+
+
+def validate_echo_reply(packet: bytes, sequence: int, payload: bytes) -> None:
+    if len(packet) < 28:
+        raise RuntimeError(f"ICMP reply {sequence} is truncated")
+
+    version_ihl = packet[0]
+    if version_ihl >> 4 != 4:
+        raise RuntimeError(f"ICMP reply {sequence} is not IPv4")
+    ihl = (version_ihl & 0x0F) * 4
+    if ihl < 20 or len(packet) < ihl + 8:
+        raise RuntimeError(f"ICMP reply {sequence} has invalid IHL")
+
+    total_len = struct.unpack_from("!H", packet, 2)[0]
+    if total_len != len(packet):
+        raise RuntimeError(
+            f"ICMP reply {sequence} length mismatch: {total_len} != {len(packet)}"
+        )
+    if checksum(packet[:ihl]) != 0:
+        raise RuntimeError(f"ICMP reply {sequence} has bad IPv4 checksum")
+
+    protocol = packet[9]
+    src, dst = struct.unpack_from("!II", packet, 12)
+    if protocol != socket.IPPROTO_ICMP or src != GUEST_IPV4 or dst != HOST_IPV4:
+        raise RuntimeError(f"ICMP reply {sequence} has wrong L3 endpoints")
+
+    icmp = packet[ihl:]
+    if checksum(icmp) != 0:
+        raise RuntimeError(f"ICMP reply {sequence} has bad ICMP checksum")
+    icmp_type, code, _sum, ident, reply_sequence = struct.unpack_from(
+        "!BBHHH", icmp, 0
+    )
+    if (icmp_type, code, ident, reply_sequence) != (0, 0, ICMP_IDENT, sequence):
+        raise RuntimeError(f"ICMP reply {sequence} header mismatch")
+    if icmp[8:] != payload:
+        raise RuntimeError(f"ICMP reply {sequence} payload mismatch")
+
+
+def read_exact_fd(fd: int, length: int, timeout: float) -> bytes:
+    deadline = time.monotonic() + timeout
+    chunks = bytearray()
+    while len(chunks) < length:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"timed out after {len(chunks)}/{length} bytes")
+        readable, _, _ = select.select([fd], [], [], remaining)
+        if not readable:
+            raise TimeoutError(f"timed out after {len(chunks)}/{length} bytes")
+        chunk = os.read(fd, length - len(chunks))
+        if not chunk:
+            raise EOFError(f"EOF after {len(chunks)}/{length} bytes")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def transact(proc: subprocess.Popen, responses: bytearray, op: int,
+             encoded: bytes, expectation: dict | None = None) -> tuple[int, int, bytes]:
+    if proc.stdin is None or proc.stdout is None:
+        raise RuntimeError("control pipes are unavailable")
+
+    proc.stdin.write(encoded)
+    proc.stdin.flush()
+    raw = read_exact_fd(proc.stdout.fileno(), RESPONSE.size, CONTROL_TIMEOUT)
+    responses.extend(raw)
+    magic, version, response_op, status, handle, length, raw_data = RESPONSE.unpack(raw)
+
+    if magic != MAGIC or version != VERSION or response_op != op:
+        raise RuntimeError(
+            f"op {op} response header mismatch: magic=0x{magic:08x} "
+            f"version={version} op={response_op}"
+        )
+    if status != 0:
+        raise RuntimeError(f"op {op} failed with {status}")
+    if length > MAX_PAYLOAD:
+        raise RuntimeError(f"op {op} returned oversized payload {length}")
+
+    expectation = expectation or {}
+    if "handle" in expectation and handle != expectation["handle"]:
+        raise RuntimeError(
+            f"op {op} expected handle {expectation['handle']}, got {handle}"
+        )
+    if "length" in expectation and length != expectation["length"]:
+        raise RuntimeError(
+            f"op {op} expected length {expectation['length']}, got {length}"
+        )
+    if "data" in expectation:
+        expected_data = expectation["data"]
+        if length != len(expected_data) or raw_data[:length] != expected_data:
+            raise RuntimeError(f"op {op} payload mismatch")
+
+    return handle, length, raw_data[:length]
+
+
+def exercise_m4_control(proc: subprocess.Popen, responses: bytearray) -> None:
     client_payload = make_payload(b"tcpcc-m4.2-client-to-server:", 192)
     server_payload = make_payload(b"tcpcc-m4.2-server-to-client:", 224)
 
@@ -75,78 +212,141 @@ def main() -> int:
         (OP_CLOSE, request(OP_CLOSE, 3), {}),
         (OP_CLOSE, request(OP_CLOSE, 2), {}),
         (OP_CLOSE, request(OP_CLOSE, 1), {}),
-        (OP_FINISH, request(OP_FINISH), {}),
     ]
 
-    input_bytes = b"".join(encoded for _, encoded, _ in commands)
+    for op, encoded, expectation in commands:
+        transact(proc, responses, op, encoded, expectation)
+
+
+def exercise_l3(proc: subprocess.Popen, responses: bytearray,
+                host_sock: socket.socket, child_fd: int) -> tuple[int, ...]:
+    ifindex, _, _ = transact(
+        proc,
+        responses,
+        OP_L3_ATTACH,
+        request(OP_L3_ATTACH, child_fd, GUEST_IPV4, GUEST_PREFIX),
+    )
+    if ifindex <= 0:
+        raise RuntimeError(f"L3 attach returned invalid ifindex {ifindex}")
+
+    expected: dict[int, bytes] = {}
+    for sequence in range(1, BURST_PACKETS + 1):
+        packet, payload = build_echo_request(SMALL_PACKET_SIZE, sequence)
+        expected[sequence] = payload
+        host_sock.send(packet)
+
+    mtu_sequence = BURST_PACKETS + 1
+    packet, payload = build_echo_request(MTU_PACKET_SIZE, mtu_sequence)
+    expected[mtu_sequence] = payload
+    host_sock.send(packet)
+
+    host_sock.settimeout(PACKET_TIMEOUT)
+    seen = set()
+    while len(seen) < len(expected):
+        reply = host_sock.recv(65535)
+        ihl = (reply[0] & 0x0F) * 4 if reply else 0
+        if len(reply) < ihl + 8:
+            raise RuntimeError("received truncated packet from tcpcc0")
+        sequence = struct.unpack_from("!H", reply, ihl + 6)[0]
+        if sequence not in expected:
+            raise RuntimeError(f"unexpected ICMP sequence {sequence}")
+        if sequence in seen:
+            raise RuntimeError(f"duplicate ICMP sequence {sequence}")
+        validate_echo_reply(reply, sequence, expected[sequence])
+        seen.add(sequence)
+
+    oversize_sequence = BURST_PACKETS + 2
+    packet, _ = build_echo_request(OVERSIZE_PACKET_SIZE, oversize_sequence)
+    host_sock.send(packet)
+    host_sock.settimeout(0.25)
     try:
-        completed = subprocess.run(
-            [str(args.kernel)],
-            input=input_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=20,
-            check=False,
+        unexpected = host_sock.recv(65535)
+    except socket.timeout:
+        unexpected = b""
+    if unexpected:
+        raise RuntimeError("oversized packet unexpectedly produced an L3 reply")
+
+    _, length, raw_stats = transact(
+        proc, responses, OP_L3_STATS, request(OP_L3_STATS)
+    )
+    if length != L3_STATS.size:
+        raise RuntimeError(f"L3 stats size mismatch: {length} != {L3_STATS.size}")
+    stats = L3_STATS.unpack(raw_stats)
+    (rx_packets, _rx_bytes, rx_dropped, rx_errors,
+     tx_packets, _tx_bytes, _tx_dropped, tx_errors) = stats
+    required = BURST_PACKETS + 1
+    if rx_packets < required or tx_packets < required:
+        raise RuntimeError(
+            f"L3 packet counts too small: rx={rx_packets} tx={tx_packets} required={required}"
         )
-    except subprocess.TimeoutExpired as exc:
+    if rx_dropped < 1:
+        raise RuntimeError("oversized L3 ingress was not counted as a drop")
+    if rx_errors or tx_errors:
+        raise RuntimeError(f"L3 errors observed: rx={rx_errors} tx={tx_errors}")
+    return stats
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--kernel", required=True, type=Path)
+    parser.add_argument("--boot-log", required=True, type=Path)
+    parser.add_argument("--responses", required=True, type=Path)
+    args = parser.parse_args()
+
+    responses = bytearray()
+    host_sock, child_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+    child_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    child_fd = child_sock.fileno()
+
+    proc = subprocess.Popen(
+        [str(args.kernel)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=(child_fd,),
+    )
+    child_sock.close()
+
+    error: Exception | None = None
+    stats: tuple[int, ...] | None = None
+    try:
+        exercise_m4_control(proc, responses)
+        stats = exercise_l3(proc, responses, host_sock, child_fd)
+        transact(proc, responses, OP_FINISH, request(OP_FINISH))
+        try:
+            returncode = proc.wait(timeout=CONTROL_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("hosted M5.1 kernel did not reach final boundary") from exc
+        if returncode != 86:
+            raise RuntimeError(f"expected hosted kernel exit status 86, got {returncode}")
+    except Exception as exc:  # Preserve diagnostics before returning failure.
+        error = exc
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+    finally:
+        host_sock.close()
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        stderr = proc.stderr.read() if proc.stderr is not None else b""
         args.boot_log.parent.mkdir(parents=True, exist_ok=True)
-        args.boot_log.write_bytes(exc.stderr or b"")
-        print("hosted M4.2 control test timed out", file=sys.stderr)
+        args.boot_log.write_bytes(stderr)
+        args.responses.write_bytes(bytes(responses))
+
+    if error is not None:
+        print(f"hosted M5.1 control/data-path test failed: {error}", file=sys.stderr)
         return 1
 
-    args.boot_log.parent.mkdir(parents=True, exist_ok=True)
-    args.boot_log.write_bytes(completed.stderr)
-    args.responses.write_bytes(completed.stdout)
-
-    if completed.returncode != 86:
-        print(f"expected hosted kernel exit status 86, got {completed.returncode}",
-              file=sys.stderr)
-        return 1
-
-    expected_size = len(commands) * RESPONSE.size
-    if len(completed.stdout) != expected_size:
-        print(
-            f"expected {expected_size} response bytes, got {len(completed.stdout)}",
-            file=sys.stderr,
-        )
-        return 1
-
-    for index, (expected_op, _, expectation) in enumerate(commands):
-        offset = index * RESPONSE.size
-        fields = RESPONSE.unpack_from(completed.stdout, offset)
-        magic, version, op, status, handle, length, raw_data = fields
-
-        if magic != MAGIC or version != VERSION or op != expected_op:
-            print(
-                f"response {index} header mismatch: magic=0x{magic:08x} "
-                f"version={version} op={op}",
-                file=sys.stderr,
-            )
-            return 1
-        if status != 0:
-            print(f"response {index} op {op} failed with {status}", file=sys.stderr)
-            return 1
-        if "handle" in expectation and handle != expectation["handle"]:
-            print(
-                f"response {index} expected handle {expectation['handle']}, got {handle}",
-                file=sys.stderr,
-            )
-            return 1
-        if "length" in expectation and length != expectation["length"]:
-            print(
-                f"response {index} expected length {expectation['length']}, got {length}",
-                file=sys.stderr,
-            )
-            return 1
-        if "data" in expectation:
-            expected_data = expectation["data"]
-            if length != len(expected_data) or raw_data[:length] != expected_data:
-                print(f"response {index} payload mismatch", file=sys.stderr)
-                return 1
-
+    assert stats is not None
     print(
-        "M4.2 host control protocol passed: socket/bind/listen/connect/accept, "
-        "bidirectional I/O, close, Reno and CUBIC"
+        "M5.1 hosted L3 protocol passed: M4.2 socket/CC control, "
+        f"{stats[0]} RX packets, {stats[4]} TX packets, {stats[2]} RX drops"
     )
     return 0
 
