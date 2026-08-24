@@ -585,4 +585,8 @@ static int __init tcpcc_control_selftest(void)
 		  (unsigned long long)l3_stats.rx_dropped);
 	panic("tcpcc: M5.1 reached hosted L3 netdevice boundary after packet-fd validation");
 }
-late_initcall(tcpcc_control_selftest);
+/*
+ * Run after ordinary late initcalls such as sch_default_qdisc(), because M6.1
+ * attaches tcpcc0 and validates the configured default fq qdisc at runtime.
+ */
+late_initcall_sync(tcpcc_control_selftest);

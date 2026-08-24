@@ -17,6 +17,7 @@
 #include <net/checksum.h>
 #include <net/ip_tunnels.h>
 #include <net/net_namespace.h>
+#include <net/sch_generic.h>
 #include <asm/host.h>
 #include <asm/l3net.h>
 
@@ -373,6 +374,22 @@ static int tcpcc_l3_configure_ipv4(struct net_device *dev, u32 address,
 	return devinet_ioctl(&init_net, SIOCSIFNETMASK, &ifr);
 }
 
+static int tcpcc_l3_validate_fq_qdisc(struct net_device *dev)
+{
+	struct Qdisc *qdisc;
+	int ret = 0;
+
+	rtnl_lock();
+	qdisc = rtnl_dereference(dev->qdisc);
+	if (!qdisc || !qdisc->ops || strcmp(qdisc->ops->id, "fq"))
+		ret = -EINVAL;
+	else
+		pr_notice("tcpcc: M6.1 root qdisc fq active on %s\n", dev->name);
+	rtnl_unlock();
+
+	return ret;
+}
+
 int tcpcc_l3_attach(int host_fd, u32 ipv4_addr, u32 prefix_len, int *ifindex)
 {
 	struct tcpcc_l3_priv *priv;
@@ -431,6 +448,10 @@ int tcpcc_l3_attach(int host_fd, u32 ipv4_addr, u32 prefix_len, int *ifindex)
 	}
 
 	ret = tcpcc_l3_configure_ipv4(dev, ipv4_addr, prefix_len);
+	if (ret)
+		goto err_teardown;
+
+	ret = tcpcc_l3_validate_fq_qdisc(dev);
 	if (ret)
 		goto err_teardown;
 
