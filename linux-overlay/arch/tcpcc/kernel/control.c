@@ -16,6 +16,7 @@
 #include <net/net_namespace.h>
 #include <net/tcp.h>
 #include <asm/host.h>
+#include <asm/l3net.h>
 
 #define TCPCC_CONTROL_IRQ          2
 #define TCPCC_CONTROL_MAGIC        0x32434354U /* "TCC2" on x86-64 */
@@ -24,13 +25,13 @@
 #define TCPCC_CONTROL_MAX_PAYLOAD  256
 
 /*
- * M4.2 control ABI.
+ * M4.2/M5.1 control ABI.
  *
  * ARCH=tcpcc currently requires an x86-64 Linux host, so the fixed-width
  * fields below are intentionally native little-endian. Requests arrive on
  * host stdin and responses are written to host stdout. Host readiness only
- * raises a virtual IRQ; all socket work runs in a Linux kthread and may sleep
- * normally.
+ * raises a virtual IRQ; all socket and device-control work runs in a Linux
+ * kthread and may sleep normally.
  */
 enum tcpcc_control_op {
 	TCPCC_CONTROL_SOCKET = 1,
@@ -44,6 +45,8 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_SET_CC,
 	TCPCC_CONTROL_GET_CC,
 	TCPCC_CONTROL_FINISH,
+	TCPCC_CONTROL_L3_ATTACH,
+	TCPCC_CONTROL_L3_STATS,
 };
 
 struct tcpcc_control_request {
@@ -379,6 +382,33 @@ static int tcpcc_control_get_cc(const struct tcpcc_control_request *request,
 	return 0;
 }
 
+static int tcpcc_control_l3_attach(const struct tcpcc_control_request *request,
+				   struct tcpcc_control_response *response)
+{
+	int ifindex;
+	int ret;
+
+	ret = tcpcc_l3_attach(request->handle, request->arg0, request->arg1,
+			      &ifindex);
+	if (!ret)
+		response->handle = ifindex;
+	return ret;
+}
+
+static int tcpcc_control_l3_stats(struct tcpcc_control_response *response)
+{
+	struct tcpcc_l3_stats stats;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(stats) > TCPCC_CONTROL_MAX_PAYLOAD);
+	ret = tcpcc_l3_get_stats(&stats);
+	if (ret)
+		return ret;
+	memcpy(response->data, &stats, sizeof(stats));
+	response->length = sizeof(stats);
+	return 0;
+}
+
 static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 				 struct tcpcc_control_response *response)
 {
@@ -404,7 +434,11 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 	case TCPCC_CONTROL_GET_CC:
 		return tcpcc_control_get_cc(request, response);
 	case TCPCC_CONTROL_FINISH:
-		return 0;
+		return tcpcc_l3_validate();
+	case TCPCC_CONTROL_L3_ATTACH:
+		return tcpcc_control_l3_attach(request, response);
+	case TCPCC_CONTROL_L3_STATS:
+		return tcpcc_control_l3_stats(response);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -473,6 +507,7 @@ static irqreturn_t tcpcc_control_irq_handler(int irq, void *dev_id)
 
 static int __init tcpcc_control_selftest(void)
 {
+	struct tcpcc_l3_stats l3_stats = { };
 	int ret;
 
 	init_completion(&tcpcc_control_request_ready);
@@ -514,11 +549,23 @@ static int __init tcpcc_control_selftest(void)
 	tcpcc_control_task = NULL;
 	tcpcc_control_release_all();
 
+	if (!tcpcc_control_result) {
+		ret = tcpcc_l3_get_stats(&l3_stats);
+		if (ret)
+			tcpcc_control_result = ret;
+	}
+
+	tcpcc_l3_teardown();
+
 	if (tcpcc_control_result)
-		panic("tcpcc: M4.2 host control bridge failed: %d",
+		panic("tcpcc: M5.1 host control/L3 validation failed: %d",
 		      tcpcc_control_result);
 
 	pr_notice("tcpcc: M4.2 host control bridge passed native loopback TCP and Reno/CUBIC control\n");
-	panic("tcpcc: M4.2 reached userspace control boundary after native TCP/CC validation");
+	pr_notice("tcpcc: M5.1 hosted L3 netdevice passed (%llu rx, %llu tx, %llu rx drops)\n",
+		  (unsigned long long)l3_stats.rx_packets,
+		  (unsigned long long)l3_stats.tx_packets,
+		  (unsigned long long)l3_stats.rx_dropped);
+	panic("tcpcc: M5.1 reached hosted L3 netdevice boundary after packet-fd validation");
 }
 late_initcall(tcpcc_control_selftest);
