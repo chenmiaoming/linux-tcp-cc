@@ -41,6 +41,12 @@ DEFAULT_TCP_TRANSFER_BYTES = 16 * 1024
 TCP_CHUNK_BYTES = control.MAX_PAYLOAD
 HOST_DRAIN_TIMEOUT = 30.0
 
+# Appended version-1 control ABI operation. Keep the unpack layout synchronized
+# with struct tcpcc_control_tcp_info in arch/tcpcc/kernel/control.c.
+OP_TCP_INFO = 14
+TCP_INFO = struct.Struct("<BBHIIIIIIIIIQQQ")
+TCP_ESTABLISHED = 1
+
 
 def attach_tun_queue(name: str) -> int:
     encoded = name.encode("ascii")
@@ -103,6 +109,47 @@ def query_stats(proc: subprocess.Popen, responses: bytearray) -> tuple[int, ...]
             f"L3 stats size mismatch: {length} != {control.L3_STATS.size}"
         )
     return control.L3_STATS.unpack(raw_stats)
+
+
+def query_tcp_info(proc: subprocess.Popen, responses: bytearray,
+                   handle: int, cc_name: str) -> dict[str, int]:
+    _, length, raw_info = control.transact(
+        proc,
+        responses,
+        OP_TCP_INFO,
+        control.request(OP_TCP_INFO, handle),
+    )
+    if length != TCP_INFO.size:
+        raise RuntimeError(
+            f"{cc_name}: TCP telemetry size mismatch: {length} != {TCP_INFO.size}"
+        )
+
+    (state, ca_state, _reserved, rto_us, rtt_us, rttvar_us, snd_cwnd,
+     snd_ssthresh, unacked, lost, retrans, total_retrans, pacing_rate,
+     max_pacing_rate, delivery_rate) = TCP_INFO.unpack(raw_info)
+    if state != TCP_ESTABLISHED:
+        raise RuntimeError(
+            f"{cc_name}: TCP telemetry sampled state {state}, expected ESTABLISHED"
+        )
+    if snd_cwnd == 0:
+        raise RuntimeError(f"{cc_name}: TCP telemetry reported zero snd_cwnd")
+
+    return {
+        "state": state,
+        "ca_state": ca_state,
+        "rto_us": rto_us,
+        "rtt_us": rtt_us,
+        "rttvar_us": rttvar_us,
+        "snd_cwnd": snd_cwnd,
+        "snd_ssthresh": snd_ssthresh,
+        "unacked": unacked,
+        "lost": lost,
+        "retrans": retrans,
+        "total_retrans": total_retrans,
+        "pacing_rate": pacing_rate,
+        "max_pacing_rate": max_pacing_rate,
+        "delivery_rate": delivery_rate,
+    }
 
 
 def recv_exact(sock: socket.socket, length: int) -> bytes:
@@ -226,6 +273,8 @@ def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
         if bytes(received_guest) != host_to_guest:
             raise RuntimeError(f"{cc_name}: host-to-guest TCP payload mismatch")
 
+        tcp_info = query_tcp_info(proc, responses, guest_handle, cc_name)
+
         control.transact(
             proc,
             responses,
@@ -235,7 +284,16 @@ def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
         guest_handle = None
         return (
             f"{cc_name}: guest={GUEST_IPV4} host={HOST_IPV4}:{port} "
-            f"guest_to_host={len(guest_to_host)} host_to_guest={len(host_to_guest)}"
+            f"guest_to_host={len(guest_to_host)} host_to_guest={len(host_to_guest)} "
+            f"state={tcp_info['state']} ca_state={tcp_info['ca_state']} "
+            f"rto_us={tcp_info['rto_us']} rtt_us={tcp_info['rtt_us']} "
+            f"rttvar_us={tcp_info['rttvar_us']} snd_cwnd={tcp_info['snd_cwnd']} "
+            f"snd_ssthresh={tcp_info['snd_ssthresh']} unacked={tcp_info['unacked']} "
+            f"lost={tcp_info['lost']} retrans={tcp_info['retrans']} "
+            f"total_retrans={tcp_info['total_retrans']} "
+            f"pacing_rate={tcp_info['pacing_rate']} "
+            f"max_pacing_rate={tcp_info['max_pacing_rate']} "
+            f"delivery_rate={tcp_info['delivery_rate']}"
         )
     finally:
         if conn is not None:
