@@ -102,9 +102,12 @@ def echo_reply_sequence(packet: bytes) -> int | None:
         raise RuntimeError("received truncated L3 packet from tcpcc0")
 
     version_ihl = packet[0]
-    if version_ihl >> 4 != 4:
+    version = version_ihl >> 4
+    if version == 6:
+        return None
+    if version != 4:
         raise RuntimeError(
-            f"received non-IPv4 L3 packet from tcpcc0: first byte 0x{version_ihl:02x}"
+            f"received invalid L3 packet from tcpcc0: first byte 0x{version_ihl:02x}"
         )
     ihl = (version_ihl & 0x0F) * 4
     if ihl < 20 or len(packet) < ihl:
