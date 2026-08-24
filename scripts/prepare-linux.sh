@@ -52,6 +52,21 @@ if [[ -d "$OVERLAY" ]]; then
   done < <(find "$OVERLAY" -type f -print0 | sort -z)
 fi
 
+# M4 and later build native Linux networking code.  Keep this as a preparation
+# invariant so an incomplete upstream checkout is diagnosed before Kbuild turns
+# it into a misleading architecture-local include failure.
+if [[ ! -f "$SRC/include/linux/in.h" ]]; then
+  echo "prepared Linux tree is missing required header: include/linux/in.h" >&2
+  echo "prepared HEAD: $(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown)" >&2
+  echo "HEAD tree entry:" >&2
+  git -C "$SRC" ls-tree HEAD -- include/linux/in.h >&2 || true
+  echo "working-tree status:" >&2
+  git -C "$SRC" status --short --untracked-files=all >&2 || true
+  echo "nearby networking headers:" >&2
+  find "$SRC/include/linux" -maxdepth 1 -type f -name 'in*.h' -print 2>/dev/null | sort >&2 || true
+  exit 1
+fi
+
 git -C "$SRC" diff --check
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
 
