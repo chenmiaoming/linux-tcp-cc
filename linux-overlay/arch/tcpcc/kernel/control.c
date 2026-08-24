@@ -96,6 +96,19 @@ static int tcpcc_control_read_exact(void *buf, size_t len)
 		ssize_t ret = tcpcc_host_read_fd(TCPCC_HOST_STDIN_FILENO,
 						 cursor + done, len - done);
 
+		/*
+		 * Host fds must never provide Linux task sleeping semantics. stdin is
+		 * nonblocking, so a stale readiness completion or a partial request
+		 * returns EAGAIN here. Sleep on the Linux completion until epoll raises
+		 * the next virtual IRQ instead of blocking the single host/vCPU thread
+		 * inside a host read(2).
+		 */
+		if (ret == -EAGAIN) {
+			wait_for_completion(&tcpcc_control_request_ready);
+			if (kthread_should_stop())
+				return -EINTR;
+			continue;
+		}
 		if (ret < 0)
 			return (int)ret;
 		if (!ret)
@@ -522,6 +535,10 @@ static int __init tcpcc_control_selftest(void)
 			  IRQF_NO_THREAD, "tcpcc-m4.2-control", NULL);
 	if (ret)
 		panic("tcpcc: M4.2 request_irq failed: %d", ret);
+
+	ret = tcpcc_host_set_nonblock(TCPCC_HOST_STDIN_FILENO);
+	if (ret)
+		panic("tcpcc: M4.2 stdin nonblocking setup failed: %d", ret);
 
 	ret = tcpcc_host_event_add(TCPCC_HOST_STDIN_FILENO,
 				   TCPCC_HOST_EVENT_IRQ_BASE + TCPCC_CONTROL_IRQ);
