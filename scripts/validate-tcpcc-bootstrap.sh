@@ -13,6 +13,8 @@ LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
   bash "$ROOT/scripts/validate-tcpcc-link.sh"
 
 grep -Fx 'CONFIG_HIGH_RES_TIMERS=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_NET=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_INET=y' "$OUT/.config" >/dev/null
 
 readelf -lW "$OUT/vmlinux" > "$ELF_PROGRAM_HEADERS"
 if ! readelf -hW "$OUT/vmlinux" | grep -Eq 'Type:[[:space:]]+EXEC'; then
@@ -35,7 +37,7 @@ fi
 rm -f "$BOOT_LOG"
 chmod u+x "$OUT/vmlinux"
 set +e
-timeout 15s "$OUT/vmlinux" >"$BOOT_LOG" 2>&1
+timeout 20s "$OUT/vmlinux" >"$BOOT_LOG" 2>&1
 boot_status=$?
 set -e
 
@@ -58,7 +60,11 @@ grep -F 'tcpcc: M3.3 task-switch stress passed (4 workers x 32 sleep/wake rounds
 grep -F 'tcpcc: M3.4 host epoll event loop initialized' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.4 IRQ/softirq event-loop stress passed (64 rounds)' \
   "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M3.4 reached event-loop boundary after IRQ/softirq stress' \
+grep -F 'tcpcc: M4.1 loopback TCP stress starting (16 rounds x 65536 bytes each direction)' \
+  "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M4.1 loopback TCP stress passed (16 rounds, 65536 bytes each direction)' \
+  "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc: M4.1 reached loopback TCP boundary after in-runtime transfer stress' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
@@ -70,6 +76,10 @@ if grep -Fq 'tcpcc: M3.3 reached task-switch boundary after scheduler stress' "$
   echo "hosted boot stopped at the obsolete M3.3 boundary" >&2
   exit 1
 fi
+if grep -Fq 'tcpcc: M3.4 reached event-loop boundary after IRQ/softirq stress' "$BOOT_LOG"; then
+  echo "hosted boot stopped at the obsolete M3.4 boundary" >&2
+  exit 1
+fi
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M3.4 host event-loop/IRQ/softirq validation succeeded\n'
+printf 'M4.1 in-runtime loopback TCP validation succeeded\n'

@@ -47,14 +47,14 @@ jobs:
           bash -n scripts/validate-tcpcc-link.sh
           bash -n scripts/validate-tcpcc-bootstrap.sh
 
-      - name: Execute hosted M3.4 event-loop milestone
+      - name: Execute hosted M4.1 loopback TCP milestone
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m3-4
+          name: tcpcc-bootstrap-m4-1
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-vmlinux.program-headers

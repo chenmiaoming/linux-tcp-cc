@@ -207,10 +207,14 @@ static int __init tcpcc_irq_event_selftest(void)
 		panic("tcpcc: M3.4 test IRQ timer cancel failed: %d", ret);
 	free_irq(TCPCC_HOST_TEST_IRQ, &tcpcc_test_irq_fd);
 	tasklet_kill(&tcpcc_test_tasklet);
+	ret = tcpcc_host_close(tcpcc_test_irq_fd);
+	if (ret)
+		panic("tcpcc: M3.4 test IRQ fd close failed: %d", ret);
+	tcpcc_test_irq_fd = -1;
 
 	pr_notice("tcpcc: M3.4 IRQ/softirq event-loop stress passed (%u rounds)\n",
 		  TCPCC_HOST_IRQ_TEST_ROUNDS);
-	panic("tcpcc: M3.4 reached event-loop boundary after IRQ/softirq stress");
+	return 0;
 }
 postcore_initcall(tcpcc_irq_event_selftest);
 
