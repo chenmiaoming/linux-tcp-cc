@@ -47,6 +47,7 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_FINISH,
 	TCPCC_CONTROL_L3_ATTACH,
 	TCPCC_CONTROL_L3_STATS,
+	TCPCC_CONTROL_TCP_INFO,
 };
 
 struct tcpcc_control_request {
@@ -68,6 +69,29 @@ struct tcpcc_control_response {
 	s32 handle;
 	u32 length;
 	u8 data[TCPCC_CONTROL_MAX_PAYLOAD];
+};
+
+/*
+ * Stable project-side subset of Linux struct tcp_info. Keep this independent
+ * of the UAPI struct's future growth so the version-1 control record remains
+ * fixed at 64 bytes for the x86-64 hosted test ABI.
+ */
+struct tcpcc_control_tcp_info {
+	u8 state;
+	u8 ca_state;
+	u16 reserved;
+	u32 rto_us;
+	u32 rtt_us;
+	u32 rttvar_us;
+	u32 snd_cwnd;
+	u32 snd_ssthresh;
+	u32 unacked;
+	u32 lost;
+	u32 retrans;
+	u32 total_retrans;
+	u64 pacing_rate;
+	u64 max_pacing_rate;
+	u64 delivery_rate;
 };
 
 static struct socket *tcpcc_control_sockets[TCPCC_CONTROL_MAX_SOCKETS];
@@ -395,6 +419,51 @@ static int tcpcc_control_get_cc(const struct tcpcc_control_request *request,
 	return 0;
 }
 
+static int tcpcc_control_tcp_info(const struct tcpcc_control_request *request,
+				  struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_tcp_info snapshot = { };
+	struct socket *sock = tcpcc_control_lookup(request->handle);
+	struct tcp_info info = { };
+	int len = sizeof(info);
+	int ret;
+
+	if (!sock)
+		return -EBADF;
+
+	BUILD_BUG_ON(sizeof(snapshot) != 64);
+	BUILD_BUG_ON(sizeof(snapshot) > TCPCC_CONTROL_MAX_PAYLOAD);
+
+	/*
+	 * Use the ordinary upstream TCP_INFO getsockopt path so locking and the
+	 * snapshot semantics stay owned by native Linux TCP. ARCH=tcpcc only
+	 * narrows the result into its stable host-control record.
+	 */
+	ret = do_tcp_getsockopt(sock->sk, SOL_TCP, TCP_INFO,
+				KERNEL_SOCKPTR(&info), KERNEL_SOCKPTR(&len));
+	if (ret)
+		return ret;
+
+	snapshot.state = info.tcpi_state;
+	snapshot.ca_state = info.tcpi_ca_state;
+	snapshot.rto_us = info.tcpi_rto;
+	snapshot.rtt_us = info.tcpi_rtt;
+	snapshot.rttvar_us = info.tcpi_rttvar;
+	snapshot.snd_cwnd = info.tcpi_snd_cwnd;
+	snapshot.snd_ssthresh = info.tcpi_snd_ssthresh;
+	snapshot.unacked = info.tcpi_unacked;
+	snapshot.lost = info.tcpi_lost;
+	snapshot.retrans = info.tcpi_retrans;
+	snapshot.total_retrans = info.tcpi_total_retrans;
+	snapshot.pacing_rate = info.tcpi_pacing_rate;
+	snapshot.max_pacing_rate = info.tcpi_max_pacing_rate;
+	snapshot.delivery_rate = info.tcpi_delivery_rate;
+
+	memcpy(response->data, &snapshot, sizeof(snapshot));
+	response->length = sizeof(snapshot);
+	return 0;
+}
+
 static int tcpcc_control_l3_attach(const struct tcpcc_control_request *request,
 				   struct tcpcc_control_response *response)
 {
@@ -452,6 +521,8 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_l3_attach(request, response);
 	case TCPCC_CONTROL_L3_STATS:
 		return tcpcc_control_l3_stats(response);
+	case TCPCC_CONTROL_TCP_INFO:
+		return tcpcc_control_tcp_info(request, response);
 	default:
 		return -EOPNOTSUPP;
 	}
