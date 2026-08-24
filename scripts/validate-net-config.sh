@@ -12,7 +12,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 
 # M1 validates that the required symbols and dependencies resolve in upstream
-# Linux. This x86 config is only a bootstrap check, not the future userspace
+# Linux. This x86 config is only a bootstrap check, not the userspace
 # architecture's production configuration.
 make -s -C "$SRC" O="$OUT" ARCH=x86 x86_64_defconfig
 "$SRC/scripts/kconfig/merge_config.sh" -m -O "$OUT" \
@@ -28,10 +28,13 @@ required=(
   CONFIG_TCP_CONG_BBR=y
   CONFIG_NET_SCHED=y
   CONFIG_NET_SCH_FQ=y
+  CONFIG_NET_SCH_DEFAULT=y
+  CONFIG_DEFAULT_FQ=y
+  'CONFIG_DEFAULT_NET_SCH="fq"'
 )
 
 for opt in "${required[@]}"; do
-  if ! grep -qx "$opt" "$OUT/.config"; then
+  if ! grep -Fqx "$opt" "$OUT/.config"; then
     echo "required config did not resolve: $opt" >&2
     exit 1
   fi
