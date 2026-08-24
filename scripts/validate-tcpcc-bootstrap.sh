@@ -8,6 +8,7 @@ OUT="${TCPCC_LINK_OUT:-$ROOT/.build/tcpcc-bootstrap-out}"
 BOOT_LOG="$ROOT/.build/tcpcc-bootstrap.log"
 CONTROL_RESPONSES="$ROOT/.build/tcpcc-control.responses"
 ELF_PROGRAM_HEADERS="$ROOT/.build/tcpcc-vmlinux.program-headers"
+STRACE_LOG="$ROOT/.build/tcpcc-host.strace"
 
 LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
   bash "$ROOT/scripts/validate-tcpcc-link.sh"
@@ -35,12 +36,13 @@ if ! nm "$OUT/vmlinux" | grep -Eq '[[:space:]]tcpcc_switch_context$'; then
   exit 1
 fi
 
-rm -f "$BOOT_LOG" "$CONTROL_RESPONSES"
+rm -f "$BOOT_LOG" "$CONTROL_RESPONSES" "$STRACE_LOG" "$STRACE_LOG".*
 chmod u+x "$OUT/vmlinux"
-python3 "$ROOT/scripts/run-tcpcc-m5-diagnostic.py" \
-  --kernel "$OUT/vmlinux" \
-  --boot-log "$BOOT_LOG" \
-  --responses "$CONTROL_RESPONSES"
+strace -ff -ttt -s 256 -o "$STRACE_LOG" \
+  python3 "$ROOT/scripts/run-tcpcc-m5-diagnostic.py" \
+    --kernel "$OUT/vmlinux" \
+    --boot-log "$BOOT_LOG" \
+    --responses "$CONTROL_RESPONSES"
 
 cat "$BOOT_LOG"
 
