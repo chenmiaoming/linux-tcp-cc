@@ -62,7 +62,9 @@ grep -F 'tcpcc: M4.1 loopback TCP stress passed (16 rounds, 65536 bytes each dir
 grep -F 'tcpcc: M4.2 host control bridge ready on stdin/stdout' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M4.2 host control bridge passed native loopback TCP and Reno/CUBIC control' \
   "$BOOT_LOG" >/dev/null
-grep -F 'Kernel panic - not syncing: tcpcc: M4.2 reached userspace control boundary after native TCP/CC validation' \
+grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$BOOT_LOG" >/dev/null
+grep -F 'Kernel panic - not syncing: tcpcc: M5.1 reached hosted L3 netdevice boundary after packet-fd validation' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 
@@ -82,6 +84,10 @@ if grep -Fq 'tcpcc: M4.1 reached loopback TCP boundary after in-runtime transfer
   echo "hosted boot stopped at the obsolete M4.1 boundary" >&2
   exit 1
 fi
+if grep -Fq 'tcpcc: M4.2 reached userspace control boundary after native TCP/CC validation' "$BOOT_LOG"; then
+  echo "hosted boot stopped at the obsolete M4.2 boundary" >&2
+  exit 1
+fi
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M4.2 userspace control and native TCP congestion-control validation succeeded\n'
+printf 'M5.1 hosted L3 netdevice and packet-fd validation succeeded\n'
