@@ -14,7 +14,12 @@
  * normal kernel memory, time, IRQ and scheduling semantics rather than host
  * APIs.
  */
+#define TCPCC_HOST_STDIN_FILENO  0
+#define TCPCC_HOST_STDOUT_FILENO 1
+
 void tcpcc_host_write(const char *buf, size_t len);
+ssize_t tcpcc_host_read_fd(int fd, void *buf, size_t len);
+ssize_t tcpcc_host_write_fd(int fd, const void *buf, size_t len);
 void __noreturn tcpcc_host_exit(int status);
 void *__init tcpcc_host_map_anon(size_t len);
 int tcpcc_host_close(int fd);
