@@ -13,6 +13,7 @@ on:
       - 'scripts/validate-tcpcc-link.sh'
       - 'scripts/validate-tcpcc-bootstrap.sh'
       - 'scripts/validate-tcpcc-tun.sh'
+      - 'scripts/validate-tcpcc-long-fat.sh'
       - 'scripts/run-tcpcc-control-test.py'
       - 'scripts/run-tcpcc-m6-diagnostic.py'
       - 'scripts/run-tcpcc-tun-test.py'
@@ -51,6 +52,7 @@ jobs:
           bash -n scripts/validate-tcpcc-link.sh
           bash -n scripts/validate-tcpcc-bootstrap.sh
           bash -n scripts/validate-tcpcc-tun.sh
+          bash -n scripts/validate-tcpcc-long-fat.sh
           python3 -m py_compile scripts/run-tcpcc-control-test.py
           python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
           python3 -m py_compile scripts/run-tcpcc-tun-test.py
@@ -61,11 +63,14 @@ jobs:
       - name: Execute hosted M6.2 external TUN TCP milestone
         run: bash scripts/validate-tcpcc-tun.sh
 
+      - name: Execute hosted M6.3 lossless delayed-path milestone
+        run: bash scripts/validate-tcpcc-long-fat.sh
+
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m6-2
+          name: tcpcc-bootstrap-m6-3
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-control.responses
@@ -75,6 +80,12 @@ jobs:
             .build/tcpcc-tun-ping.log
             .build/tcpcc-tun-tcp.log
             .build/tcpcc-tun-link.txt
+            .build/tcpcc-long-fat-bootstrap.log
+            .build/tcpcc-long-fat-control.responses
+            .build/tcpcc-long-fat-ping.log
+            .build/tcpcc-long-fat-tcp.log
+            .build/tcpcc-long-fat-link.txt
+            .build/tcpcc-long-fat-qdisc.txt
             .build/tcpcc-vmlinux.program-headers
             .build/tcpcc-vmlinux.elf-header
             .build/tcpcc-link.env
