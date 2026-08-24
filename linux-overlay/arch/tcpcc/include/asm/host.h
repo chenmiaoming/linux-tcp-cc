@@ -41,6 +41,7 @@ int tcpcc_host_timer_wait(int fd, u64 *expirations);
 
 int __init tcpcc_host_event_loop_init(void);
 int tcpcc_host_event_add(int fd, u64 token);
+int tcpcc_host_event_add_edge(int fd, u64 token);
 int tcpcc_host_event_del(int fd);
 int tcpcc_host_event_wait(u64 *token);
 
