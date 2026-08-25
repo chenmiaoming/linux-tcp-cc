@@ -113,7 +113,7 @@ jobs:
           cd "$root/.deps/linux"
           "$root/.deps/virtme-ng/vng" \
             --skip-modules --cpus 2 --memory 1024M \
-            -- "$root/scripts/run-m7-native-lossless.sh" \
+            -- bash "$root/scripts/run-m7-native-lossless.sh" \
                "$root/.build/m7-native-tcp-probe" | \
             tee "$root/.build/m7-native-lossless.log"
           actual_release=$(sed -n 's/^M7_NATIVE_KERNEL_RELEASE=//p' \
