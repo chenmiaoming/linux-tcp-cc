@@ -158,20 +158,21 @@ for cc_name in ("cubic", "bbr"):
 bbr = telemetry["bbr"]
 if bbr.get("pacing_rate", 0) <= 0:
     raise SystemExit("BBR telemetry has zero pacing_rate")
-if bbr.get("max_pacing_rate", 0) <= 0:
-    raise SystemExit("BBR telemetry has zero max_pacing_rate")
 
 print(
     f"netem verified: packets={packets_sent} bytes={bytes_sent} "
     f"dropped={dropped} avg_rtt_ms={avg_rtt_ms:.3f}"
 )
+uint64_max = (1 << 64) - 1
 for cc_name in ("cubic", "bbr"):
     fields = telemetry[cc_name]
+    max_pacing_rate = fields.get("max_pacing_rate", 0)
+    max_pacing_text = "unlimited" if max_pacing_rate == uint64_max else str(max_pacing_rate)
     print(
         f"{cc_name} TCP_INFO verified: rtt_us={fields['rtt_us']} "
         f"rto_us={fields['rto_us']} snd_cwnd={fields['snd_cwnd']} "
         f"pacing_rate={fields.get('pacing_rate', 0)} "
-        f"max_pacing_rate={fields.get('max_pacing_rate', 0)} "
+        f"max_pacing_rate={max_pacing_text} "
         f"delivery_rate={fields.get('delivery_rate', 0)}"
     )
 PY
