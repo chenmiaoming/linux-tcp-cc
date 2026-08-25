@@ -19,21 +19,21 @@ LINK_LOG="$ROOT/.build/tcpcc-long-fat-link.txt"
 QDISC_LOG="$ROOT/.build/tcpcc-long-fat-qdisc.txt"
 
 if [[ ! -x "$KERNEL" ]]; then
-  echo "M6.3 requires an already-linked executable tcpcc vmlinux: $KERNEL" >&2
+  echo "M6.4 requires an already-linked executable tcpcc vmlinux: $KERNEL" >&2
   exit 1
 fi
 if [[ ! -c /dev/net/tun ]]; then
-  echo "M6.3 requires host /dev/net/tun" >&2
+  echo "M6.4 requires host /dev/net/tun" >&2
   exit 1
 fi
 for command in ip ping sudo tc; do
   if ! command -v "$command" >/dev/null 2>&1; then
-    echo "M6.3 requires host command: $command" >&2
+    echo "M6.4 requires host command: $command" >&2
     exit 1
   fi
 done
 if ! sudo -n true; then
-  echo "M6.3 CI adapter requires passwordless sudo for host TUN/netem configuration" >&2
+  echo "M6.4 CI adapter requires passwordless sudo for host TUN/netem configuration" >&2
   exit 1
 fi
 
@@ -89,14 +89,15 @@ grep -F "inet $HOST_ADDR peer $GUEST_ADDR/32" "$LINK_LOG" >/dev/null
 grep -F 'qdisc netem' "$QDISC_LOG" >/dev/null
 grep -F "delay ${DELAY_MS}ms" "$QDISC_LOG" >/dev/null
 
-python3 - "$QDISC_LOG" "$PING_LOG" "$DELAY_MS" <<'PY'
+python3 - "$QDISC_LOG" "$PING_LOG" "$TCP_LOG" "$DELAY_MS" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 qdisc = Path(sys.argv[1]).read_text(encoding="utf-8")
 ping = Path(sys.argv[2]).read_text(encoding="utf-8")
-delay_ms = float(sys.argv[3])
+tcp_log = Path(sys.argv[3]).read_text(encoding="utf-8")
+delay_ms = float(sys.argv[4])
 
 match = re.search(
     r"Sent\s+(\d+)\s+bytes\s+(\d+)\s+pkt\s+\(dropped\s+(\d+)",
@@ -124,10 +125,55 @@ if avg_rtt_ms < minimum_rtt_ms:
         f"delayed path RTT too small: avg={avg_rtt_ms:.3f}ms "
         f"minimum={minimum_rtt_ms:.3f}ms"
     )
+
+telemetry: dict[str, dict[str, int]] = {}
+for line in tcp_log.splitlines():
+    if not line.startswith(("cubic:", "bbr:")):
+        continue
+    cc_name = line.split(":", 1)[0]
+    fields: dict[str, int] = {}
+    for key, value in re.findall(r"([a-z_]+)=([0-9]+)", line):
+        fields[key] = int(value)
+    telemetry[cc_name] = fields
+
+for cc_name in ("cubic", "bbr"):
+    fields = telemetry.get(cc_name)
+    if fields is None:
+        raise SystemExit(f"missing {cc_name} TCP telemetry")
+    if fields.get("state") != 1:
+        raise SystemExit(f"{cc_name} telemetry is not ESTABLISHED: {fields.get('state')}")
+    if fields.get("snd_cwnd", 0) <= 0:
+        raise SystemExit(f"{cc_name} telemetry has zero snd_cwnd")
+    if fields.get("rto_us", 0) <= 0:
+        raise SystemExit(f"{cc_name} telemetry has zero RTO")
+    if fields.get("rtt_us", 0) <= 0:
+        raise SystemExit(f"{cc_name} telemetry has zero RTT")
+    minimum_tcp_rtt_us = int(delay_ms * 1000.0 * 0.60)
+    if fields["rtt_us"] < minimum_tcp_rtt_us:
+        raise SystemExit(
+            f"{cc_name} TCP_INFO RTT too small: {fields['rtt_us']}us "
+            f"minimum={minimum_tcp_rtt_us}us"
+        )
+
+bbr = telemetry["bbr"]
+if bbr.get("pacing_rate", 0) <= 0:
+    raise SystemExit("BBR telemetry has zero pacing_rate")
+if bbr.get("max_pacing_rate", 0) <= 0:
+    raise SystemExit("BBR telemetry has zero max_pacing_rate")
+
 print(
     f"netem verified: packets={packets_sent} bytes={bytes_sent} "
     f"dropped={dropped} avg_rtt_ms={avg_rtt_ms:.3f}"
 )
+for cc_name in ("cubic", "bbr"):
+    fields = telemetry[cc_name]
+    print(
+        f"{cc_name} TCP_INFO verified: rtt_us={fields['rtt_us']} "
+        f"rto_us={fields['rto_us']} snd_cwnd={fields['snd_cwnd']} "
+        f"pacing_rate={fields.get('pacing_rate', 0)} "
+        f"max_pacing_rate={fields.get('max_pacing_rate', 0)} "
+        f"delivery_rate={fields.get('delivery_rate', 0)}"
+    )
 PY
 
-printf 'M6.3 lossless delayed-path TCP passed CUBIC+BBR (%sms, %s guest->host bytes each)\n' "$DELAY_MS" "$GUEST_TO_HOST_BYTES"
+printf 'M6.4 delayed-path TCP_INFO/pacing passed CUBIC+BBR (%sms, %s guest->host bytes each)\n' "$DELAY_MS" "$GUEST_TO_HOST_BYTES"
