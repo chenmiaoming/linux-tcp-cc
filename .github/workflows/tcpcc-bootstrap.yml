@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/tcpcc-bootstrap.yml'
       - '.github/workflows/tcpcc-link.yml'
+      - 'benchmarks/m7/**'
       - 'linux-overlay/**'
       - 'patches/**'
       - 'scripts/prepare-linux.sh'
@@ -17,6 +18,7 @@ on:
       - 'scripts/run-tcpcc-control-test.py'
       - 'scripts/run-tcpcc-m6-diagnostic.py'
       - 'scripts/run-tcpcc-tun-test.py'
+      - 'scripts/collect-m7-hosted-report.py'
       - 'upstream/**'
       - 'protected/**'
   push:
@@ -56,6 +58,8 @@ jobs:
           python3 -m py_compile scripts/run-tcpcc-control-test.py
           python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
           python3 -m py_compile scripts/run-tcpcc-tun-test.py
+          python3 -m py_compile scripts/collect-m7-hosted-report.py
+          python3 -m json.tool benchmarks/m7/scenarios-v1.json >/dev/null
 
       - name: Execute hosted M6.1 native BBR/default-fq regression
         run: bash scripts/validate-tcpcc-bootstrap.sh
@@ -66,11 +70,23 @@ jobs:
       - name: Execute hosted M6.3 lossless delayed-path milestone
         run: bash scripts/validate-tcpcc-long-fat.sh
 
+      - name: Emit M7.1 hosted parity baseline
+        run: |
+          python3 scripts/collect-m7-hosted-report.py \
+            --scenario-file benchmarks/m7/scenarios-v1.json \
+            --scenario hosted-lossless-delayed-50ms \
+            --upstream-env .build/upstream.env \
+            --tcp-log .build/tcpcc-long-fat-tcp.log \
+            --ping-log .build/tcpcc-long-fat-ping.log \
+            --qdisc-log .build/tcpcc-long-fat-qdisc.txt \
+            --output .build/m7-hosted-lossless.json
+          cat .build/m7-hosted-lossless.json
+
       - name: Upload bootstrap diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-bootstrap-m6-3
+          name: tcpcc-bootstrap-m7-1
           path: |
             .build/tcpcc-bootstrap.log
             .build/tcpcc-control.responses
@@ -86,10 +102,12 @@ jobs:
             .build/tcpcc-long-fat-tcp.log
             .build/tcpcc-long-fat-link.txt
             .build/tcpcc-long-fat-qdisc.txt
+            .build/m7-hosted-lossless.json
             .build/tcpcc-vmlinux.program-headers
             .build/tcpcc-vmlinux.elf-header
             .build/tcpcc-link.env
             .build/prepared.env
+            .build/upstream.env
             .build/patches.sha256
             .build/overlay.sha256
           if-no-files-found: warn
