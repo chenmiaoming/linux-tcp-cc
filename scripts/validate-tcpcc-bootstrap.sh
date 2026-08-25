@@ -66,6 +66,8 @@ grep -F 'tcpcc: M3.3 task-switch stress passed (4 workers x 32 sleep/wake rounds
 grep -F 'tcpcc: M3.4 host epoll event loop initialized' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit token)' \
   "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation token)' \
+  "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.4 IRQ/softirq event-loop stress passed (64 rounds)' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M4.1 loopback TCP stress starting (16 rounds x 65536 bytes each direction)' \
