@@ -61,6 +61,38 @@ state. The same non-mutating policy applies to forwarding-related global
 sysctls. A failed prerequisite produces a precise diagnostic instead of a
 silent host-wide change.
 
+### Read-only host preflight
+
+Preflight completes before tcpcc acquires a TUN fd or installs packet-steering
+state. It reads procfs, inspects `/dev/net/tun`, and resolves required tools; it
+does not invoke a command or open any mutation path. All checks are reported in
+one deterministic `tcpcc.host-preflight.v1` document so operators see every
+problem from one run.
+
+| Stable check | Requirement | Expected state |
+| --- | --- | --- |
+| `cap.net_admin` | required | effective `CAP_NET_ADMIN` bit 12 |
+| `device.tun` | required | character device with read/write access |
+| `tool.ip` | required | iproute2 frontend on `PATH` |
+| `tool.nft` | required | nftables frontend on `PATH` |
+| `sysctl.ipv4_forward` | required | `net.ipv4.ip_forward=1` |
+| `sysctl.tcp_congestion_control` | required | value equals the requested algorithm |
+| `sysctl.tcp_available_congestion_control` | required | requested algorithm is listed |
+| `sysctl.rp_filter.all` | advisory | `net.ipv4.conf.all.rp_filter=0` |
+| `sysctl.rp_filter.default` | advisory | `net.ipv4.conf.default.rp_filter=0` |
+
+Required failures prevent lifecycle acquisition and include an operator
+remediation. Reverse-path filtering is advisory because the correct setting
+depends on the surrounding routing policy, but its observed value is never
+hidden. tcpcc neither writes these sysctls nor treats a warning as permission
+to change them.
+
+The lifecycle ownership journal starts only after this report is green. It may
+later own the newly opened nonpersistent TUN queue, configuration attached to
+that interface, and a uniquely named firewall table. Global sysctls and any
+pre-existing interface, route, table, chain, or rule are outside the journal
+and are never adopted for cleanup.
+
 Per-listener congestion control inside the hosted stack remains tcpcc's
 responsibility and is selected by `--cc`.
 
