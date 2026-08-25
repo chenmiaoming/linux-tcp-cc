@@ -44,12 +44,19 @@ INBOUND_TCP_PORTS = {
     "cubic": 18443,
     "bbr": 18444,
 }
+BRIDGE_TCP_PORT = 18445
+BRIDGE_HANDLE = 1
+BRIDGE_RUNTIME_SLOT = 2
+BRIDGE_BUFFER_LIMIT = 16 * 1024
+BRIDGE_TRANSFER_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 123
+BRIDGE_JOIN_TIMEOUT_MS = 5000
 
 # Appended version-1 control ABI operation. Keep the unpack layout synchronized
 # with struct tcpcc_control_tcp_info in arch/tcpcc/kernel/control.c.
 OP_TCP_INFO = 14
 TCP_INFO = struct.Struct("<BBHIIIIIIIIIQQQ")
 TCP_ESTABLISHED = 1
+BRIDGE_RESULT = struct.Struct("<QQQIIiI")
 
 
 def attach_tun_queue(name: str) -> int:
@@ -172,6 +179,35 @@ def drain_host_socket(sock: socket.socket, length: int,
         result["data"] = recv_exact(sock, length)
     except Exception as exc:  # Propagate reader failures on the control thread.
         result["error"] = exc
+
+
+def bridge_backend_worker(listener: socket.socket, expected: bytes,
+                          result: dict[str, object]) -> None:
+    """Echo after public EOF so the bridge must propagate both half-closes."""
+    conn: socket.socket | None = None
+    try:
+        conn, peer = listener.accept()
+        conn.settimeout(control.CONTROL_TIMEOUT)
+        if peer[0] != "127.0.0.1":
+            raise RuntimeError(
+                f"bridge backend accepted unexpected peer {peer[0]}"
+            )
+
+        received = recv_exact(conn, len(expected))
+        if received != expected:
+            raise RuntimeError("bridge backend payload mismatch")
+        if conn.recv(1):
+            raise RuntimeError("bridge backend received data after expected payload")
+
+        result["data"] = received
+        conn.sendall(received)
+        conn.shutdown(socket.SHUT_WR)
+    except Exception as exc:
+        result["error"] = exc
+    finally:
+        if conn is not None:
+            conn.close()
+        listener.close()
 
 
 def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
@@ -485,6 +521,212 @@ def exercise_inbound_tcp_listener(proc: subprocess.Popen, responses: bytearray,
         client.close()
 
 
+def exercise_single_bridge(proc: subprocess.Popen,
+                           responses: bytearray) -> str:
+    """Bridge one public BBR child to a nonblocking host-loopback backend."""
+    backend_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    backend_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    backend_listener.settimeout(control.CONTROL_TIMEOUT)
+    backend_listener.bind(("127.0.0.1", 0))
+    backend_listener.listen(1)
+    backend_port = backend_listener.getsockname()[1]
+
+    payload = control.make_payload(
+        b"tcpcc-m8.2.4-single-session-bridge:",
+        BRIDGE_TRANSFER_BYTES,
+    )
+    backend_result: dict[str, object] = {}
+    backend_thread = threading.Thread(
+        target=bridge_backend_worker,
+        args=(backend_listener, payload, backend_result),
+        daemon=True,
+    )
+    backend_thread.start()
+
+    listener_handle: int | None = None
+    accepted_handle: int | None = None
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    client.settimeout(control.CONTROL_TIMEOUT)
+
+    try:
+        listener_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_SOCKET,
+            control.request(control.OP_SOCKET),
+        )
+        if listener_handle <= 0:
+            raise RuntimeError(
+                f"bridge-bbr: invalid listener handle {listener_handle}"
+            )
+
+        control.transact(
+            proc,
+            responses,
+            control.OP_SET_CC,
+            control.request(
+                control.OP_SET_CC,
+                listener_handle,
+                data=b"bbr",
+            ),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_GET_CC,
+            control.request(control.OP_GET_CC, listener_handle),
+            {"data": b"bbr"},
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_BIND,
+            control.request(
+                control.OP_BIND,
+                listener_handle,
+                GUEST_IPV4_U32,
+                BRIDGE_TCP_PORT,
+            ),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_LISTEN,
+            control.request(control.OP_LISTEN, listener_handle, 8),
+        )
+
+        client.bind((HOST_IPV4, 0))
+        client.connect((GUEST_IPV4, BRIDGE_TCP_PORT))
+        client_port = client.getsockname()[1]
+
+        accepted_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_ACCEPT,
+            control.request(control.OP_ACCEPT, listener_handle),
+        )
+        if accepted_handle <= 0:
+            raise RuntimeError(
+                f"bridge-bbr: invalid accepted handle {accepted_handle}"
+            )
+        control.transact(
+            proc,
+            responses,
+            control.OP_GET_CC,
+            control.request(control.OP_GET_CC, accepted_handle),
+            {"data": b"bbr"},
+        )
+
+        bridge_control_offset = len(responses)
+        start_request = control.request(
+            control.OP_BRIDGE_START,
+            accepted_handle,
+            control.LOOPBACK,
+            backend_port,
+        )
+        bridge_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_BRIDGE_START,
+            start_request,
+            {"handle": BRIDGE_HANDLE, "length": 0},
+        )
+        accepted_handle = None
+
+        client.sendall(payload)
+        client.shutdown(socket.SHUT_WR)
+        echoed = recv_exact(client, len(payload))
+        if echoed != payload:
+            raise RuntimeError("bridge-bbr: backend-to-public payload mismatch")
+        if client.recv(1):
+            raise RuntimeError("bridge-bbr: public connection did not end at EOF")
+
+        backend_thread.join(HOST_DRAIN_TIMEOUT)
+        if backend_thread.is_alive():
+            raise TimeoutError(
+                "bridge-bbr: backend did not finish within "
+                f"{HOST_DRAIN_TIMEOUT:.0f}s"
+            )
+        if "error" in backend_result:
+            raise RuntimeError(
+                "bridge-bbr: loopback backend failed"
+            ) from backend_result["error"]
+        if backend_result.get("data") != payload:
+            raise RuntimeError("bridge-bbr: public-to-backend payload mismatch")
+
+        join_request = control.request(
+            control.OP_BRIDGE_JOIN,
+            bridge_handle,
+            BRIDGE_JOIN_TIMEOUT_MS,
+        )
+        _, length, raw_result = control.transact(
+            proc,
+            responses,
+            control.OP_BRIDGE_JOIN,
+            join_request,
+            {"length": BRIDGE_RESULT.size},
+        )
+        if length != BRIDGE_RESULT.size:
+            raise RuntimeError(
+                f"bridge-bbr: result size {length} != {BRIDGE_RESULT.size}"
+            )
+        (token, public_to_backend, backend_to_public, buffer_limit,
+         terminal_events, bridge_status, reserved) = BRIDGE_RESULT.unpack(
+             raw_result
+         )
+        generation = (token >> 32) & 0x7FFFFFFF
+        if not token & (1 << 63) or token & 0xFFFFFFFF != BRIDGE_RUNTIME_SLOT:
+            raise RuntimeError(f"bridge-bbr: invalid runtime token 0x{token:016x}")
+        if not generation:
+            raise RuntimeError("bridge-bbr: runtime token has zero generation")
+        if public_to_backend != len(payload) or backend_to_public != len(payload):
+            raise RuntimeError(
+                "bridge-bbr: byte counters mismatch: "
+                f"public-to-backend={public_to_backend} "
+                f"backend-to-public={backend_to_public} expected={len(payload)}"
+            )
+        if buffer_limit != BRIDGE_BUFFER_LIMIT:
+            raise RuntimeError(
+                f"bridge-bbr: buffer limit {buffer_limit} != "
+                f"{BRIDGE_BUFFER_LIMIT}"
+            )
+        if terminal_events & control.HOST_EVENT_ERROR:
+            raise RuntimeError(
+                f"bridge-bbr: terminal host error mask 0x{terminal_events:x}"
+            )
+        if bridge_status or reserved:
+            raise RuntimeError(
+                f"bridge-bbr: status={bridge_status} reserved={reserved}"
+            )
+        bridge_control_records = (
+            start_request
+            + join_request
+            + bytes(responses[bridge_control_offset:])
+        )
+        if payload[:64] in bridge_control_records:
+            raise RuntimeError("bridge-bbr: payload leaked into the control ABI")
+
+        control.transact(
+            proc,
+            responses,
+            control.OP_CLOSE,
+            control.request(control.OP_CLOSE, listener_handle),
+        )
+        listener_handle = None
+        return (
+            f"bridge-bbr: guest={GUEST_IPV4}:{BRIDGE_TCP_PORT} "
+            f"host={HOST_IPV4}:{client_port} "
+            f"backend=127.0.0.1:{backend_port} listener_cc=bbr accepted_cc=bbr "
+            f"public_to_backend={public_to_backend} "
+            f"backend_to_public={backend_to_public} buffer_limit={buffer_limit} "
+            f"data_plane_control_bytes=0 token=0x{token:016x}"
+        )
+    finally:
+        client.close()
+        backend_listener.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--kernel", required=True, type=Path)
@@ -578,6 +820,7 @@ def main() -> int:
                         args.host_to_guest_bytes,
                     )
                 )
+            tcp_log.append(exercise_single_bridge(proc, responses))
 
         # Temporarily let the host emit one 1501-byte IPv4 packet. The hosted
         # tcpcc0 MTU remains 1500, so M5.1 ingress validation must drop it.
