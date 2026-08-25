@@ -12,7 +12,13 @@
 #define TCPCC_HOST_NR_WRITE           1
 #define TCPCC_HOST_NR_CLOSE           3
 #define TCPCC_HOST_NR_MMAP            9
+#define TCPCC_HOST_NR_SOCKET          41
+#define TCPCC_HOST_NR_CONNECT         42
+#define TCPCC_HOST_NR_SENDTO          44
+#define TCPCC_HOST_NR_RECVFROM        45
+#define TCPCC_HOST_NR_SHUTDOWN        48
 #define TCPCC_HOST_NR_SOCKETPAIR      53
+#define TCPCC_HOST_NR_GETSOCKOPT      55
 #define TCPCC_HOST_NR_FCNTL           72
 #define TCPCC_HOST_NR_EPOLL_WAIT      232
 #define TCPCC_HOST_NR_EPOLL_CTL       233
@@ -30,7 +36,13 @@
 #define TCPCC_HOST_ETIMEDOUT      110
 
 #define TCPCC_HOST_AF_UNIX     1
+#define TCPCC_HOST_AF_INET     2
 #define TCPCC_HOST_SOCK_STREAM 1
+#define TCPCC_HOST_IPPROTO_TCP 6
+
+#define TCPCC_HOST_SOL_SOCKET   1
+#define TCPCC_HOST_SO_ERROR     4
+#define TCPCC_HOST_MSG_NOSIGNAL 0x4000
 
 #define TCPCC_HOST_F_GETFL    3
 #define TCPCC_HOST_F_SETFL    4
@@ -62,6 +74,13 @@ struct tcpcc_host_timespec {
 struct tcpcc_host_itimerspec {
 	struct tcpcc_host_timespec it_interval;
 	struct tcpcc_host_timespec it_value;
+};
+
+struct tcpcc_host_sockaddr_in {
+	u16 family;
+	__be16 port;
+	__be32 address;
+	u8 zero[8];
 };
 
 /* x86-64 UAPI struct epoll_event is packed to 12 bytes. */
@@ -117,6 +136,22 @@ static __always_inline long tcpcc_host_syscall4(long nr, long arg0,
 		     : "=a" (ret)
 		     : "a" (nr), "D" (arg0), "S" (arg1), "d" (arg2),
 		       "r" (r10)
+		     : "rcx", "r11", "memory");
+	return ret;
+}
+
+static __always_inline long tcpcc_host_syscall5(long nr, long arg0,
+					 long arg1, long arg2,
+					 long arg3, long arg4)
+{
+	register long r10 asm("r10") = arg3;
+	register long r8 asm("r8") = arg4;
+	long ret;
+
+	asm volatile("syscall"
+		     : "=a" (ret)
+		     : "a" (nr), "D" (arg0), "S" (arg1), "d" (arg2),
+		       "r" (r10), "r" (r8)
 		     : "rcx", "r11", "memory");
 	return ret;
 }
@@ -198,6 +233,93 @@ int tcpcc_host_set_nonblock(int fd)
 	ret = tcpcc_host_syscall3(TCPCC_HOST_NR_FCNTL, fd,
 				  TCPCC_HOST_F_SETFL,
 				  flags | TCPCC_HOST_O_NONBLOCK);
+	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_tcp_socket(void)
+{
+	long ret;
+	int fd;
+
+	ret = tcpcc_host_syscall3(TCPCC_HOST_NR_SOCKET, TCPCC_HOST_AF_INET,
+				 TCPCC_HOST_SOCK_STREAM,
+				 TCPCC_HOST_IPPROTO_TCP);
+	if (ret < 0)
+		return (int)ret;
+
+	fd = (int)ret;
+	ret = tcpcc_host_set_nonblock(fd);
+	if (ret) {
+		tcpcc_host_close(fd);
+		return (int)ret;
+	}
+
+	return fd;
+}
+
+int tcpcc_host_tcp_connect(int fd, __be32 address, __be16 port)
+{
+	struct tcpcc_host_sockaddr_in addr = {
+		.family = TCPCC_HOST_AF_INET,
+		.port = port,
+		.address = address,
+	};
+	long ret;
+
+	ret = tcpcc_host_syscall3(TCPCC_HOST_NR_CONNECT, fd, (long)&addr,
+				 sizeof(addr));
+	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_socket_error(int fd)
+{
+	u32 length = sizeof(int);
+	int error = 0;
+	long ret;
+
+	ret = tcpcc_host_syscall5(TCPCC_HOST_NR_GETSOCKOPT, fd,
+				 TCPCC_HOST_SOL_SOCKET, TCPCC_HOST_SO_ERROR,
+				 (long)&error, (long)&length);
+	if (ret < 0)
+		return (int)ret;
+	if (length != sizeof(error))
+		return -TCPCC_HOST_EIO;
+	return error ? -error : 0;
+}
+
+ssize_t tcpcc_host_send_fd(int fd, const void *buf, size_t len)
+{
+	long ret;
+
+	do {
+		ret = tcpcc_host_syscall6(TCPCC_HOST_NR_SENDTO, fd,
+					 (long)buf, len,
+					 TCPCC_HOST_MSG_NOSIGNAL, 0, 0);
+	} while (ret == -TCPCC_HOST_EINTR);
+
+	return (ssize_t)ret;
+}
+
+ssize_t tcpcc_host_recv_fd(int fd, void *buf, size_t len)
+{
+	long ret;
+
+	do {
+		ret = tcpcc_host_syscall6(TCPCC_HOST_NR_RECVFROM, fd,
+					 (long)buf, len, 0, 0, 0);
+	} while (ret == -TCPCC_HOST_EINTR);
+
+	return (ssize_t)ret;
+}
+
+int tcpcc_host_shutdown(int fd, int how)
+{
+	long ret;
+
+	do {
+		ret = tcpcc_host_syscall2(TCPCC_HOST_NR_SHUTDOWN, fd, how);
+	} while (ret == -TCPCC_HOST_EINTR);
+
 	return ret < 0 ? (int)ret : 0;
 }
 

@@ -6,6 +6,7 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
+#include <linux/jiffies.h>
 #include <linux/kthread.h>
 #include <linux/net.h>
 #include <linux/panic.h>
@@ -23,6 +24,13 @@
 #define TCPCC_CONTROL_VERSION      1
 #define TCPCC_CONTROL_MAX_SOCKETS  16
 #define TCPCC_CONTROL_MAX_PAYLOAD  256
+#define TCPCC_CONTROL_HOST_BACKEND_BYTES 192
+#define TCPCC_CONTROL_HOST_BACKEND_TIMEOUT_MS 3000
+#define TCPCC_CONTROL_HOST_BACKEND_SLOT 1U
+#define TCPCC_CONTROL_HOST_BACKEND_GENERATION 0x4d3823U
+#define TCPCC_CONTROL_HOST_BACKEND_TOKEN \
+	TCPCC_HOST_EVENT_RUNTIME_TOKEN(TCPCC_CONTROL_HOST_BACKEND_SLOT, \
+				       TCPCC_CONTROL_HOST_BACKEND_GENERATION)
 
 /*
  * M4.2/M5.1 control ABI.
@@ -48,6 +56,7 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_L3_ATTACH,
 	TCPCC_CONTROL_L3_STATS,
 	TCPCC_CONTROL_TCP_INFO,
+	TCPCC_CONTROL_HOST_BACKEND_PROBE,
 };
 
 struct tcpcc_control_request {
@@ -92,6 +101,16 @@ struct tcpcc_control_tcp_info {
 	u64 pacing_rate;
 	u64 max_pacing_rate;
 	u64 delivery_rate;
+};
+
+struct tcpcc_control_host_backend_result {
+	u64 token;
+	s32 connect_status;
+	u32 connect_events;
+	u32 terminal_events;
+	u32 tx_bytes;
+	u32 rx_bytes;
+	u32 reserved;
 };
 
 static struct socket *tcpcc_control_sockets[TCPCC_CONTROL_MAX_SOCKETS];
@@ -464,6 +483,244 @@ static int tcpcc_control_tcp_info(const struct tcpcc_control_request *request,
 	return 0;
 }
 
+static u8 tcpcc_control_host_backend_byte(size_t offset)
+{
+	return (u8)((offset * 37U + 11U) & 0xffU);
+}
+
+static int tcpcc_control_host_backend_wait(struct tcpcc_host_event *event)
+{
+	int ret;
+
+	ret = tcpcc_host_runtime_event_wait_timeout(
+		event, msecs_to_jiffies(TCPCC_CONTROL_HOST_BACKEND_TIMEOUT_MS));
+	if (ret)
+		return ret;
+	if (event->token != TCPCC_CONTROL_HOST_BACKEND_TOKEN)
+		return -ESTALE;
+	return 0;
+}
+
+static int tcpcc_control_host_backend_check_error(int fd,
+						  u32 events)
+{
+	int ret;
+
+	if (!(events & TCPCC_HOST_EVENT_ERROR))
+		return 0;
+
+	ret = tcpcc_host_socket_error(fd);
+	return ret ? ret : -EIO;
+}
+
+static int tcpcc_control_host_backend_send(
+				struct tcpcc_control_host_backend_result *result,
+				int fd)
+{
+	u8 payload[TCPCC_CONTROL_HOST_BACKEND_BYTES];
+	size_t offset;
+
+	for (offset = 0; offset < sizeof(payload); offset++)
+		payload[offset] = tcpcc_control_host_backend_byte(offset);
+
+	offset = 0;
+	while (offset < sizeof(payload)) {
+		ssize_t ret = tcpcc_host_send_fd(fd, payload + offset,
+						 sizeof(payload) - offset);
+
+		if (ret == -EAGAIN) {
+			struct tcpcc_host_event event;
+			int wait_ret;
+
+			wait_ret = tcpcc_control_host_backend_wait(&event);
+			if (wait_ret)
+				return wait_ret;
+			wait_ret = tcpcc_control_host_backend_check_error(
+				fd, event.events);
+			if (wait_ret)
+				return wait_ret;
+			if (event.events & TCPCC_HOST_EVENT_HANGUP)
+				return -EPIPE;
+			if (!(event.events & TCPCC_HOST_EVENT_WRITABLE))
+				return -EIO;
+			continue;
+		}
+		if (ret < 0)
+			return (int)ret;
+		if (!ret)
+			return -EIO;
+		offset += ret;
+	}
+
+	result->tx_bytes = offset;
+	return 0;
+}
+
+static int tcpcc_control_host_backend_recv(
+				struct tcpcc_control_host_backend_result *result,
+				int fd)
+{
+	u8 buffer[64];
+	size_t offset = 0;
+	bool eof = false;
+
+	while (!eof) {
+		struct tcpcc_host_event event;
+		int ret;
+
+		ret = tcpcc_control_host_backend_wait(&event);
+		if (ret)
+			return ret;
+		result->terminal_events |= event.events;
+
+		ret = tcpcc_control_host_backend_check_error(fd, event.events);
+		if (ret)
+			return ret;
+		if (!(event.events & (TCPCC_HOST_EVENT_READABLE |
+				      TCPCC_HOST_EVENT_HANGUP)))
+			return -EIO;
+
+		for (;;) {
+			size_t length = offset < TCPCC_CONTROL_HOST_BACKEND_BYTES ?
+				min_t(size_t, sizeof(buffer),
+				      TCPCC_CONTROL_HOST_BACKEND_BYTES - offset) : 1;
+			ssize_t io_ret;
+			size_t i;
+
+			io_ret = tcpcc_host_recv_fd(fd, buffer, length);
+			if (io_ret == -EAGAIN)
+				break;
+			if (io_ret < 0)
+				return (int)io_ret;
+			if (!io_ret) {
+				eof = true;
+				break;
+			}
+			if (offset >= TCPCC_CONTROL_HOST_BACKEND_BYTES)
+				return -EMSGSIZE;
+
+			for (i = 0; i < io_ret; i++) {
+				if (buffer[i] !=
+				    tcpcc_control_host_backend_byte(offset + i))
+					return -EBADMSG;
+			}
+			offset += io_ret;
+		}
+
+		if (!eof && event.events & TCPCC_HOST_EVENT_HANGUP)
+			return -EIO;
+	}
+
+	/* FIN may race the first readable edge after the echoed payload. */
+	if (!(result->terminal_events & TCPCC_HOST_EVENT_HANGUP)) {
+		struct tcpcc_host_event event;
+		int ret;
+
+		ret = tcpcc_control_host_backend_wait(&event);
+		if (ret)
+			return ret;
+		result->terminal_events |= event.events;
+		ret = tcpcc_control_host_backend_check_error(fd, event.events);
+		if (ret)
+			return ret;
+	}
+
+	if (offset != TCPCC_CONTROL_HOST_BACKEND_BYTES ||
+	    !(result->terminal_events & TCPCC_HOST_EVENT_HANGUP))
+		return -EIO;
+	result->rx_bytes = offset;
+	return 0;
+}
+
+static int tcpcc_control_host_backend_probe(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_host_backend_result result = {
+		.token = TCPCC_CONTROL_HOST_BACKEND_TOKEN,
+	};
+	struct tcpcc_host_event event;
+	bool registered = false;
+	int fd = -1;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(result) != 32);
+	BUILD_BUG_ON(sizeof(result) > TCPCC_CONTROL_MAX_PAYLOAD);
+
+	/* This diagnostic operation configures only a host-loopback endpoint. */
+	if (request->handle || request->length || request->arg0 != INADDR_LOOPBACK ||
+	    !request->arg1 || request->arg1 > 0xffffU)
+		return -EINVAL;
+
+	fd = tcpcc_host_tcp_socket();
+	if (fd < 0)
+		return fd;
+
+	ret = tcpcc_host_event_add_mask(fd, result.token,
+					TCPCC_HOST_EVENT_WRITABLE, true);
+	if (ret)
+		goto out;
+	registered = true;
+
+	ret = tcpcc_host_tcp_connect(fd, htonl(request->arg0),
+				     htons((u16)request->arg1));
+	result.connect_status = ret;
+	if (ret && ret != -EINPROGRESS)
+		goto out;
+
+	ret = tcpcc_control_host_backend_wait(&event);
+	if (ret)
+		goto out;
+	result.connect_events = event.events;
+	if (!(event.events & (TCPCC_HOST_EVENT_WRITABLE |
+			      TCPCC_HOST_EVENT_ERROR))) {
+		ret = -EIO;
+		goto out;
+	}
+	ret = tcpcc_host_socket_error(fd);
+	if (ret)
+		goto out;
+	if (!(event.events & TCPCC_HOST_EVENT_WRITABLE)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	ret = tcpcc_control_host_backend_send(&result, fd);
+	if (ret)
+		goto out;
+	ret = tcpcc_host_shutdown(fd, TCPCC_HOST_SHUT_WR);
+	if (ret)
+		goto out;
+
+	ret = tcpcc_host_event_mod_mask(fd, result.token,
+					TCPCC_HOST_EVENT_READABLE, true);
+	if (ret)
+		goto out;
+	ret = tcpcc_control_host_backend_recv(&result, fd);
+	if (ret)
+		goto out;
+
+	memcpy(response->data, &result, sizeof(result));
+	response->length = sizeof(result);
+out:
+	if (registered) {
+		int del_ret = tcpcc_host_event_del(fd);
+
+		if (!ret && del_ret)
+			ret = del_ret;
+	}
+	if (fd >= 0) {
+		int close_ret = tcpcc_host_close(fd);
+
+		if (!ret && close_ret)
+			ret = close_ret;
+	}
+	if (!ret)
+		pr_notice("tcpcc: M8.2.3 nonblocking host TCP backend probe passed (%u bytes each direction)\n",
+			  result.tx_bytes);
+	return ret;
+}
+
 static int tcpcc_control_l3_attach(const struct tcpcc_control_request *request,
 				   struct tcpcc_control_response *response)
 {
@@ -523,6 +780,8 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_l3_stats(response);
 	case TCPCC_CONTROL_TCP_INFO:
 		return tcpcc_control_tcp_info(request, response);
+	case TCPCC_CONTROL_HOST_BACKEND_PROBE:
+		return tcpcc_control_host_backend_probe(request, response);
 	default:
 		return -EOPNOTSUPP;
 	}

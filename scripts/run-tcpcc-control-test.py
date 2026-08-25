@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 import argparse
+import errno
 import os
 import select
 import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -32,10 +34,12 @@ OP_GET_CC = 10
 OP_FINISH = 11
 OP_L3_ATTACH = 12
 OP_L3_STATS = 13
+OP_HOST_BACKEND_PROBE = 15
 
 REQUEST = struct.Struct("<IHHiIII256s")
 RESPONSE = struct.Struct("<IHHiiI256s")
 L3_STATS = struct.Struct("<QQQQQQQQ")
+HOST_BACKEND_RESULT = struct.Struct("<QiIIIII")
 CONTROL_TIMEOUT = 8.0
 PACKET_TIMEOUT = 3.0
 BURST_PACKETS = 32
@@ -44,6 +48,15 @@ MTU_PACKET_SIZE = 1500
 OVERSIZE_PACKET_SIZE = 1501
 MAX_IGNORED_L3_PACKETS = 128
 ICMP_IDENT = 0x4D51
+HOST_EVENT_WRITABLE = 1 << 1
+HOST_EVENT_HANGUP = 1 << 2
+HOST_EVENT_ERROR = 1 << 3
+HOST_BACKEND_PAYLOAD_BYTES = 192
+HOST_BACKEND_SLOT = 1
+HOST_BACKEND_GENERATION = 0x4D3823
+HOST_BACKEND_TOKEN = (
+    (1 << 63) | (HOST_BACKEND_GENERATION << 32) | HOST_BACKEND_SLOT
+)
 
 
 def make_payload(prefix: bytes, size: int) -> bytes:
@@ -207,12 +220,15 @@ def transact(proc: subprocess.Popen, responses: bytearray, op: int,
             f"op {op} response header mismatch: magic=0x{magic:08x} "
             f"version={version} op={response_op}"
         )
-    if status != 0:
-        raise RuntimeError(f"op {op} failed with {status}")
+    expectation = expectation or {}
+    expected_status = expectation.get("status", 0)
+    if status != expected_status:
+        raise RuntimeError(
+            f"op {op} returned {status}, expected {expected_status}"
+        )
     if length > MAX_PAYLOAD:
         raise RuntimeError(f"op {op} returned oversized payload {length}")
 
-    expectation = expectation or {}
     if "handle" in expectation and handle != expectation["handle"]:
         raise RuntimeError(
             f"op {op} expected handle {expectation['handle']}, got {handle}"
@@ -227,6 +243,130 @@ def transact(proc: subprocess.Popen, responses: bytearray, op: int,
             raise RuntimeError(f"op {op} payload mismatch")
 
     return handle, length, raw_data[:length]
+
+
+def host_backend_payload() -> bytes:
+    return bytes(
+        ((offset * 37 + 11) & 0xFF)
+        for offset in range(HOST_BACKEND_PAYLOAD_BYTES)
+    )
+
+
+def recv_exact_socket(sock: socket.socket, length: int) -> bytes:
+    data = bytearray()
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            raise EOFError(f"host backend EOF after {len(data)}/{length} bytes")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def host_backend_echo_worker(listener: socket.socket, expected: bytes,
+                             result: dict[str, object]) -> None:
+    conn: socket.socket | None = None
+    try:
+        conn, peer = listener.accept()
+        conn.settimeout(CONTROL_TIMEOUT)
+        if peer[0] != "127.0.0.1":
+            raise RuntimeError(f"host backend accepted unexpected peer {peer[0]}")
+
+        received = recv_exact_socket(conn, len(expected))
+        if received != expected:
+            raise RuntimeError("host backend received mismatched probe payload")
+        if conn.recv(1) != b"":
+            raise RuntimeError("host backend received data after the probe payload")
+
+        conn.sendall(received)
+        conn.shutdown(socket.SHUT_WR)
+        result["received"] = len(received)
+    except Exception as exc:
+        result["error"] = exc
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def exercise_host_backend(proc: subprocess.Popen, responses: bytearray) -> None:
+    expected = host_backend_payload()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.settimeout(CONTROL_TIMEOUT)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    backend_result: dict[str, object] = {}
+    worker = threading.Thread(
+        target=host_backend_echo_worker,
+        args=(listener, expected, backend_result),
+        daemon=True,
+    )
+    worker.start()
+    listener_closed = False
+
+    try:
+        _, length, raw_result = transact(
+            proc,
+            responses,
+            OP_HOST_BACKEND_PROBE,
+            request(OP_HOST_BACKEND_PROBE, arg0=LOOPBACK, arg1=port),
+        )
+        if length != HOST_BACKEND_RESULT.size:
+            raise RuntimeError(
+                "host backend result size mismatch: "
+                f"{length} != {HOST_BACKEND_RESULT.size}"
+            )
+
+        worker.join(CONTROL_TIMEOUT)
+        if worker.is_alive():
+            raise TimeoutError("host backend echo worker did not finish")
+        if "error" in backend_result:
+            raise RuntimeError(
+                "host backend echo worker failed"
+            ) from backend_result["error"]
+        if backend_result.get("received") != len(expected):
+            raise RuntimeError("host backend echo worker did not receive the full payload")
+
+        (token, connect_status, connect_events, terminal_events,
+         tx_bytes, rx_bytes, reserved) = HOST_BACKEND_RESULT.unpack(raw_result)
+        if token != HOST_BACKEND_TOKEN:
+            raise RuntimeError(
+                f"host backend token mismatch: 0x{token:016x} != "
+                f"0x{HOST_BACKEND_TOKEN:016x}"
+            )
+        if connect_status != -errno.EINPROGRESS:
+            raise RuntimeError(
+                "nonblocking host connect returned "
+                f"{connect_status}, expected {-errno.EINPROGRESS}"
+            )
+        if not connect_events & HOST_EVENT_WRITABLE:
+            raise RuntimeError("host backend connect did not report WRITABLE")
+        if connect_events & HOST_EVENT_ERROR:
+            raise RuntimeError("host backend connect unexpectedly reported ERROR")
+        if not terminal_events & HOST_EVENT_HANGUP:
+            raise RuntimeError("host backend close did not report HANGUP")
+        if terminal_events & HOST_EVENT_ERROR:
+            raise RuntimeError("host backend close unexpectedly reported ERROR")
+        if tx_bytes != len(expected) or rx_bytes != len(expected):
+            raise RuntimeError(
+                f"host backend byte counts mismatch: tx={tx_bytes} rx={rx_bytes}"
+            )
+        if reserved:
+            raise RuntimeError(f"host backend result reserved field is {reserved}")
+
+        # Reuse the now-closed endpoint to exercise EPOLLERR -> SO_ERROR.
+        listener.close()
+        listener_closed = True
+        transact(
+            proc,
+            responses,
+            OP_HOST_BACKEND_PROBE,
+            request(OP_HOST_BACKEND_PROBE, arg0=LOOPBACK, arg1=port),
+            {"status": -errno.ECONNREFUSED},
+        )
+    finally:
+        if not listener_closed:
+            listener.close()
 
 
 def exercise_m4_control(proc: subprocess.Popen, responses: bytearray) -> None:
@@ -372,6 +512,7 @@ def main() -> int:
     stats: tuple[int, ...] | None = None
     try:
         exercise_m4_control(proc, responses)
+        exercise_host_backend(proc, responses)
         stats = exercise_l3(proc, responses, host_sock, child_fd)
         transact(proc, responses, OP_FINISH, request(OP_FINISH))
         try:
@@ -407,6 +548,7 @@ def main() -> int:
     assert stats is not None
     print(
         "M5.1 hosted L3 protocol passed: M4.2 socket/CC control, "
+        "M8.2.3 host-loopback backend, "
         f"{stats[0]} RX packets, {stats[4]} TX packets, {stats[2]} RX drops"
     )
     return 0

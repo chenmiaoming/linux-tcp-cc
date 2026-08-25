@@ -23,7 +23,7 @@
 #define TCPCC_HOST_RUNTIME_QUEUE_LIMIT 64
 #define TCPCC_HOST_RUNTIME_TEST_DELAY_NS (1ULL * NSEC_PER_MSEC)
 #define TCPCC_HOST_RUNTIME_TEST_TOKEN \
-	(TCPCC_HOST_EVENT_RUNTIME_BIT | (0x4d3822ULL << 32) | 7ULL)
+	TCPCC_HOST_EVENT_RUNTIME_TOKEN(7, 0x4d3822)
 
 static unsigned long tcpcc_irq_state = ARCH_IRQ_ENABLED;
 static int tcpcc_test_irq_fd = -1;
@@ -153,6 +153,12 @@ static int tcpcc_runtime_event_dequeue(struct tcpcc_host_event *event,
 int tcpcc_host_runtime_event_wait(struct tcpcc_host_event *event)
 {
 	return tcpcc_runtime_event_dequeue(event, MAX_SCHEDULE_TIMEOUT);
+}
+
+int tcpcc_host_runtime_event_wait_timeout(struct tcpcc_host_event *event,
+					  unsigned long timeout)
+{
+	return tcpcc_runtime_event_dequeue(event, timeout);
 }
 
 void tcpcc_host_idle_wait(void)
