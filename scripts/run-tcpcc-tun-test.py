@@ -3,6 +3,7 @@
 """Exercise hosted Linux ICMP and native TCP/CC through a real host TUN queue."""
 
 import argparse
+import errno
 import fcntl
 import importlib.util
 import os
@@ -45,10 +46,22 @@ INBOUND_TCP_PORTS = {
     "bbr": 18444,
 }
 BRIDGE_TCP_PORT = 18445
-BRIDGE_HANDLE = 1
-BRIDGE_RUNTIME_SLOT = 2
+BRIDGE_CONCURRENT_PORTS = {
+    "fast-cubic": 18446,
+    "delayed-bbr": 18447,
+    "reuse-cubic": 18448,
+}
+BRIDGE_SESSION_LIMIT = 8
+BRIDGE_RUNTIME_SLOT_BASE = 2
+BRIDGE_HANDLE_SLOT_BITS = 4
+BRIDGE_HANDLE_SLOT_MASK = 0x0F
+BRIDGE_HANDLE_GENERATION_MASK = 0x07FFFFFF
 BRIDGE_BUFFER_LIMIT = 16 * 1024
+BRIDGE_TOTAL_BUFFER_LIMIT = 2 * BRIDGE_SESSION_LIMIT * BRIDGE_BUFFER_LIMIT
 BRIDGE_TRANSFER_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 123
+BRIDGE_FAST_BYTES = 8 * BRIDGE_BUFFER_LIMIT + 211
+BRIDGE_DELAYED_BYTES = 32 * BRIDGE_BUFFER_LIMIT + 123
+BRIDGE_REUSE_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 157
 BRIDGE_JOIN_TIMEOUT_MS = 5000
 
 # Appended version-1 control ABI operation. Keep the unpack layout synchronized
@@ -56,7 +69,8 @@ BRIDGE_JOIN_TIMEOUT_MS = 5000
 OP_TCP_INFO = 14
 TCP_INFO = struct.Struct("<BBHIIIIIIIIIQQQ")
 TCP_ESTABLISHED = 1
-BRIDGE_RESULT = struct.Struct("<QQQIIiI")
+# Keep synchronized with struct tcpcc_bridge_result in asm/bridge.h.
+BRIDGE_RESULT = struct.Struct("<QQQIIIIIIIiII")
 
 
 def attach_tun_queue(name: str) -> int:
@@ -182,32 +196,134 @@ def drain_host_socket(sock: socket.socket, length: int,
 
 
 def bridge_backend_worker(listener: socket.socket, expected: bytes,
-                          result: dict[str, object]) -> None:
+                          result: dict[str, object],
+                          ready: threading.Event | None = None,
+                          release: threading.Event | None = None,
+                          receive_buffer: int | None = None) -> None:
     """Echo after public EOF so the bridge must propagate both half-closes."""
     conn: socket.socket | None = None
     try:
+        result["stage"] = "accept"
         conn, peer = listener.accept()
-        conn.settimeout(control.CONTROL_TIMEOUT)
+        conn.settimeout(HOST_DRAIN_TIMEOUT)
         if peer[0] != "127.0.0.1":
             raise RuntimeError(
                 f"bridge backend accepted unexpected peer {peer[0]}"
             )
+        if receive_buffer is not None:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
+        if ready is not None:
+            ready.set()
+        result["stage"] = "release"
+        if release is not None and not release.wait(HOST_DRAIN_TIMEOUT):
+            raise TimeoutError("bridge backend release was not signalled")
 
-        received = recv_exact(conn, len(expected))
+        result["stage"] = "receive"
+        received_buffer = bytearray()
+        while len(received_buffer) < len(expected):
+            chunk = conn.recv(len(expected) - len(received_buffer))
+            if not chunk:
+                raise EOFError(
+                    "bridge backend EOF after "
+                    f"{len(received_buffer)}/{len(expected)} bytes"
+                )
+            received_buffer.extend(chunk)
+            result["received_bytes"] = len(received_buffer)
+        received = bytes(received_buffer)
         if received != expected:
             raise RuntimeError("bridge backend payload mismatch")
         if conn.recv(1):
             raise RuntimeError("bridge backend received data after expected payload")
 
         result["data"] = received
+        result["stage"] = "send"
         conn.sendall(received)
         conn.shutdown(socket.SHUT_WR)
+        result["stage"] = "complete"
     except Exception as exc:
         result["error"] = exc
     finally:
+        if ready is not None:
+            ready.set()
         if conn is not None:
             conn.close()
         listener.close()
+
+
+def decode_bridge_handle(handle: int, label: str) -> tuple[int, int]:
+    if handle <= 0:
+        raise RuntimeError(f"{label}: invalid bridge handle {handle}")
+    raw = handle & 0xFFFFFFFF
+    slot = raw & BRIDGE_HANDLE_SLOT_MASK
+    generation = raw >> BRIDGE_HANDLE_SLOT_BITS
+    if slot < 1 or slot > BRIDGE_SESSION_LIMIT:
+        raise RuntimeError(f"{label}: invalid bridge handle slot {slot}")
+    if generation < 1 or generation > BRIDGE_HANDLE_GENERATION_MASK:
+        raise RuntimeError(
+            f"{label}: invalid bridge handle generation {generation}"
+        )
+    return slot - 1, generation
+
+
+def validate_bridge_result(handle: int, raw_result: bytes, payload: bytes,
+                           label: str) -> dict[str, int]:
+    (token, public_to_backend, backend_to_public, buffer_limit,
+     total_buffer_limit, terminal_events, host_send_eagain,
+     host_partial_writes, host_recv_eagain, session_limit,
+     bridge_status, reserved0, reserved1) = BRIDGE_RESULT.unpack(raw_result)
+    slot, handle_generation = decode_bridge_handle(handle, label)
+    token_slot = token & 0xFFFFFFFF
+    token_generation = (token >> 32) & 0x7FFFFFFF
+    expected_token_slot = BRIDGE_RUNTIME_SLOT_BASE + slot
+    if not token & (1 << 63) or token_slot != expected_token_slot:
+        raise RuntimeError(f"{label}: invalid runtime token 0x{token:016x}")
+    if token_generation != handle_generation:
+        raise RuntimeError(
+            f"{label}: token generation {token_generation} != "
+            f"handle generation {handle_generation}"
+        )
+    if public_to_backend != len(payload) or backend_to_public != len(payload):
+        raise RuntimeError(
+            f"{label}: byte counters mismatch: "
+            f"public-to-backend={public_to_backend} "
+            f"backend-to-public={backend_to_public} expected={len(payload)}"
+        )
+    if buffer_limit != BRIDGE_BUFFER_LIMIT:
+        raise RuntimeError(
+            f"{label}: buffer limit {buffer_limit} != {BRIDGE_BUFFER_LIMIT}"
+        )
+    if total_buffer_limit != BRIDGE_TOTAL_BUFFER_LIMIT:
+        raise RuntimeError(
+            f"{label}: total buffer limit {total_buffer_limit} != "
+            f"{BRIDGE_TOTAL_BUFFER_LIMIT}"
+        )
+    if session_limit != BRIDGE_SESSION_LIMIT:
+        raise RuntimeError(
+            f"{label}: session limit {session_limit} != {BRIDGE_SESSION_LIMIT}"
+        )
+    if terminal_events & control.HOST_EVENT_ERROR:
+        raise RuntimeError(
+            f"{label}: terminal host error mask 0x{terminal_events:x}"
+        )
+    if bridge_status or reserved0 or reserved1:
+        raise RuntimeError(
+            f"{label}: status={bridge_status} "
+            f"reserved={reserved0}/{reserved1}"
+        )
+    return {
+        "token": token,
+        "slot": slot,
+        "generation": handle_generation,
+        "public_to_backend": public_to_backend,
+        "backend_to_public": backend_to_public,
+        "buffer_limit": buffer_limit,
+        "total_buffer_limit": total_buffer_limit,
+        "terminal_events": terminal_events,
+        "host_send_eagain": host_send_eagain,
+        "host_partial_writes": host_partial_writes,
+        "host_recv_eagain": host_recv_eagain,
+        "session_limit": session_limit,
+    }
 
 
 def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
@@ -630,8 +746,9 @@ def exercise_single_bridge(proc: subprocess.Popen,
             responses,
             control.OP_BRIDGE_START,
             start_request,
-            {"handle": BRIDGE_HANDLE, "length": 0},
+            {"length": 0},
         )
+        decode_bridge_handle(bridge_handle, "bridge-bbr")
         accepted_handle = None
 
         client.sendall(payload)
@@ -671,34 +788,12 @@ def exercise_single_bridge(proc: subprocess.Popen,
             raise RuntimeError(
                 f"bridge-bbr: result size {length} != {BRIDGE_RESULT.size}"
             )
-        (token, public_to_backend, backend_to_public, buffer_limit,
-         terminal_events, bridge_status, reserved) = BRIDGE_RESULT.unpack(
-             raw_result
-         )
-        generation = (token >> 32) & 0x7FFFFFFF
-        if not token & (1 << 63) or token & 0xFFFFFFFF != BRIDGE_RUNTIME_SLOT:
-            raise RuntimeError(f"bridge-bbr: invalid runtime token 0x{token:016x}")
-        if not generation:
-            raise RuntimeError("bridge-bbr: runtime token has zero generation")
-        if public_to_backend != len(payload) or backend_to_public != len(payload):
-            raise RuntimeError(
-                "bridge-bbr: byte counters mismatch: "
-                f"public-to-backend={public_to_backend} "
-                f"backend-to-public={backend_to_public} expected={len(payload)}"
-            )
-        if buffer_limit != BRIDGE_BUFFER_LIMIT:
-            raise RuntimeError(
-                f"bridge-bbr: buffer limit {buffer_limit} != "
-                f"{BRIDGE_BUFFER_LIMIT}"
-            )
-        if terminal_events & control.HOST_EVENT_ERROR:
-            raise RuntimeError(
-                f"bridge-bbr: terminal host error mask 0x{terminal_events:x}"
-            )
-        if bridge_status or reserved:
-            raise RuntimeError(
-                f"bridge-bbr: status={bridge_status} reserved={reserved}"
-            )
+        result = validate_bridge_result(
+            bridge_handle,
+            raw_result,
+            payload,
+            "bridge-bbr",
+        )
         bridge_control_records = (
             start_request
             + join_request
@@ -718,13 +813,441 @@ def exercise_single_bridge(proc: subprocess.Popen,
             f"bridge-bbr: guest={GUEST_IPV4}:{BRIDGE_TCP_PORT} "
             f"host={HOST_IPV4}:{client_port} "
             f"backend=127.0.0.1:{backend_port} listener_cc=bbr accepted_cc=bbr "
-            f"public_to_backend={public_to_backend} "
-            f"backend_to_public={backend_to_public} buffer_limit={buffer_limit} "
-            f"data_plane_control_bytes=0 token=0x{token:016x}"
+            f"handle={bridge_handle} slot={result['slot']} "
+            f"generation={result['generation']} "
+            f"public_to_backend={result['public_to_backend']} "
+            f"backend_to_public={result['backend_to_public']} "
+            f"buffer_limit={result['buffer_limit']} "
+            f"total_buffer_limit={result['total_buffer_limit']} "
+            f"session_limit={result['session_limit']} "
+            f"send_eagain={result['host_send_eagain']} "
+            f"data_plane_control_bytes=0 token=0x{result['token']:016x}"
         )
     finally:
         client.close()
         backend_listener.close()
+
+
+def start_bridge_session(proc: subprocess.Popen, responses: bytearray,
+                         label: str, cc_name: str, public_port: int,
+                         payload: bytes,
+                         release: threading.Event | None = None,
+                         receive_buffer: int | None = None) -> dict[str, object]:
+    backend_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    backend_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    backend_listener.settimeout(HOST_DRAIN_TIMEOUT)
+    backend_listener.bind(("127.0.0.1", 0))
+    backend_listener.listen(1)
+    backend_port = backend_listener.getsockname()[1]
+    backend_result: dict[str, object] = {}
+    backend_ready = threading.Event()
+    backend_thread = threading.Thread(
+        target=bridge_backend_worker,
+        args=(
+            backend_listener,
+            payload,
+            backend_result,
+            backend_ready,
+            release,
+            receive_buffer,
+        ),
+        daemon=True,
+    )
+    backend_thread.start()
+
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    client.settimeout(HOST_DRAIN_TIMEOUT)
+    listener_handle: int | None = None
+    accepted_handle: int | None = None
+
+    try:
+        listener_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_SOCKET,
+            control.request(control.OP_SOCKET),
+        )
+        if listener_handle <= 0:
+            raise RuntimeError(
+                f"{label}: invalid listener handle {listener_handle}"
+            )
+        control.transact(
+            proc,
+            responses,
+            control.OP_SET_CC,
+            control.request(
+                control.OP_SET_CC,
+                listener_handle,
+                data=cc_name.encode("ascii"),
+            ),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_GET_CC,
+            control.request(control.OP_GET_CC, listener_handle),
+            {"data": cc_name.encode("ascii")},
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_BIND,
+            control.request(
+                control.OP_BIND,
+                listener_handle,
+                GUEST_IPV4_U32,
+                public_port,
+            ),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_LISTEN,
+            control.request(control.OP_LISTEN, listener_handle, 8),
+        )
+
+        client.bind((HOST_IPV4, 0))
+        client.connect((GUEST_IPV4, public_port))
+        client_port = client.getsockname()[1]
+        accepted_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_ACCEPT,
+            control.request(control.OP_ACCEPT, listener_handle),
+        )
+        if accepted_handle <= 0:
+            raise RuntimeError(
+                f"{label}: invalid accepted handle {accepted_handle}"
+            )
+        control.transact(
+            proc,
+            responses,
+            control.OP_GET_CC,
+            control.request(control.OP_GET_CC, accepted_handle),
+            {"data": cc_name.encode("ascii")},
+        )
+
+        control_offset = len(responses)
+        start_request = control.request(
+            control.OP_BRIDGE_START,
+            accepted_handle,
+            control.LOOPBACK,
+            backend_port,
+        )
+        bridge_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_BRIDGE_START,
+            start_request,
+            {"length": 0},
+        )
+        decode_bridge_handle(bridge_handle, label)
+        accepted_handle = None
+
+        control.transact(
+            proc,
+            responses,
+            control.OP_CLOSE,
+            control.request(control.OP_CLOSE, listener_handle),
+        )
+        listener_handle = None
+        if not backend_ready.wait(control.CONTROL_TIMEOUT):
+            raise TimeoutError(f"{label}: backend accept did not become ready")
+        if "error" in backend_result:
+            raise RuntimeError(
+                f"{label}: backend failed during accept"
+            ) from backend_result["error"]
+
+        return {
+            "label": label,
+            "cc_name": cc_name,
+            "public_port": public_port,
+            "payload": payload,
+            "backend_listener": backend_listener,
+            "backend_port": backend_port,
+            "backend_result": backend_result,
+            "backend_thread": backend_thread,
+            "backend_release": release,
+            "client": client,
+            "client_port": client_port,
+            "bridge_handle": bridge_handle,
+            "control_offset": control_offset,
+            "start_request": start_request,
+        }
+    except Exception:
+        if release is not None:
+            release.set()
+        client.close()
+        backend_listener.close()
+        raise
+
+
+def bridge_client_worker(session: dict[str, object],
+                         done: threading.Event) -> None:
+    client = session["client"]
+    payload = session["payload"]
+    result: dict[str, object] = {}
+    session["client_result"] = result
+    try:
+        assert isinstance(client, socket.socket)
+        assert isinstance(payload, bytes)
+        result["stage"] = "send"
+        client.sendall(payload)
+        client.shutdown(socket.SHUT_WR)
+        result["stage"] = "receive"
+        echoed = recv_exact(client, len(payload))
+        if echoed != payload:
+            raise RuntimeError("backend-to-public payload mismatch")
+        if client.recv(1):
+            raise RuntimeError("public connection did not end at EOF")
+        result["data"] = echoed
+        result["stage"] = "complete"
+    except Exception as exc:
+        result["error"] = exc
+    finally:
+        done.set()
+
+
+def start_bridge_client(session: dict[str, object]) -> None:
+    done = threading.Event()
+    thread = threading.Thread(
+        target=bridge_client_worker,
+        args=(session, done),
+        daemon=True,
+    )
+    session["client_done"] = done
+    session["client_thread"] = thread
+    thread.start()
+
+
+def wait_bridge_client(session: dict[str, object], timeout: float) -> None:
+    label = str(session["label"])
+    done = session["client_done"]
+    assert isinstance(done, threading.Event)
+    if not done.wait(timeout):
+        raise TimeoutError(f"{label}: public client timed out after {timeout:.0f}s")
+    result = session.get("client_result")
+    if not isinstance(result, dict):
+        raise RuntimeError(f"{label}: public client produced no result")
+    if "error" in result:
+        backend_result = session.get("backend_result")
+        backend_stage = None
+        if isinstance(backend_result, dict):
+            backend_stage = (
+                f"{backend_result.get('stage')}/"
+                f"{backend_result.get('received_bytes', 0)}"
+            )
+        raise RuntimeError(
+            f"{label}: public client failed during {result.get('stage')}: "
+            f"{result['error']} (backend stage={backend_stage})"
+        ) from result["error"]
+    if result.get("data") != session["payload"]:
+        raise RuntimeError(f"{label}: public client payload mismatch")
+
+
+def finish_bridge_session(
+    proc: subprocess.Popen,
+    responses: bytearray,
+    session: dict[str, object],
+) -> tuple[dict[str, int], str]:
+    label = str(session["label"])
+    payload = session["payload"]
+    backend_thread = session["backend_thread"]
+    assert isinstance(payload, bytes)
+    assert isinstance(backend_thread, threading.Thread)
+    wait_bridge_client(session, HOST_DRAIN_TIMEOUT)
+    backend_thread.join(HOST_DRAIN_TIMEOUT)
+    if backend_thread.is_alive():
+        raise TimeoutError(f"{label}: backend did not finish")
+    backend_result = session["backend_result"]
+    assert isinstance(backend_result, dict)
+    if "error" in backend_result:
+        raise RuntimeError(f"{label}: loopback backend failed") from backend_result[
+            "error"
+        ]
+    if backend_result.get("data") != payload:
+        raise RuntimeError(f"{label}: public-to-backend payload mismatch")
+
+    bridge_handle = int(session["bridge_handle"])
+    join_request = control.request(
+        control.OP_BRIDGE_JOIN,
+        bridge_handle,
+        BRIDGE_JOIN_TIMEOUT_MS,
+    )
+    _, length, raw_result = control.transact(
+        proc,
+        responses,
+        control.OP_BRIDGE_JOIN,
+        join_request,
+        {"length": BRIDGE_RESULT.size},
+    )
+    if length != BRIDGE_RESULT.size:
+        raise RuntimeError(
+            f"{label}: bridge result size {length} != {BRIDGE_RESULT.size}"
+        )
+    result = validate_bridge_result(
+        bridge_handle,
+        raw_result,
+        payload,
+        label,
+    )
+    start_request = session["start_request"]
+    assert isinstance(start_request, bytes)
+    control_offset = int(session["control_offset"])
+    control_records = (
+        start_request + join_request + bytes(responses[control_offset:])
+    )
+    if payload[:64] in control_records:
+        raise RuntimeError(f"{label}: payload leaked into the control ABI")
+
+    client = session["client"]
+    assert isinstance(client, socket.socket)
+    client.close()
+    log = (
+        f"{label}: guest={GUEST_IPV4}:{session['public_port']} "
+        f"host={HOST_IPV4}:{session['client_port']} "
+        f"backend=127.0.0.1:{session['backend_port']} "
+        f"listener_cc={session['cc_name']} accepted_cc={session['cc_name']} "
+        f"handle={bridge_handle} slot={result['slot']} "
+        f"generation={result['generation']} "
+        f"public_to_backend={result['public_to_backend']} "
+        f"backend_to_public={result['backend_to_public']} "
+        f"send_eagain={result['host_send_eagain']} "
+        f"partial_writes={result['host_partial_writes']} "
+        f"recv_eagain={result['host_recv_eagain']} "
+        f"buffer_limit={result['buffer_limit']} "
+        f"total_buffer_limit={result['total_buffer_limit']} "
+        f"session_limit={result['session_limit']} "
+        f"data_plane_control_bytes=0 token=0x{result['token']:016x}"
+    )
+    return result, log
+
+
+def exercise_concurrent_bridges(proc: subprocess.Popen,
+                                responses: bytearray) -> list[str]:
+    delayed_release = threading.Event()
+    sessions: list[dict[str, object]] = []
+    logs: list[str] = []
+    try:
+        fast = start_bridge_session(
+            proc,
+            responses,
+            "bridge-fast-cubic",
+            "cubic",
+            BRIDGE_CONCURRENT_PORTS["fast-cubic"],
+            control.make_payload(
+                b"tcpcc-m8.2.5-concurrent-fast-cubic:",
+                BRIDGE_FAST_BYTES,
+            ),
+        )
+        sessions.append(fast)
+        delayed = start_bridge_session(
+            proc,
+            responses,
+            "bridge-delayed-bbr",
+            "bbr",
+            BRIDGE_CONCURRENT_PORTS["delayed-bbr"],
+            control.make_payload(
+                b"tcpcc-m8.2.5-concurrent-delayed-bbr:",
+                BRIDGE_DELAYED_BYTES,
+            ),
+            release=delayed_release,
+            receive_buffer=4096,
+        )
+        sessions.append(delayed)
+
+        start_bridge_client(delayed)
+        start_bridge_client(fast)
+        wait_bridge_client(fast, 15.0)
+        delayed_done = delayed["client_done"]
+        assert isinstance(delayed_done, threading.Event)
+        if delayed_done.is_set():
+            raise RuntimeError(
+                "bridge-delayed-bbr: completed before backend release"
+            )
+
+        fast_result, fast_log = finish_bridge_session(proc, responses, fast)
+        logs.append(fast_log)
+
+        reuse = start_bridge_session(
+            proc,
+            responses,
+            "bridge-reuse-cubic",
+            "cubic",
+            BRIDGE_CONCURRENT_PORTS["reuse-cubic"],
+            control.make_payload(
+                b"tcpcc-m8.2.5-reused-slot-cubic:",
+                BRIDGE_REUSE_BYTES,
+            ),
+        )
+        sessions.append(reuse)
+        old_slot, old_generation = decode_bridge_handle(
+            int(fast["bridge_handle"]), "bridge-fast-cubic"
+        )
+        new_slot, new_generation = decode_bridge_handle(
+            int(reuse["bridge_handle"]), "bridge-reuse-cubic"
+        )
+        if new_slot != old_slot or new_generation == old_generation:
+            raise RuntimeError(
+                "bridge-reuse-cubic: released slot was not reused with a new "
+                f"generation (old={old_slot}/{old_generation}, "
+                f"new={new_slot}/{new_generation})"
+            )
+        control.transact(
+            proc,
+            responses,
+            control.OP_BRIDGE_JOIN,
+            control.request(
+                control.OP_BRIDGE_JOIN,
+                int(fast["bridge_handle"]),
+                1,
+            ),
+            {"status": -errno.ENOENT},
+        )
+
+        start_bridge_client(reuse)
+        wait_bridge_client(reuse, 15.0)
+        reuse_result, reuse_log = finish_bridge_session(proc, responses, reuse)
+        logs.append(reuse_log)
+        if delayed_done.is_set():
+            raise RuntimeError(
+                "bridge-delayed-bbr: completed while its backend remained blocked"
+            )
+
+        delayed_release.set()
+        wait_bridge_client(delayed, HOST_DRAIN_TIMEOUT)
+        delayed_result, delayed_log = finish_bridge_session(
+            proc,
+            responses,
+            delayed,
+        )
+        logs.append(delayed_log)
+        logs.append(
+            "bridge-concurrency: "
+            f"fast_handle={fast['bridge_handle']} "
+            f"delayed_handle={delayed['bridge_handle']} "
+            f"reused_handle={reuse['bridge_handle']} "
+            f"reused_slot={new_slot} old_generation={old_generation} "
+            f"new_generation={new_generation} stale_handle_status={-errno.ENOENT} "
+            "release_barrier=passed "
+            f"delayed_send_eagain={delayed_result['host_send_eagain']} "
+            f"fast_bytes={fast_result['public_to_backend']} "
+            f"reuse_bytes={reuse_result['public_to_backend']} "
+            f"delayed_bytes={delayed_result['public_to_backend']} "
+            f"total_buffer_limit={delayed_result['total_buffer_limit']} "
+            f"session_limit={delayed_result['session_limit']}"
+        )
+        return logs
+    finally:
+        delayed_release.set()
+        for session in sessions:
+            client = session.get("client")
+            if isinstance(client, socket.socket):
+                client.close()
+            listener = session.get("backend_listener")
+            if isinstance(listener, socket.socket):
+                listener.close()
 
 
 def main() -> int:
@@ -821,6 +1344,7 @@ def main() -> int:
                     )
                 )
             tcp_log.append(exercise_single_bridge(proc, responses))
+            tcp_log.extend(exercise_concurrent_bridges(proc, responses))
 
         # Temporarily let the host emit one 1501-byte IPv4 packet. The hosted
         # tcpcc0 MTU remains 1500, so M5.1 ingress validation must drop it.
