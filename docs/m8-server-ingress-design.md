@@ -123,6 +123,48 @@ once in reverse acquisition order, continues after individual cleanup errors,
 and reports every failed callback. Consequently the later DNAT entry is
 registered after the TUN and is removed before the final TUN fd is closed.
 
+### Exact-match DNAT transaction
+
+Packet steering is acquired only after the TUN queue is configured and entered
+in the ownership journal. tcpcc creates one collision-resistant table in the
+IPv4 nftables family through a single `nft --file -` invocation. The batch uses
+`create table`, whose exclusive semantics reject an existing name; `add table`
+is deliberately forbidden because nftables permits it to reuse an existing
+table.
+
+The same atomic batch creates one base chain and one rule equivalent to:
+
+```text
+create table ip tcpcc_<instance>
+add chain ip tcpcc_<instance> prerouting { type nat hook prerouting priority dstnat; policy accept; }
+add rule ip tcpcc_<instance> prerouting ip daddr <listen-address> tcp dport <listen-port> counter dnat to <hosted-address>:<hosted-port>
+```
+
+Addresses, ports, and the optional bounded table identifier are validated
+before invoking nftables. The command is an argv array and the generated batch
+is passed on stdin; no shell interprets either input. A rejected transaction
+creates no partial table, chain, or rule and therefore acquires no cleanup
+ownership. A successful lease deletes only `table ip tcpcc_<instance>`, once,
+and reports a failed deletion through the journal.
+
+The rule intentionally matches both the exact public IPv4 address and exact
+TCP destination port. It does not redirect other addresses, UDP, or another
+port. The NAT chain sees the first packet of a connection; conntrack applies
+the stored translation to subsequent packets and reverses the hosted source
+address and port on replies. tcpcc does not add a broad forwarding policy,
+SNAT/masquerade rule, or sysctl write. Those host-wide routing and firewall
+prerequisites remain operator policy.
+
+The privileged lifecycle gate builds disposable client, router, and hosted
+network namespaces. The router and hosted namespaces each own a real
+nonpersistent TUN queue, with userspace relaying only their raw IP packets. A
+TCP payload must therefore traverse exact DNAT and the TUN path in both
+directions. The gate verifies the nft counter and conntrack original/reply
+tuples, rejects an existing requested table, then proves reverse cleanup
+removes DNAT before TUN while an unrelated table remains byte-for-byte
+unchanged. Namespace-scoped test prerequisites are destroyed with the test;
+they are not product behavior.
+
 Per-listener congestion control inside the hosted stack remains tcpcc's
 responsibility and is selected by `--cc`.
 
