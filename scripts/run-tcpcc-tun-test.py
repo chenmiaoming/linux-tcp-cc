@@ -40,6 +40,10 @@ OVERSIZE_PING_PAYLOAD = 1473  # 20 + 8 + 1473 = 1501 bytes.
 DEFAULT_TCP_TRANSFER_BYTES = 16 * 1024
 TCP_CHUNK_BYTES = control.MAX_PAYLOAD
 HOST_DRAIN_TIMEOUT = 30.0
+INBOUND_TCP_PORTS = {
+    "cubic": 18443,
+    "bbr": 18444,
+}
 
 # Appended version-1 control ABI operation. Keep the unpack layout synchronized
 # with struct tcpcc_control_tcp_info in arch/tcpcc/kernel/control.c.
@@ -301,6 +305,186 @@ def exercise_external_tcp(proc: subprocess.Popen, responses: bytearray,
         listener.close()
 
 
+def exercise_inbound_tcp_listener(proc: subprocess.Popen, responses: bytearray,
+                                  cc_name: str, server_to_client_bytes: int,
+                                  client_to_server_bytes: int) -> str:
+    """Prove that a hosted listener and its accepted child use the requested CC."""
+    port = INBOUND_TCP_PORTS[cc_name]
+    listener_handle: int | None = None
+    accepted_handle: int | None = None
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    client.settimeout(control.CONTROL_TIMEOUT)
+
+    server_to_client = control.make_payload(
+        f"tcpcc-tun-{cc_name}-server-to-client:".encode("ascii"),
+        server_to_client_bytes,
+    )
+    client_to_server = control.make_payload(
+        f"tcpcc-tun-{cc_name}-client-to-server:".encode("ascii"),
+        client_to_server_bytes,
+    )
+
+    try:
+        listener_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_SOCKET,
+            control.request(control.OP_SOCKET),
+        )
+        if listener_handle <= 0:
+            raise RuntimeError(
+                f"listener-{cc_name}: invalid listener handle {listener_handle}"
+            )
+
+        control.transact(
+            proc,
+            responses,
+            control.OP_SET_CC,
+            control.request(
+                control.OP_SET_CC,
+                listener_handle,
+                data=cc_name.encode("ascii"),
+            ),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_GET_CC,
+            control.request(control.OP_GET_CC, listener_handle),
+            {"data": cc_name.encode("ascii")},
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_BIND,
+            control.request(
+                control.OP_BIND,
+                listener_handle,
+                GUEST_IPV4_U32,
+                port,
+            ),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_LISTEN,
+            control.request(control.OP_LISTEN, listener_handle, 8),
+        )
+
+        # Bind the host-side client explicitly so this exercises the real TUN
+        # path in the same direction as a future public ingress connection.
+        client.bind((HOST_IPV4, 0))
+        client.connect((GUEST_IPV4, port))
+        client_port = client.getsockname()[1]
+
+        accepted_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_ACCEPT,
+            control.request(control.OP_ACCEPT, listener_handle),
+        )
+        if accepted_handle <= 0:
+            raise RuntimeError(
+                f"listener-{cc_name}: invalid accepted handle {accepted_handle}"
+            )
+        control.transact(
+            proc,
+            responses,
+            control.OP_GET_CC,
+            control.request(control.OP_GET_CC, accepted_handle),
+            {"data": cc_name.encode("ascii")},
+        )
+
+        host_result: dict[str, object] = {}
+        host_reader = threading.Thread(
+            target=drain_host_socket,
+            args=(client, len(server_to_client), host_result),
+            daemon=True,
+        )
+        host_reader.start()
+        for offset in range(0, len(server_to_client), TCP_CHUNK_BYTES):
+            chunk = server_to_client[offset:offset + TCP_CHUNK_BYTES]
+            control.transact(
+                proc,
+                responses,
+                control.OP_WRITE,
+                control.request(control.OP_WRITE, accepted_handle, data=chunk),
+                {"length": len(chunk)},
+            )
+        host_reader.join(HOST_DRAIN_TIMEOUT)
+        if host_reader.is_alive():
+            raise TimeoutError(
+                f"listener-{cc_name}: host drain did not finish within "
+                f"{HOST_DRAIN_TIMEOUT:.0f}s"
+            )
+        if "error" in host_result:
+            raise RuntimeError(
+                f"listener-{cc_name}: host drain failed"
+            ) from host_result["error"]
+        if host_result.get("data") != server_to_client:
+            raise RuntimeError(
+                f"listener-{cc_name}: server-to-client TCP payload mismatch"
+            )
+
+        client.sendall(client_to_server)
+        received_server = bytearray()
+        for offset in range(0, len(client_to_server), TCP_CHUNK_BYTES):
+            chunk = client_to_server[offset:offset + TCP_CHUNK_BYTES]
+            _, _, data = control.transact(
+                proc,
+                responses,
+                control.OP_READ,
+                control.request(control.OP_READ, accepted_handle, len(chunk)),
+                {"data": chunk},
+            )
+            received_server.extend(data)
+        if bytes(received_server) != client_to_server:
+            raise RuntimeError(
+                f"listener-{cc_name}: client-to-server TCP payload mismatch"
+            )
+
+        tcp_info = query_tcp_info(
+            proc,
+            responses,
+            accepted_handle,
+            f"listener-{cc_name}",
+        )
+
+        control.transact(
+            proc,
+            responses,
+            control.OP_CLOSE,
+            control.request(control.OP_CLOSE, accepted_handle),
+        )
+        accepted_handle = None
+        control.transact(
+            proc,
+            responses,
+            control.OP_CLOSE,
+            control.request(control.OP_CLOSE, listener_handle),
+        )
+        listener_handle = None
+        return (
+            f"listener-{cc_name}: guest={GUEST_IPV4}:{port} "
+            f"host={HOST_IPV4}:{client_port} listener_cc={cc_name} "
+            f"accepted_cc={cc_name} server_to_client={len(server_to_client)} "
+            f"client_to_server={len(client_to_server)} state={tcp_info['state']} "
+            f"ca_state={tcp_info['ca_state']} rto_us={tcp_info['rto_us']} "
+            f"rtt_us={tcp_info['rtt_us']} rttvar_us={tcp_info['rttvar_us']} "
+            f"snd_cwnd={tcp_info['snd_cwnd']} "
+            f"snd_ssthresh={tcp_info['snd_ssthresh']} "
+            f"unacked={tcp_info['unacked']} lost={tcp_info['lost']} "
+            f"retrans={tcp_info['retrans']} "
+            f"total_retrans={tcp_info['total_retrans']} "
+            f"pacing_rate={tcp_info['pacing_rate']} "
+            f"max_pacing_rate={tcp_info['max_pacing_rate']} "
+            f"delivery_rate={tcp_info['delivery_rate']}"
+        )
+    finally:
+        client.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--kernel", required=True, type=Path)
@@ -316,6 +500,11 @@ def main() -> int:
     parser.add_argument(
         "--host-to-guest-bytes", type=int, default=DEFAULT_TCP_TRANSFER_BYTES,
         help="bytes returned by the host on each CUBIC/BBR connection",
+    )
+    parser.add_argument(
+        "--exercise-listeners",
+        action="store_true",
+        help="also accept host-originated TCP on hosted CUBIC/BBR listeners",
     )
     args = parser.parse_args()
 
@@ -377,6 +566,18 @@ def main() -> int:
                     args.host_to_guest_bytes,
                 )
             )
+
+        if args.exercise_listeners:
+            for cc_name in ("cubic", "bbr"):
+                tcp_log.append(
+                    exercise_inbound_tcp_listener(
+                        proc,
+                        responses,
+                        cc_name,
+                        args.guest_to_host_bytes,
+                        args.host_to_guest_bytes,
+                    )
+                )
 
         # Temporarily let the host emit one 1501-byte IPv4 packet. The hosted
         # tcpcc0 MTU remains 1500, so M5.1 ingress validation must drop it.
@@ -457,7 +658,8 @@ def main() -> int:
 
     assert stats is not None
     print(
-        "real TUN TCP passed: CUBIC+BBR; "
+        "real TUN TCP passed: CUBIC+BBR"
+        f"{' outbound+inbound' if args.exercise_listeners else ' outbound'}; "
         f"rx={stats[0]} tx={stats[4]} rx_dropped={stats[2]} "
         f"host={HOST_IPV4} guest={GUEST_IPV4} "
         f"guest_to_host={args.guest_to_host_bytes} "

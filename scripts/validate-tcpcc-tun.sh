@@ -56,7 +56,8 @@ python3 "$ROOT/scripts/run-tcpcc-tun-test.py" \
   --boot-log "$BOOT_LOG" \
   --responses "$CONTROL_RESPONSES" \
   --ping-log "$PING_LOG" \
-  --tcp-log "$TCP_LOG"
+  --tcp-log "$TCP_LOG" \
+  --exercise-listeners
 
 cat "$PING_LOG"
 cat "$TCP_LOG"
@@ -72,9 +73,14 @@ grep -F 'tcpcc-host: panic boundary -> exit(86)' "$BOOT_LOG" >/dev/null
 grep -F 'cubic: guest=192.0.2.2 host=192.0.2.1:' "$TCP_LOG" >/dev/null
 grep -F 'bbr: guest=192.0.2.2 host=192.0.2.1:' "$TCP_LOG" >/dev/null
 grep -F 'guest_to_host=16384 host_to_guest=16384' "$TCP_LOG" >/dev/null
+grep -F 'listener-cubic: guest=192.0.2.2:18443 host=192.0.2.1:' "$TCP_LOG" >/dev/null
+grep -F 'listener-bbr: guest=192.0.2.2:18444 host=192.0.2.1:' "$TCP_LOG" >/dev/null
+grep -F 'listener_cc=cubic accepted_cc=cubic' "$TCP_LOG" >/dev/null
+grep -F 'listener_cc=bbr accepted_cc=bbr' "$TCP_LOG" >/dev/null
+grep -F 'server_to_client=16384 client_to_server=16384' "$TCP_LOG" >/dev/null
 
 grep -F "${TUN_NAME}:" "$LINK_LOG" >/dev/null
 grep -F 'mtu 1500' "$LINK_LOG" >/dev/null
 grep -F "inet $HOST_ADDR peer $GUEST_ADDR/32" "$LINK_LOG" >/dev/null
 
-printf 'M6.2 real TUN adapter passed native external TCP with CUBIC and BBR\n'
+printf 'M8.1 real TUN adapter passed outbound and inbound TCP with CUBIC and BBR\n'

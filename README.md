@@ -33,6 +33,9 @@ Development is milestone-driven. Each independently verifiable task is developed
 
 The initial roadmap is tracked in GitHub issues M0 through M8. Early milestones establish upstream provenance, the overlay/build system, and the minimal userspace kernel runtime before enabling BBR performance work.
 
+M8's target product is a TUN-backed inbound server TCP front end, described in
+[`docs/m8-server-ingress-design.md`](docs/m8-server-ingress-design.md).
+
 ## Fetch the pinned Linux source
 
 ```bash
