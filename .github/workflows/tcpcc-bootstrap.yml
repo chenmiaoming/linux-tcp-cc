@@ -64,7 +64,7 @@ jobs:
       - name: Execute hosted M6.1 native BBR/default-fq regression
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
-      - name: Execute hosted M6.2 external TUN TCP milestone
+      - name: Execute hosted M8.1 inbound TUN TCP milestone
         run: bash scripts/validate-tcpcc-tun.sh
 
       - name: Execute hosted M6.3 lossless delayed-path milestone
