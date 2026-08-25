@@ -92,7 +92,7 @@ jobs:
           expected_release="${LINUX_VERSION}${localversion}"
           cd "$root/.deps/linux"
           "$root/.deps/virtme-ng/vng" \
-            --build --skip-modules --jobs 2 \
+            --build --skip-modules --jobs 4 \
             --config "$root/benchmarks/m7/native-kernel.config" \
             "LOCALVERSION=$localversion"
           test -s arch/x86/boot/bzImage
