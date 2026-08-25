@@ -7,6 +7,7 @@
 #include <linux/kthread.h>
 #include <linux/mutex.h>
 #include <linux/net.h>
+#include <linux/sched/task.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uio.h>
@@ -359,15 +360,18 @@ static void tcpcc_bridge_stop_setup_tasks(void)
 {
 	WRITE_ONCE(tcpcc_bridge.running, false);
 	complete_all(&tcpcc_bridge.start);
-	if (tcpcc_bridge.event_task)
-		kthread_stop(tcpcc_bridge.event_task);
-	if (tcpcc_bridge.public_to_backend_task)
-		kthread_stop(tcpcc_bridge.public_to_backend_task);
-	if (tcpcc_bridge.backend_to_public_task)
-		kthread_stop(tcpcc_bridge.backend_to_public_task);
-	tcpcc_bridge.event_task = NULL;
-	tcpcc_bridge.public_to_backend_task = NULL;
-	tcpcc_bridge.backend_to_public_task = NULL;
+	if (tcpcc_bridge.event_task) {
+		kthread_stop_put(tcpcc_bridge.event_task);
+		tcpcc_bridge.event_task = NULL;
+	}
+	if (tcpcc_bridge.public_to_backend_task) {
+		kthread_stop_put(tcpcc_bridge.public_to_backend_task);
+		tcpcc_bridge.public_to_backend_task = NULL;
+	}
+	if (tcpcc_bridge.backend_to_public_task) {
+		kthread_stop_put(tcpcc_bridge.backend_to_public_task);
+		tcpcc_bridge.backend_to_public_task = NULL;
+	}
 }
 
 static void tcpcc_bridge_close_host(void)
@@ -421,6 +425,7 @@ int tcpcc_bridge_start(struct socket *public_sock, __be32 backend_address,
 		tcpcc_bridge.event_task = NULL;
 		goto close_host;
 	}
+	get_task_struct(tcpcc_bridge.event_task);
 	tcpcc_bridge.public_to_backend_task = kthread_run(
 		tcpcc_bridge_public_to_backend_thread, NULL, "tcpcc-m8.2-p2b");
 	if (IS_ERR(tcpcc_bridge.public_to_backend_task)) {
@@ -428,6 +433,7 @@ int tcpcc_bridge_start(struct socket *public_sock, __be32 backend_address,
 		tcpcc_bridge.public_to_backend_task = NULL;
 		goto stop_tasks;
 	}
+	get_task_struct(tcpcc_bridge.public_to_backend_task);
 	tcpcc_bridge.backend_to_public_task = kthread_run(
 		tcpcc_bridge_backend_to_public_thread, NULL, "tcpcc-m8.2-b2p");
 	if (IS_ERR(tcpcc_bridge.backend_to_public_task)) {
@@ -435,6 +441,7 @@ int tcpcc_bridge_start(struct socket *public_sock, __be32 backend_address,
 		tcpcc_bridge.backend_to_public_task = NULL;
 		goto stop_tasks;
 	}
+	get_task_struct(tcpcc_bridge.backend_to_public_task);
 
 	ret = tcpcc_host_event_mod_mask(
 		tcpcc_bridge.host_fd, tcpcc_bridge.token,
@@ -466,11 +473,11 @@ static int tcpcc_bridge_reap(struct tcpcc_bridge_result *result)
 	int status;
 
 	if (tcpcc_bridge.event_task)
-		kthread_stop(tcpcc_bridge.event_task);
+		kthread_stop_put(tcpcc_bridge.event_task);
 	if (tcpcc_bridge.public_to_backend_task)
-		kthread_stop(tcpcc_bridge.public_to_backend_task);
+		kthread_stop_put(tcpcc_bridge.public_to_backend_task);
 	if (tcpcc_bridge.backend_to_public_task)
-		kthread_stop(tcpcc_bridge.backend_to_public_task);
+		kthread_stop_put(tcpcc_bridge.backend_to_public_task);
 
 	if (tcpcc_bridge.registered) {
 		cleanup_status = tcpcc_host_event_del(tcpcc_bridge.host_fd);
