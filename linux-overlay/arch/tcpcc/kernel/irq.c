@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/completion.h>
 #include <linux/compiler.h>
+#include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/irqdesc.h>
 #include <linux/irqflags.h>
+#include <linux/jiffies.h>
 #include <linux/panic.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
@@ -15,8 +17,13 @@
 #include <asm/ptrace.h>
 
 #define TCPCC_HOST_TEST_IRQ          1
+#define TCPCC_HOST_RUNTIME_IRQ       4
 #define TCPCC_HOST_IRQ_TEST_ROUNDS  64
 #define TCPCC_HOST_IRQ_DELAY_NS      (1ULL * NSEC_PER_MSEC)
+#define TCPCC_HOST_RUNTIME_QUEUE_LIMIT 64
+#define TCPCC_HOST_RUNTIME_TEST_DELAY_NS (1ULL * NSEC_PER_MSEC)
+#define TCPCC_HOST_RUNTIME_TEST_TOKEN \
+	(TCPCC_HOST_EVENT_RUNTIME_BIT | (0x4d3822ULL << 32) | 7ULL)
 
 static unsigned long tcpcc_irq_state = ARCH_IRQ_ENABLED;
 static int tcpcc_test_irq_fd = -1;
@@ -25,6 +32,16 @@ static struct tasklet_struct tcpcc_test_tasklet;
 static unsigned int tcpcc_test_hardirq_count;
 static unsigned int tcpcc_test_softirq_count;
 static bool tcpcc_test_softirq_active;
+
+static struct tcpcc_host_event tcpcc_runtime_pending;
+static bool tcpcc_runtime_pending_valid;
+static struct tcpcc_host_event
+	tcpcc_runtime_queue[TCPCC_HOST_RUNTIME_QUEUE_LIMIT];
+static unsigned int tcpcc_runtime_queue_head;
+static unsigned int tcpcc_runtime_queue_tail;
+static unsigned int tcpcc_runtime_queue_count;
+static DEFINE_SPINLOCK(tcpcc_runtime_queue_lock);
+static DECLARE_COMPLETION(tcpcc_runtime_event_ready);
 
 extern void tcpcc_timer_dispatch(void);
 
@@ -71,6 +88,73 @@ static void tcpcc_dispatch_host_irq(unsigned int irq)
 		panic("tcpcc: generic_handle_irq(%u) failed: %d", irq, ret);
 }
 
+static irqreturn_t tcpcc_runtime_irq_handler(int irq, void *dev_id)
+{
+	if (!in_hardirq())
+		panic("tcpcc: M8.2 runtime event ran outside hardirq context");
+	if (!tcpcc_runtime_pending_valid)
+		panic("tcpcc: M8.2 runtime IRQ had no pending host event");
+
+	spin_lock(&tcpcc_runtime_queue_lock);
+	if (tcpcc_runtime_queue_count >= TCPCC_HOST_RUNTIME_QUEUE_LIMIT) {
+		spin_unlock(&tcpcc_runtime_queue_lock);
+		panic("tcpcc: M8.2 runtime event queue overflow");
+	}
+	tcpcc_runtime_queue[tcpcc_runtime_queue_tail] = tcpcc_runtime_pending;
+	tcpcc_runtime_queue_tail = (tcpcc_runtime_queue_tail + 1) %
+				   TCPCC_HOST_RUNTIME_QUEUE_LIMIT;
+	tcpcc_runtime_queue_count++;
+	tcpcc_runtime_pending_valid = false;
+	spin_unlock(&tcpcc_runtime_queue_lock);
+
+	complete(&tcpcc_runtime_event_ready);
+	return IRQ_HANDLED;
+}
+
+static void tcpcc_dispatch_host_runtime_event(
+				const struct tcpcc_host_event *event)
+{
+	if (tcpcc_runtime_pending_valid)
+		panic("tcpcc: M8.2 runtime host event overwritten");
+
+	tcpcc_runtime_pending = *event;
+	tcpcc_runtime_pending_valid = true;
+	tcpcc_dispatch_host_irq(TCPCC_HOST_RUNTIME_IRQ);
+
+	if (tcpcc_runtime_pending_valid)
+		panic("tcpcc: M8.2 runtime IRQ did not consume host event");
+}
+
+static int tcpcc_runtime_event_dequeue(struct tcpcc_host_event *event,
+				       unsigned long timeout)
+{
+	unsigned long flags;
+
+	if (timeout == MAX_SCHEDULE_TIMEOUT) {
+		wait_for_completion(&tcpcc_runtime_event_ready);
+	} else if (!wait_for_completion_timeout(&tcpcc_runtime_event_ready,
+						 timeout)) {
+		return -ETIMEDOUT;
+	}
+
+	spin_lock_irqsave(&tcpcc_runtime_queue_lock, flags);
+	if (!tcpcc_runtime_queue_count) {
+		spin_unlock_irqrestore(&tcpcc_runtime_queue_lock, flags);
+		return -EIO;
+	}
+	*event = tcpcc_runtime_queue[tcpcc_runtime_queue_head];
+	tcpcc_runtime_queue_head = (tcpcc_runtime_queue_head + 1) %
+				   TCPCC_HOST_RUNTIME_QUEUE_LIMIT;
+	tcpcc_runtime_queue_count--;
+	spin_unlock_irqrestore(&tcpcc_runtime_queue_lock, flags);
+	return 0;
+}
+
+int tcpcc_host_runtime_event_wait(struct tcpcc_host_event *event)
+{
+	return tcpcc_runtime_event_dequeue(event, MAX_SCHEDULE_TIMEOUT);
+}
+
 void tcpcc_host_idle_wait(void)
 {
 	struct tcpcc_host_event event;
@@ -94,6 +178,10 @@ void tcpcc_host_idle_wait(void)
 			panic("tcpcc: host timer event was not readable: 0x%x",
 			      event.events);
 		tcpcc_timer_dispatch();
+		return;
+	}
+	if (event.token & TCPCC_HOST_EVENT_RUNTIME_BIT) {
+		tcpcc_dispatch_host_runtime_event(&event);
 		return;
 	}
 
@@ -122,6 +210,10 @@ void __init init_IRQ(void)
 	irq_set_chip_and_handler(TCPCC_HOST_TEST_IRQ, &tcpcc_host_irq_chip,
 				 handle_simple_irq);
 	irq_clear_status_flags(TCPCC_HOST_TEST_IRQ, IRQ_NOREQUEST | IRQ_NOPROBE);
+	irq_set_chip_and_handler(TCPCC_HOST_RUNTIME_IRQ, &tcpcc_host_irq_chip,
+				 handle_simple_irq);
+	irq_clear_status_flags(TCPCC_HOST_RUNTIME_IRQ,
+			       IRQ_NOREQUEST | IRQ_NOPROBE);
 
 	pr_notice("tcpcc: M3.4 host epoll event loop initialized\n");
 	pr_notice("tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit token)\n");
@@ -161,6 +253,63 @@ static irqreturn_t tcpcc_test_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static int __init tcpcc_runtime_event_selftest(void)
+{
+	struct tcpcc_host_event event;
+	u64 expirations;
+	int fd;
+	int ret;
+
+	fd = tcpcc_host_timer_create();
+	if (fd < 0)
+		return fd;
+
+	ret = tcpcc_host_event_add(fd, TCPCC_HOST_RUNTIME_TEST_TOKEN);
+	if (ret)
+		goto close;
+	ret = tcpcc_host_timer_arm(fd, TCPCC_HOST_RUNTIME_TEST_DELAY_NS);
+	if (ret)
+		goto del;
+
+	ret = tcpcc_runtime_event_dequeue(&event, msecs_to_jiffies(1000));
+	if (ret)
+		goto cancel;
+	if (event.token != TCPCC_HOST_RUNTIME_TEST_TOKEN ||
+	    !(event.events & TCPCC_HOST_EVENT_READABLE) ||
+	    event.events & TCPCC_HOST_EVENT_ERROR) {
+		ret = -EIO;
+		goto cancel;
+	}
+
+	ret = tcpcc_host_timer_wait(fd, &expirations);
+	if (ret)
+		goto cancel;
+	if (!expirations)
+		ret = -EIO;
+cancel:
+	{
+		int cancel_ret = tcpcc_host_timer_cancel(fd);
+
+		if (!ret && cancel_ret)
+			ret = cancel_ret;
+	}
+del:
+	{
+		int del_ret = tcpcc_host_event_del(fd);
+
+		if (!ret && del_ret)
+			ret = del_ret;
+	}
+close:
+	{
+		int close_ret = tcpcc_host_close(fd);
+
+		if (!ret && close_ret)
+			ret = close_ret;
+	}
+	return ret;
+}
+
 static int __init tcpcc_irq_event_selftest(void)
 {
 	unsigned int round;
@@ -183,6 +332,15 @@ static int __init tcpcc_irq_event_selftest(void)
 			  IRQF_NO_THREAD, "tcpcc-m3.4-test", &tcpcc_test_irq_fd);
 	if (ret)
 		panic("tcpcc: M3.4 request_irq failed: %d", ret);
+	ret = request_irq(TCPCC_HOST_RUNTIME_IRQ, tcpcc_runtime_irq_handler,
+			  IRQF_NO_THREAD, "tcpcc-m8.2-runtime", NULL);
+	if (ret)
+		panic("tcpcc: M8.2 runtime request_irq failed: %d", ret);
+
+	ret = tcpcc_runtime_event_selftest();
+	if (ret)
+		panic("tcpcc: M8.2 runtime event selftest failed: %d", ret);
+	pr_notice("tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation token)\n");
 
 	pr_notice("tcpcc: M3.4 IRQ/softirq event-loop stress starting\n");
 

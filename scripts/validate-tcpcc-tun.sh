@@ -65,6 +65,8 @@ cat "$BOOT_LOG"
 
 grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit token)' \
   "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation token)' \
+  "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$BOOT_LOG" >/dev/null
