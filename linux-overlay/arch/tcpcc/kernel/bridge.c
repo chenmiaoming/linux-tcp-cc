@@ -828,6 +828,24 @@ unlock:
 	return ret;
 }
 
+int tcpcc_bridge_cancel_session(int handle)
+{
+	struct tcpcc_bridge_session *session;
+	int ret = 0;
+
+	mutex_lock(&tcpcc_bridge_control_lock);
+	session = tcpcc_bridge_find_handle(handle);
+	if (!session) {
+		ret = -ENOENT;
+		goto unlock;
+	}
+
+	tcpcc_bridge_session_stop(session, -ECANCELED, true);
+unlock:
+	mutex_unlock(&tcpcc_bridge_control_lock);
+	return ret;
+}
+
 bool tcpcc_bridge_active(void)
 {
 	bool active;

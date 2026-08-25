@@ -60,6 +60,7 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_HOST_BACKEND_PROBE,
 	TCPCC_CONTROL_BRIDGE_START,
 	TCPCC_CONTROL_BRIDGE_JOIN,
+	TCPCC_CONTROL_BRIDGE_CANCEL,
 };
 
 struct tcpcc_control_request {
@@ -783,6 +784,21 @@ static int tcpcc_control_bridge_join(
 	return 0;
 }
 
+static int tcpcc_control_bridge_cancel(
+				const struct tcpcc_control_request *request)
+{
+	int ret;
+
+	if (request->length || request->arg0 || request->arg1)
+		return -EINVAL;
+
+	ret = tcpcc_bridge_cancel_session(request->handle);
+	if (!ret)
+		pr_notice("tcpcc: M8.2.6 session %d cancel requested\n",
+			  request->handle);
+	return ret;
+}
+
 static int tcpcc_control_l3_attach(const struct tcpcc_control_request *request,
 				   struct tcpcc_control_response *response)
 {
@@ -848,6 +864,8 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_bridge_start(request, response);
 	case TCPCC_CONTROL_BRIDGE_JOIN:
 		return tcpcc_control_bridge_join(request, response);
+	case TCPCC_CONTROL_BRIDGE_CANCEL:
+		return tcpcc_control_bridge_cancel(request);
 	default:
 		return -EOPNOTSUPP;
 	}

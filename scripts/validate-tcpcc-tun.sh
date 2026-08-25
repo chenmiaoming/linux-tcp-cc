@@ -68,6 +68,8 @@ grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit toke
 grep -F 'tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation token)' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2.5 session ' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M8.2.6 session ' "$BOOT_LOG" >/dev/null
+grep -F ' cancel requested' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$BOOT_LOG" >/dev/null
@@ -109,10 +111,27 @@ grep -F 'stale_handle_status=-2 release_barrier=passed delayed_send_eagain=' \
   "$TCP_LOG" >/dev/null
 grep -F 'total_buffer_limit=262144 session_limit=8' \
   "$TCP_LOG" >/dev/null
+grep -F 'bridge-cancel-victim-bbr: guest=192.0.2.2:18449' \
+  "$TCP_LOG" >/dev/null
+grep -F 'cancel_status=0 join_status=-125' "$TCP_LOG" >/dev/null
+grep -F 'bridge-cancel-survivor-cubic: guest=192.0.2.2:18450' \
+  "$TCP_LOG" >/dev/null
+grep -F 'public_to_backend=98495 backend_to_public=98495' \
+  "$TCP_LOG" >/dev/null
+grep -F 'bridge-cancel-replacement-cubic: guest=192.0.2.2:18451' \
+  "$TCP_LOG" >/dev/null
+grep -F 'public_to_backend=65733 backend_to_public=65733' \
+  "$TCP_LOG" >/dev/null
+grep -F 'bridge-cancellation: victim_handle=' "$TCP_LOG" >/dev/null
+grep -F 'stale_status=-2 survivor_release=passed' "$TCP_LOG" >/dev/null
+grep -F 'bridge-finish-cancel-bbr: guest=192.0.2.2:18452' \
+  "$TCP_LOG" >/dev/null
+grep -F 'global_teardown=passed data_plane_control_bytes=0' \
+  "$TCP_LOG" >/dev/null
 
 grep -F "${TUN_NAME}:" "$LINK_LOG" >/dev/null
 grep -F 'mtu 1500' "$LINK_LOG" >/dev/null
 grep -F "inet $HOST_ADDR peer $GUEST_ADDR/32" "$LINK_LOG" >/dev/null
 
-printf 'M8.2.5 real TUN adapter passed concurrent CUBIC/BBR sessions and %s\n' \
-  'generation-safe slot reuse'
+printf 'M8.2.6 real TUN adapter passed concurrent bridge cancellation and %s\n' \
+  'clean global teardown'

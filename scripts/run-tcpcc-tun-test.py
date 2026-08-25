@@ -51,6 +51,12 @@ BRIDGE_CONCURRENT_PORTS = {
     "delayed-bbr": 18447,
     "reuse-cubic": 18448,
 }
+BRIDGE_CANCEL_PORTS = {
+    "victim-bbr": 18449,
+    "survivor-cubic": 18450,
+    "replacement-cubic": 18451,
+    "finish-bbr": 18452,
+}
 BRIDGE_SESSION_LIMIT = 8
 BRIDGE_RUNTIME_SLOT_BASE = 2
 BRIDGE_HANDLE_SLOT_BITS = 4
@@ -62,6 +68,10 @@ BRIDGE_TRANSFER_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 123
 BRIDGE_FAST_BYTES = 8 * BRIDGE_BUFFER_LIMIT + 211
 BRIDGE_DELAYED_BYTES = 32 * BRIDGE_BUFFER_LIMIT + 123
 BRIDGE_REUSE_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 157
+BRIDGE_CANCEL_VICTIM_BYTES = 8 * BRIDGE_BUFFER_LIMIT + 173
+BRIDGE_CANCEL_SURVIVOR_BYTES = 6 * BRIDGE_BUFFER_LIMIT + 191
+BRIDGE_CANCEL_REPLACEMENT_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 197
+BRIDGE_FINISH_CANCEL_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 223
 BRIDGE_JOIN_TIMEOUT_MS = 5000
 
 # Appended version-1 control ABI operation. Keep the unpack layout synchronized
@@ -1124,6 +1134,106 @@ def finish_bridge_session(
     return result, log
 
 
+def wait_cancelled_bridge_threads(
+    session: dict[str, object],
+) -> tuple[str, str]:
+    label = str(session["label"])
+    done = session["client_done"]
+    release = session["backend_release"]
+    backend_thread = session["backend_thread"]
+    assert isinstance(done, threading.Event)
+    assert isinstance(release, threading.Event)
+    assert isinstance(backend_thread, threading.Thread)
+
+    if not done.wait(HOST_DRAIN_TIMEOUT):
+        raise TimeoutError(f"{label}: canceled public client did not terminate")
+    client_result = session.get("client_result")
+    if not isinstance(client_result, dict) or "error" not in client_result:
+        raise RuntimeError(
+            f"{label}: canceled public client unexpectedly completed normally"
+        )
+
+    release.set()
+    backend_thread.join(HOST_DRAIN_TIMEOUT)
+    if backend_thread.is_alive():
+        raise TimeoutError(f"{label}: canceled backend did not terminate")
+    backend_result = session["backend_result"]
+    assert isinstance(backend_result, dict)
+    if "error" not in backend_result:
+        raise RuntimeError(
+            f"{label}: canceled backend unexpectedly completed normally"
+        )
+
+    client = session["client"]
+    assert isinstance(client, socket.socket)
+    client.close()
+    return (
+        type(client_result["error"]).__name__,
+        type(backend_result["error"]).__name__,
+    )
+
+
+def cancel_and_reap_bridge_session(
+    proc: subprocess.Popen,
+    responses: bytearray,
+    session: dict[str, object],
+) -> tuple[dict[str, int], str]:
+    label = str(session["label"])
+    payload = session["payload"]
+    assert isinstance(payload, bytes)
+    bridge_handle = int(session["bridge_handle"])
+    slot, generation = decode_bridge_handle(bridge_handle, label)
+    cancel_request = control.request(control.OP_BRIDGE_CANCEL, bridge_handle)
+    control.transact(
+        proc,
+        responses,
+        control.OP_BRIDGE_CANCEL,
+        cancel_request,
+        {"length": 0},
+    )
+    client_error, backend_error = wait_cancelled_bridge_threads(session)
+
+    join_request = control.request(
+        control.OP_BRIDGE_JOIN,
+        bridge_handle,
+        BRIDGE_JOIN_TIMEOUT_MS,
+    )
+    control.transact(
+        proc,
+        responses,
+        control.OP_BRIDGE_JOIN,
+        join_request,
+        {"status": -errno.ECANCELED, "length": 0},
+    )
+
+    start_request = session["start_request"]
+    assert isinstance(start_request, bytes)
+    control_offset = int(session["control_offset"])
+    control_records = (
+        start_request
+        + cancel_request
+        + join_request
+        + bytes(responses[control_offset:])
+    )
+    if payload[:64] in control_records:
+        raise RuntimeError(f"{label}: payload leaked into the control ABI")
+
+    result = {
+        "handle": bridge_handle,
+        "slot": slot,
+        "generation": generation,
+    }
+    log = (
+        f"{label}: guest={GUEST_IPV4}:{session['public_port']} "
+        f"backend=127.0.0.1:{session['backend_port']} "
+        f"handle={bridge_handle} slot={slot} generation={generation} "
+        f"cancel_status=0 join_status={-errno.ECANCELED} "
+        f"client_error={client_error} backend_error={backend_error} "
+        "data_plane_control_bytes=0"
+    )
+    return result, log
+
+
 def exercise_concurrent_bridges(proc: subprocess.Popen,
                                 responses: bytearray) -> list[str]:
     delayed_release = threading.Event()
@@ -1250,6 +1360,161 @@ def exercise_concurrent_bridges(proc: subprocess.Popen,
                 listener.close()
 
 
+def exercise_cancelled_bridges(proc: subprocess.Popen,
+                               responses: bytearray) -> list[str]:
+    victim_release = threading.Event()
+    survivor_release = threading.Event()
+    sessions: list[dict[str, object]] = []
+    logs: list[str] = []
+    try:
+        victim = start_bridge_session(
+            proc,
+            responses,
+            "bridge-cancel-victim-bbr",
+            "bbr",
+            BRIDGE_CANCEL_PORTS["victim-bbr"],
+            control.make_payload(
+                b"tcpcc-m8.2.6-cancel-victim-bbr:",
+                BRIDGE_CANCEL_VICTIM_BYTES,
+            ),
+            release=victim_release,
+            receive_buffer=4096,
+        )
+        sessions.append(victim)
+        survivor = start_bridge_session(
+            proc,
+            responses,
+            "bridge-cancel-survivor-cubic",
+            "cubic",
+            BRIDGE_CANCEL_PORTS["survivor-cubic"],
+            control.make_payload(
+                b"tcpcc-m8.2.6-cancel-survivor-cubic:",
+                BRIDGE_CANCEL_SURVIVOR_BYTES,
+            ),
+            release=survivor_release,
+        )
+        sessions.append(survivor)
+
+        start_bridge_client(victim)
+        start_bridge_client(survivor)
+        victim_result, victim_log = cancel_and_reap_bridge_session(
+            proc,
+            responses,
+            victim,
+        )
+        logs.append(victim_log)
+        survivor_done = survivor["client_done"]
+        assert isinstance(survivor_done, threading.Event)
+        if survivor_done.is_set():
+            raise RuntimeError(
+                "bridge-cancel-survivor-cubic: terminated with victim"
+            )
+
+        replacement = start_bridge_session(
+            proc,
+            responses,
+            "bridge-cancel-replacement-cubic",
+            "cubic",
+            BRIDGE_CANCEL_PORTS["replacement-cubic"],
+            control.make_payload(
+                b"tcpcc-m8.2.6-cancel-replacement-cubic:",
+                BRIDGE_CANCEL_REPLACEMENT_BYTES,
+            ),
+        )
+        sessions.append(replacement)
+        replacement_slot, replacement_generation = decode_bridge_handle(
+            int(replacement["bridge_handle"]),
+            "bridge-cancel-replacement-cubic",
+        )
+        if (
+            replacement_slot != victim_result["slot"]
+            or replacement_generation == victim_result["generation"]
+        ):
+            raise RuntimeError(
+                "bridge-cancel-replacement-cubic: canceled slot was not reused "
+                "with a new generation"
+            )
+
+        stale_handle = victim_result["handle"]
+        control.transact(
+            proc,
+            responses,
+            control.OP_BRIDGE_CANCEL,
+            control.request(control.OP_BRIDGE_CANCEL, stale_handle),
+            {"status": -errno.ENOENT, "length": 0},
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_BRIDGE_JOIN,
+            control.request(control.OP_BRIDGE_JOIN, stale_handle, 1),
+            {"status": -errno.ENOENT, "length": 0},
+        )
+
+        start_bridge_client(replacement)
+        replacement_result, replacement_log = finish_bridge_session(
+            proc,
+            responses,
+            replacement,
+        )
+        logs.append(replacement_log)
+        if survivor_done.is_set():
+            raise RuntimeError(
+                "bridge-cancel-survivor-cubic: completed before release"
+            )
+
+        survivor_release.set()
+        survivor_result, survivor_log = finish_bridge_session(
+            proc,
+            responses,
+            survivor,
+        )
+        logs.append(survivor_log)
+        logs.append(
+            "bridge-cancellation: "
+            f"victim_handle={stale_handle} "
+            f"replacement_handle={replacement['bridge_handle']} "
+            f"reused_slot={replacement_slot} "
+            f"old_generation={victim_result['generation']} "
+            f"new_generation={replacement_generation} "
+            f"cancel_status=0 join_status={-errno.ECANCELED} "
+            f"stale_status={-errno.ENOENT} survivor_release=passed "
+            f"survivor_bytes={survivor_result['public_to_backend']} "
+            f"replacement_bytes={replacement_result['public_to_backend']}"
+        )
+        return logs
+    finally:
+        victim_release.set()
+        survivor_release.set()
+        for session in sessions:
+            client = session.get("client")
+            if isinstance(client, socket.socket):
+                client.close()
+            listener = session.get("backend_listener")
+            if isinstance(listener, socket.socket):
+                listener.close()
+
+
+def validate_global_cancelled_bridge(session: dict[str, object],
+                                     responses: bytearray) -> str:
+    label = str(session["label"])
+    payload = session["payload"]
+    assert isinstance(payload, bytes)
+    client_error, backend_error = wait_cancelled_bridge_threads(session)
+    control_offset = int(session["control_offset"])
+    if payload[:64] in bytes(responses[control_offset:]):
+        raise RuntimeError(f"{label}: payload leaked into the control ABI")
+    handle = int(session["bridge_handle"])
+    slot, generation = decode_bridge_handle(handle, label)
+    return (
+        f"{label}: guest={GUEST_IPV4}:{session['public_port']} "
+        f"backend=127.0.0.1:{session['backend_port']} "
+        f"handle={handle} slot={slot} generation={generation} "
+        f"client_error={client_error} backend_error={backend_error} "
+        "global_teardown=passed data_plane_control_bytes=0"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--kernel", required=True, type=Path)
@@ -1283,6 +1548,7 @@ def main() -> int:
     proc: subprocess.Popen | None = None
     error: Exception | None = None
     stats: tuple[int, ...] | None = None
+    finish_cancel_session: dict[str, object] | None = None
 
     try:
         proc = subprocess.Popen(
@@ -1345,6 +1611,7 @@ def main() -> int:
                 )
             tcp_log.append(exercise_single_bridge(proc, responses))
             tcp_log.extend(exercise_concurrent_bridges(proc, responses))
+            tcp_log.extend(exercise_cancelled_bridges(proc, responses))
 
         # Temporarily let the host emit one 1501-byte IPv4 packet. The hosted
         # tcpcc0 MTU remains 1500, so M5.1 ingress validation must drop it.
@@ -1386,7 +1653,41 @@ def main() -> int:
                 f"real-TUN L3 errors observed: rx={rx_errors} tx={tx_errors}"
             )
 
-        control.transact(proc, responses, control.OP_FINISH, control.request(control.OP_FINISH))
+        if args.exercise_listeners:
+            finish_release = threading.Event()
+            finish_cancel_session = start_bridge_session(
+                proc,
+                responses,
+                "bridge-finish-cancel-bbr",
+                "bbr",
+                BRIDGE_CANCEL_PORTS["finish-bbr"],
+                control.make_payload(
+                    b"tcpcc-m8.2.6-finish-cancel-bbr:",
+                    BRIDGE_FINISH_CANCEL_BYTES,
+                ),
+                release=finish_release,
+            )
+            start_bridge_client(finish_cancel_session)
+            finish_done = finish_cancel_session["client_done"]
+            assert isinstance(finish_done, threading.Event)
+            if finish_done.is_set():
+                raise RuntimeError(
+                    "bridge-finish-cancel-bbr: completed before OP_FINISH"
+                )
+
+        control.transact(
+            proc,
+            responses,
+            control.OP_FINISH,
+            control.request(control.OP_FINISH),
+        )
+        if finish_cancel_session is not None:
+            tcp_log.append(
+                validate_global_cancelled_bridge(
+                    finish_cancel_session,
+                    responses,
+                )
+            )
         try:
             returncode = proc.wait(timeout=control.CONTROL_TIMEOUT)
         except subprocess.TimeoutExpired as exc:
@@ -1403,6 +1704,16 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 pass
     finally:
+        if finish_cancel_session is not None:
+            release = finish_cancel_session.get("backend_release")
+            if isinstance(release, threading.Event):
+                release.set()
+            client = finish_cancel_session.get("client")
+            if isinstance(client, socket.socket):
+                client.close()
+            listener = finish_cancel_session.get("backend_listener")
+            if isinstance(listener, socket.socket):
+                listener.close()
         if tun_fd >= 0:
             os.close(tun_fd)
         if proc is not None and proc.stdin is not None:
