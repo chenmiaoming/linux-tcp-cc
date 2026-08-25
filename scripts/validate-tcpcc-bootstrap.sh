@@ -68,6 +68,12 @@ grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit toke
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation token)' \
   "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M8.2.3 nonblocking host TCP backend probe passed (192 bytes each direction)' \
+  "$BOOT_LOG" >/dev/null
+if ! grep -F 'MSG_NOSIGNAL' "$STRACE_LOG".* >/dev/null; then
+  echo "M8.2.3 host backend write did not use MSG_NOSIGNAL" >&2
+  exit 1
+fi
 grep -F 'tcpcc: M3.4 IRQ/softirq event-loop stress passed (64 rounds)' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M4.1 loopback TCP stress starting (16 rounds x 65536 bytes each direction)' \
