@@ -39,11 +39,25 @@ int tcpcc_host_timer_wait(int fd, u64 *expirations);
 #define TCPCC_HOST_EVENT_TIMER    1ULL
 #define TCPCC_HOST_EVENT_IRQ_BASE 0x100ULL
 
+#define TCPCC_HOST_EVENT_READABLE (1U << 0)
+#define TCPCC_HOST_EVENT_WRITABLE (1U << 1)
+#define TCPCC_HOST_EVENT_HANGUP   (1U << 2)
+#define TCPCC_HOST_EVENT_ERROR    (1U << 3)
+
+struct tcpcc_host_event {
+	u64 token;
+	u32 events;
+};
+
 int __init tcpcc_host_event_loop_init(void);
+int __init tcpcc_host_event_selftest(void);
 int tcpcc_host_event_add(int fd, u64 token);
 int tcpcc_host_event_add_edge(int fd, u64 token);
+/* ADD/MOD interests accept READABLE and WRITABLE; wait may return all flags. */
+int tcpcc_host_event_add_mask(int fd, u64 token, u32 interests, bool edge);
+int tcpcc_host_event_mod_mask(int fd, u64 token, u32 interests, bool edge);
 int tcpcc_host_event_del(int fd);
-int tcpcc_host_event_wait(u64 *token);
+int tcpcc_host_event_wait(struct tcpcc_host_event *event);
 
 /*
  * Linux idle entry point. M3.4 waits on the host event multiplexer and routes

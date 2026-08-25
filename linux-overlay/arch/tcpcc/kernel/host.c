@@ -12,6 +12,7 @@
 #define TCPCC_HOST_NR_WRITE           1
 #define TCPCC_HOST_NR_CLOSE           3
 #define TCPCC_HOST_NR_MMAP            9
+#define TCPCC_HOST_NR_SOCKETPAIR      53
 #define TCPCC_HOST_NR_FCNTL           72
 #define TCPCC_HOST_NR_EPOLL_WAIT      232
 #define TCPCC_HOST_NR_EPOLL_CTL       233
@@ -25,6 +26,11 @@
 #define TCPCC_HOST_CLOCK_MONOTONIC 1
 #define TCPCC_HOST_EINTR            4
 #define TCPCC_HOST_EIO              5
+#define TCPCC_HOST_EINVAL          22
+#define TCPCC_HOST_ETIMEDOUT      110
+
+#define TCPCC_HOST_AF_UNIX     1
+#define TCPCC_HOST_SOCK_STREAM 1
 
 #define TCPCC_HOST_F_GETFL    3
 #define TCPCC_HOST_F_SETFL    4
@@ -35,12 +41,18 @@
 #define TCPCC_HOST_MAP_PRIVATE    0x02
 #define TCPCC_HOST_MAP_ANONYMOUS  0x20
 
-#define TCPCC_HOST_EPOLLIN       0x001
-#define TCPCC_HOST_EPOLLET       0x80000000U
+#define TCPCC_HOST_EPOLLIN        0x001
+#define TCPCC_HOST_EPOLLOUT       0x004
+#define TCPCC_HOST_EPOLLERR       0x008
+#define TCPCC_HOST_EPOLLHUP       0x010
+#define TCPCC_HOST_EPOLLRDHUP     0x2000
+#define TCPCC_HOST_EPOLLET        0x80000000U
 #define TCPCC_HOST_EPOLL_CTL_ADD 1
 #define TCPCC_HOST_EPOLL_CTL_DEL 2
+#define TCPCC_HOST_EPOLL_CTL_MOD 3
 
 #define TCPCC_HOST_NSEC_PER_SEC 1000000000ULL
+#define TCPCC_HOST_EVENT_TEST_TOKEN 0x4d382e3245564e54ULL
 
 struct tcpcc_host_timespec {
 	long tv_sec;
@@ -272,32 +284,57 @@ int __init tcpcc_host_event_loop_init(void)
 	return 0;
 }
 
-static int tcpcc_host_event_add_flags(int fd, u64 token, u32 flags)
+static int tcpcc_host_event_ctl(int operation, int fd, u64 token,
+				u32 interests, bool edge)
 {
-	struct tcpcc_host_epoll_event event = {
-		.events = TCPCC_HOST_EPOLLIN | flags,
-		.data = token,
-	};
+	struct tcpcc_host_epoll_event event = { .data = token };
 	long ret;
 
 	if (tcpcc_host_epoll_fd < 0)
 		return -TCPCC_HOST_EIO;
+	if (!interests ||
+	    interests & ~(TCPCC_HOST_EVENT_READABLE |
+			  TCPCC_HOST_EVENT_WRITABLE))
+		return -TCPCC_HOST_EINVAL;
+
+	if (interests & TCPCC_HOST_EVENT_READABLE)
+		event.events |= TCPCC_HOST_EPOLLIN;
+	if (interests & TCPCC_HOST_EVENT_WRITABLE)
+		event.events |= TCPCC_HOST_EPOLLOUT;
+	/* EPOLLERR and EPOLLHUP are always reported. Ask for peer half-close too. */
+	event.events |= TCPCC_HOST_EPOLLRDHUP;
+	if (edge)
+		event.events |= TCPCC_HOST_EPOLLET;
 
 	ret = tcpcc_host_syscall4(TCPCC_HOST_NR_EPOLL_CTL,
 				  tcpcc_host_epoll_fd,
-				  TCPCC_HOST_EPOLL_CTL_ADD, fd,
+				  operation, fd,
 				  (long)&event);
 	return ret < 0 ? (int)ret : 0;
 }
 
 int tcpcc_host_event_add(int fd, u64 token)
 {
-	return tcpcc_host_event_add_flags(fd, token, 0);
+	return tcpcc_host_event_add_mask(fd, token,
+					 TCPCC_HOST_EVENT_READABLE, false);
 }
 
 int tcpcc_host_event_add_edge(int fd, u64 token)
 {
-	return tcpcc_host_event_add_flags(fd, token, TCPCC_HOST_EPOLLET);
+	return tcpcc_host_event_add_mask(fd, token,
+					 TCPCC_HOST_EVENT_READABLE, true);
+}
+
+int tcpcc_host_event_add_mask(int fd, u64 token, u32 interests, bool edge)
+{
+	return tcpcc_host_event_ctl(TCPCC_HOST_EPOLL_CTL_ADD, fd, token,
+				    interests, edge);
+}
+
+int tcpcc_host_event_mod_mask(int fd, u64 token, u32 interests, bool edge)
+{
+	return tcpcc_host_event_ctl(TCPCC_HOST_EPOLL_CTL_MOD, fd, token,
+				    interests, edge);
 }
 
 int tcpcc_host_event_del(int fd)
@@ -313,9 +350,11 @@ int tcpcc_host_event_del(int fd)
 	return ret < 0 ? (int)ret : 0;
 }
 
-int tcpcc_host_event_wait(u64 *token)
+static int tcpcc_host_event_wait_timeout(struct tcpcc_host_event *event,
+					 int timeout_ms)
 {
-	struct tcpcc_host_epoll_event event;
+	struct tcpcc_host_epoll_event host_event;
+	u32 events = 0;
 	long ret;
 
 	if (tcpcc_host_epoll_fd < 0)
@@ -324,16 +363,149 @@ int tcpcc_host_event_wait(u64 *token)
 	do {
 		ret = tcpcc_host_syscall4(TCPCC_HOST_NR_EPOLL_WAIT,
 					  tcpcc_host_epoll_fd,
-					  (long)&event, 1, -1);
+					  (long)&host_event, 1, timeout_ms);
 	} while (ret == -TCPCC_HOST_EINTR);
 
 	if (ret < 0)
 		return (int)ret;
-	if (ret != 1 || !(event.events & TCPCC_HOST_EPOLLIN))
+	if (!ret)
+		return -TCPCC_HOST_ETIMEDOUT;
+	if (ret != 1)
 		return -TCPCC_HOST_EIO;
 
-	*token = event.data;
+	if (host_event.events & TCPCC_HOST_EPOLLIN)
+		events |= TCPCC_HOST_EVENT_READABLE;
+	if (host_event.events & TCPCC_HOST_EPOLLOUT)
+		events |= TCPCC_HOST_EVENT_WRITABLE;
+	if (host_event.events & (TCPCC_HOST_EPOLLHUP |
+				 TCPCC_HOST_EPOLLRDHUP))
+		events |= TCPCC_HOST_EVENT_HANGUP;
+	if (host_event.events & TCPCC_HOST_EPOLLERR)
+		events |= TCPCC_HOST_EVENT_ERROR;
+	if (!events)
+		return -TCPCC_HOST_EIO;
+
+	event->token = host_event.data;
+	event->events = events;
 	return 0;
+}
+
+int tcpcc_host_event_wait(struct tcpcc_host_event *event)
+{
+	return tcpcc_host_event_wait_timeout(event, -1);
+}
+
+int __init tcpcc_host_event_selftest(void)
+{
+	const u64 payload = TCPCC_HOST_EVENT_TEST_TOKEN;
+	struct tcpcc_host_event event;
+	u64 received = 0;
+	int pair[2] = { -1, -1 };
+	bool registered = false;
+	ssize_t io_ret;
+	long host_ret;
+	int ret;
+
+	host_ret = tcpcc_host_syscall4(TCPCC_HOST_NR_SOCKETPAIR,
+					 TCPCC_HOST_AF_UNIX,
+					 TCPCC_HOST_SOCK_STREAM, 0,
+					 (long)pair);
+	if (host_ret < 0)
+		return (int)host_ret;
+
+	ret = tcpcc_host_set_nonblock(pair[0]);
+	if (ret)
+		goto out;
+	ret = tcpcc_host_set_nonblock(pair[1]);
+	if (ret)
+		goto out;
+
+	ret = tcpcc_host_event_add_mask(pair[0], TCPCC_HOST_EVENT_TEST_TOKEN,
+					0, true);
+	if (ret != -TCPCC_HOST_EINVAL) {
+		ret = -TCPCC_HOST_EIO;
+		goto out;
+	}
+	ret = tcpcc_host_event_add_mask(pair[0], TCPCC_HOST_EVENT_TEST_TOKEN,
+					TCPCC_HOST_EVENT_ERROR, true);
+	if (ret != -TCPCC_HOST_EINVAL) {
+		ret = -TCPCC_HOST_EIO;
+		goto out;
+	}
+
+	ret = tcpcc_host_event_add_mask(pair[0], TCPCC_HOST_EVENT_TEST_TOKEN,
+					TCPCC_HOST_EVENT_WRITABLE, true);
+	if (ret)
+		goto out;
+	registered = true;
+
+	ret = tcpcc_host_event_wait_timeout(&event, 1000);
+	if (ret)
+		goto out;
+	if (event.token != TCPCC_HOST_EVENT_TEST_TOKEN ||
+	    !(event.events & TCPCC_HOST_EVENT_WRITABLE)) {
+		ret = -TCPCC_HOST_EIO;
+		goto out;
+	}
+
+	ret = tcpcc_host_event_mod_mask(pair[0], TCPCC_HOST_EVENT_TEST_TOKEN,
+					TCPCC_HOST_EVENT_READABLE, true);
+	if (ret)
+		goto out;
+
+	io_ret = tcpcc_host_write_fd(pair[1], &payload, sizeof(payload));
+	if (io_ret != sizeof(payload)) {
+		ret = io_ret < 0 ? (int)io_ret : -TCPCC_HOST_EIO;
+		goto out;
+	}
+
+	ret = tcpcc_host_event_wait_timeout(&event, 1000);
+	if (ret)
+		goto out;
+	if (event.token != TCPCC_HOST_EVENT_TEST_TOKEN ||
+	    !(event.events & TCPCC_HOST_EVENT_READABLE)) {
+		ret = -TCPCC_HOST_EIO;
+		goto out;
+	}
+
+	io_ret = tcpcc_host_read_fd(pair[0], &received, sizeof(received));
+	if (io_ret != sizeof(received) || received != payload) {
+		ret = io_ret < 0 ? (int)io_ret : -TCPCC_HOST_EIO;
+		goto out;
+	}
+
+	ret = tcpcc_host_close(pair[1]);
+	if (ret)
+		goto out;
+	pair[1] = -1;
+
+	ret = tcpcc_host_event_wait_timeout(&event, 1000);
+	if (ret)
+		goto out;
+	if (event.token != TCPCC_HOST_EVENT_TEST_TOKEN ||
+	    !(event.events & TCPCC_HOST_EVENT_HANGUP))
+		ret = -TCPCC_HOST_EIO;
+out:
+	if (registered) {
+		int del_ret = tcpcc_host_event_del(pair[0]);
+
+		if (!ret && del_ret)
+			ret = del_ret;
+	}
+	if (pair[0] >= 0) {
+		int close_ret = tcpcc_host_close(pair[0]);
+
+		if (!ret && close_ret)
+			ret = close_ret;
+	}
+	if (pair[1] >= 0) {
+		int close_ret = tcpcc_host_close(pair[1]);
+
+		if (!ret && close_ret)
+			ret = close_ret;
+	}
+
+	return ret;
 }
 
 void __noreturn tcpcc_host_exit(int status)
