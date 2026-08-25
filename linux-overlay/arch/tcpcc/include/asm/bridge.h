@@ -35,6 +35,7 @@ struct tcpcc_bridge_result {
 
 int tcpcc_bridge_start(struct socket *public_sock, __be32 backend_address,
 		       __be16 backend_port, int *handle);
+int tcpcc_bridge_cancel_session(int handle);
 int tcpcc_bridge_join(int handle, unsigned long timeout,
 		      struct tcpcc_bridge_result *result);
 bool tcpcc_bridge_active(void);
