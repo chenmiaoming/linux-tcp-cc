@@ -93,6 +93,36 @@ that interface, and a uniquely named firewall table. Global sysctls and any
 pre-existing interface, route, table, chain, or rule are outside the journal
 and are never adopted for cleanup.
 
+### Nonpersistent TUN transaction
+
+The first acquired resource is one queue fd opened directly from
+`/dev/net/tun` with `O_RDWR | O_NONBLOCK | O_CLOEXEC`. `TUNSETIFF` requests
+`IFF_TUN | IFF_NO_PI | IFF_TUN_EXCL`: TUN supplies raw IPv4 packets without an
+extra packet-information header, while the exclusive flag atomically prevents
+tcpcc from attaching to an existing interface. tcpcc never enables persistence
+and never runs `ip tuntap add`.
+
+An optional operator-supplied interface name is validated against Linux's
+15-byte limit. If absent, tcpcc generates a collision-resistant `tcpcc...`
+name and retries only `EBUSY` or `EEXIST` returned by the exclusive ioctl. A
+requested name is attempted exactly once. Thus an existing interface is never
+adopted, reconfigured, or made part of tcpcc's cleanup transaction.
+
+After validating the exact name returned by the kernel, tcpcc invokes
+iproute2 directly with argv arrays to add the host `/32` and peer `/32`
+point-to-point addresses, set the validated MTU, and bring up only that link.
+No shell is involved. Failure at the ioctl, returned-name, address, MTU, or
+link-up boundary immediately closes the fd; because the queue is
+nonpersistent, Linux removes the partial interface and all state attached to
+it.
+
+The open queue fd is retained for later transfer to the hosted kernel through
+an explicit inherited-fd list. Its `close` operation is idempotent and is the
+sole normal TUN teardown mechanism. The ownership journal executes callbacks
+once in reverse acquisition order, continues after individual cleanup errors,
+and reports every failed callback. Consequently the later DNAT entry is
+registered after the TUN and is removed before the final TUN fd is closed.
+
 Per-listener congestion control inside the hosted stack remains tcpcc's
 responsibility and is selected by `--cc`.
 

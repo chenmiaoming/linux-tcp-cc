@@ -8,6 +8,7 @@ on:
       - '.github/workflows/m8-host-lifecycle.yml'
       - 'docs/m8-server-ingress-design.md'
       - 'scripts/test-tcpcc-host-preflight.py'
+      - 'scripts/test-tcpcc-tun-lifecycle.py'
       - 'tools/tcpcc_host.py'
   push:
     branches:
@@ -25,10 +26,23 @@ jobs:
       - name: Checkout linux-tcp-cc
         uses: actions/checkout@v4
 
-      - name: Validate read-only preflight sources
+      - name: Validate host lifecycle sources
         run: |
           python3 -m py_compile tools/tcpcc_host.py
           python3 -m py_compile scripts/test-tcpcc-host-preflight.py
+          python3 -m py_compile scripts/test-tcpcc-tun-lifecycle.py
 
       - name: Exercise deterministic host preflight
         run: python3 scripts/test-tcpcc-host-preflight.py
+
+      - name: Exercise injected TUN lifecycle boundaries
+        run: python3 scripts/test-tcpcc-tun-lifecycle.py
+
+      - name: Prove nonpersistent TUN fd lifetime
+        run: |
+          command -v ip
+          if [ ! -c /dev/net/tun ]; then
+            sudo -n modprobe tun
+          fi
+          test -c /dev/net/tun
+          sudo -n python3 scripts/test-tcpcc-tun-lifecycle.py --integration
