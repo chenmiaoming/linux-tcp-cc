@@ -55,6 +55,7 @@ jobs:
 
       - name: Validate M7 native inputs
         run: |
+          mkdir -p .build
           bash -n scripts/fetch-linux.sh
           bash -n scripts/run-m7-native-lossless.sh
           python3 -m py_compile scripts/collect-m7-hosted-report.py
