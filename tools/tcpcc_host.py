@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Read-only host prerequisite inspection for the tcpcc network lifecycle."""
+"""Host prerequisite inspection and owned tcpcc network lifecycle primitives."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from typing import Callable
 CAP_NET_ADMIN = 12
 CC_NAME = re.compile(r"[a-z0-9_-]{1,15}\Z")
 TUN_NAME = re.compile(r"[A-Za-z0-9_.-]{1,15}\Z")
+NFT_TABLE_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
 
 # Linux UAPI values from include/uapi/linux/if_tun.h. IFF_TUN_EXCL makes
 # creation atomic: TUNSETIFF must not attach this fd to a pre-existing device.
@@ -48,6 +49,7 @@ TunCloser = Callable[[int], None]
 CommandRunner = Callable[[list[str]], None]
 NameFactory = Callable[[], str]
 CleanupCallback = Callable[[], None]
+NftRunner = Callable[[list[str], str | None], None]
 
 
 def _read_text(path: Path) -> str:
@@ -75,6 +77,21 @@ def _run_command(argv: list[str]) -> None:
 def _new_tun_name() -> str:
     # Five random bytes keep the complete name within Linux's 15-byte limit.
     return f"tcpcc{secrets.token_hex(5)}"
+
+
+def _run_nft(argv: list[str], input_text: str | None) -> None:
+    subprocess.run(
+        argv,
+        input=input_text,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _new_nft_table_name() -> str:
+    return f"tcpcc_{secrets.token_hex(6)}"
 
 
 @dataclass(frozen=True)
@@ -620,3 +637,134 @@ def create_tun_queue(
         errno.EEXIST,
         f"could not allocate a unique TUN name after {attempts} attempts",
     ) from last_collision
+
+
+def _validate_nft_table_name(name: str) -> str:
+    if not isinstance(name, str) or NFT_TABLE_NAME.fullmatch(name) is None:
+        raise ValueError(
+            "nftables table name must start with a lowercase letter and "
+            "contain at most 32 lowercase letters, digits, or underscores"
+        )
+    return name
+
+
+def _validate_port(port: int, field: str) -> int:
+    if (
+        isinstance(port, bool)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+    ):
+        raise ValueError(f"{field} must be an integer from 1 through 65535")
+    return port
+
+
+def _validate_endpoint_address(value: str, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be one usable IPv4 address")
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError as error:
+        raise ValueError(f"{field} must be one usable IPv4 address") from error
+    if address.is_unspecified or address.is_multicast:
+        raise ValueError(f"{field} must be one usable IPv4 address")
+    return str(address)
+
+
+@dataclass(frozen=True)
+class NftDnatConfig:
+    """One exact public IPv4/TCP endpoint and its hosted destination."""
+
+    listen_address: str
+    listen_port: int
+    target_address: str
+    target_port: int
+    table_name: str | None = None
+
+    def __post_init__(self) -> None:
+        listen_address = _validate_endpoint_address(
+            self.listen_address,
+            "listen_address",
+        )
+        target_address = _validate_endpoint_address(
+            self.target_address,
+            "target_address",
+        )
+        listen_port = _validate_port(self.listen_port, "listen_port")
+        target_port = _validate_port(self.target_port, "target_port")
+        if listen_address == target_address:
+            raise ValueError("DNAT listen and target addresses must be different")
+        if self.table_name is not None:
+            _validate_nft_table_name(self.table_name)
+        object.__setattr__(self, "listen_address", listen_address)
+        object.__setattr__(self, "listen_port", listen_port)
+        object.__setattr__(self, "target_address", target_address)
+        object.__setattr__(self, "target_port", target_port)
+
+
+def _dnat_batch(config: NftDnatConfig, table_name: str) -> str:
+    return (
+        f"create table ip {table_name}\n"
+        f"add chain ip {table_name} prerouting "
+        "{ type nat hook prerouting priority dstnat; policy accept; }\n"
+        f"add rule ip {table_name} prerouting "
+        f"ip daddr {config.listen_address} "
+        f"tcp dport {config.listen_port} counter "
+        f"dnat to {config.target_address}:{config.target_port}\n"
+    )
+
+
+class NftDnatLease:
+    """Exclusive ownership of one instance-scoped nftables DNAT table."""
+
+    def __init__(
+        self,
+        table_name: str,
+        nft_path: str,
+        runner: NftRunner,
+    ) -> None:
+        self.table_name = table_name
+        self._nft_path = nft_path
+        self._runner = runner
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._runner(
+            [
+                self._nft_path,
+                "delete",
+                "table",
+                "ip",
+                self.table_name,
+            ],
+            None,
+        )
+
+
+def install_nft_dnat(
+    config: NftDnatConfig,
+    *,
+    nft_path: str = "nft",
+    runner: NftRunner = _run_nft,
+    table_name_factory: NameFactory = _new_nft_table_name,
+) -> NftDnatLease:
+    """Atomically install one exact-match DNAT table and own its deletion."""
+
+    if not isinstance(config, NftDnatConfig):
+        raise TypeError("config must be an NftDnatConfig")
+    if not isinstance(nft_path, str) or not nft_path or "\0" in nft_path:
+        raise ValueError("nft_path must name one executable")
+    table_name = _validate_nft_table_name(
+        table_name_factory() if config.table_name is None else config.table_name
+    )
+    runner(
+        [nft_path, "--file", "-"],
+        _dnat_batch(config, table_name),
+    )
+    return NftDnatLease(table_name, nft_path, runner)
