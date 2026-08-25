@@ -148,7 +148,13 @@ def main() -> int:
         raise SystemExit("scenario has no congestion controls")
 
     upstream = read_env(args.upstream_env)
-    required_upstream = ("UPSTREAM_TAG", "UPSTREAM_TAG_OBJECT", "UPSTREAM_COMMIT")
+    required_upstream = (
+        "LINUX_REMOTE",
+        "LINUX_SERIES",
+        "LINUX_TAG",
+        "LINUX_VERSION",
+        "LINUX_COMMIT",
+    )
     missing_upstream = [key for key in required_upstream if not upstream.get(key)]
     if missing_upstream:
         raise SystemExit(
@@ -276,9 +282,11 @@ def main() -> int:
             "source_sha": os.environ.get("GITHUB_SHA", "unknown"),
         },
         "upstream": {
-            "tag": upstream["UPSTREAM_TAG"],
-            "tag_object": upstream["UPSTREAM_TAG_OBJECT"],
-            "commit": upstream["UPSTREAM_COMMIT"],
+            "remote": upstream["LINUX_REMOTE"],
+            "series": upstream["LINUX_SERIES"],
+            "tag": upstream["LINUX_TAG"],
+            "version": upstream["LINUX_VERSION"],
+            "commit": upstream["LINUX_COMMIT"],
         },
         "path": {
             "ping": ping,
