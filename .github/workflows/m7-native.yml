@@ -90,9 +90,11 @@ jobs:
           root="$GITHUB_WORKSPACE"
           localversion="-m7-${LINUX_COMMIT:0:12}"
           expected_release="${LINUX_VERSION}${localversion}"
+          build_jobs="$(nproc)"
+          echo "M7_NATIVE_BUILD_JOBS=$build_jobs"
           cd "$root/.deps/linux"
           "$root/.deps/virtme-ng/vng" \
-            --build --skip-modules --jobs 4 \
+            --build --skip-modules --jobs "$build_jobs" \
             --config "$root/benchmarks/m7/native-kernel.config" \
             "LOCALVERSION=$localversion"
           test -s arch/x86/boot/bzImage
@@ -102,6 +104,7 @@ jobs:
           {
             echo "M7_NATIVE_EXPECTED_RELEASE=$expected_release"
             echo "M7_NATIVE_SOURCE_COMMIT=$LINUX_COMMIT"
+            echo "M7_NATIVE_BUILD_JOBS=$build_jobs"
           } > "$root/.build/m7-native-provenance.env"
 
       - name: Run M7.2 native lossless reference
