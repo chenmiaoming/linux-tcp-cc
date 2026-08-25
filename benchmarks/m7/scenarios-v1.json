@@ -2,16 +2,23 @@
   "schema_version": 1,
   "scenarios": {
     "hosted-lossless-delayed-50ms": {
-      "description": "Hosted tcpcc lossless baseline with 50 ms netem on host-to-guest TUN egress; for a hosted sender this delays the ACK path.",
+      "parity_scenario_id": "lossless-delayed-50ms-v1",
+      "description": "Deterministic lossless 50 ms ACK-path-delay scenario shared by tcpcc and the pinned native Linux reference.",
       "network": {
         "tun_name": "tcpcc-bdp",
         "host_ipv4": "192.0.2.1",
         "guest_ipv4": "192.0.2.2",
+        "sender_ipv4": "192.0.2.2",
+        "receiver_ipv4": "192.0.2.1",
         "mtu": 1500,
-        "netem_direction": "host_to_guest_tun_egress",
+        "netem_direction": "receiver_to_sender_ack_path",
         "delay_ms": 50,
         "loss_percent": 0,
         "limit_packets": 10000
+      },
+      "topology_bindings": {
+        "tcpcc": "host TUN egress delays host-to-guest ACK traffic",
+        "native-linux": "receiver network namespace veth egress delays receiver-to-sender ACK traffic"
       },
       "transfer": {
         "congestion_controls": [
@@ -32,11 +39,11 @@
       },
       "tcp_loss_counters": {
         "policy": "observational_not_gated_m7_1",
-        "reason": "TCP lost/retrans/total_retrans are preserved for native parity analysis; M7.1 gates the configured zero-loss qdisc instead of assuming runtime scheduling cannot trigger TCP recovery."
+        "reason": "TCP lost/retrans/total_retrans are preserved for native parity analysis; the lossless gate applies to the configured zero-loss qdisc instead of assuming runtime scheduling cannot trigger TCP recovery."
       },
       "native_parity": {
-        "status": "pending_m7_2",
-        "reason": "Do not use the GitHub runner host kernel as a substitute for the pinned native Linux 6.18.y reference."
+        "status": "reference_defined_m7_2",
+        "reason": "The native reference must boot the pinned Linux source; the GitHub runner host kernel is never accepted as a substitute."
       }
     }
   }
