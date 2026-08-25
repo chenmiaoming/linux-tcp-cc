@@ -67,6 +67,7 @@ grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit toke
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation token)' \
   "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M8.2.4 single-session bridge passed (' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$BOOT_LOG" >/dev/null
@@ -82,9 +83,16 @@ grep -F 'listener-bbr: guest=192.0.2.2:18444 host=192.0.2.1:' "$TCP_LOG" >/dev/n
 grep -F 'listener_cc=cubic accepted_cc=cubic' "$TCP_LOG" >/dev/null
 grep -F 'listener_cc=bbr accepted_cc=bbr' "$TCP_LOG" >/dev/null
 grep -F 'server_to_client=16384 client_to_server=16384' "$TCP_LOG" >/dev/null
+grep -F 'bridge-bbr: guest=192.0.2.2:18445 host=192.0.2.1:' \
+  "$TCP_LOG" >/dev/null
+grep -F 'backend=127.0.0.1:' "$TCP_LOG" >/dev/null
+grep -F 'listener_cc=bbr accepted_cc=bbr public_to_backend=65659 backend_to_public=65659' \
+  "$TCP_LOG" >/dev/null
+grep -F 'buffer_limit=16384 data_plane_control_bytes=0 token=0x' \
+  "$TCP_LOG" >/dev/null
 
 grep -F "${TUN_NAME}:" "$LINK_LOG" >/dev/null
 grep -F 'mtu 1500' "$LINK_LOG" >/dev/null
 grep -F "inet $HOST_ADDR peer $GUEST_ADDR/32" "$LINK_LOG" >/dev/null
 
-printf 'M8.1 real TUN adapter passed outbound and inbound TCP with CUBIC and BBR\n'
+printf 'M8.2.4 real TUN adapter passed CUBIC/BBR and one bridged BBR session\n'

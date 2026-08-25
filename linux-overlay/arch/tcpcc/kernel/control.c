@@ -16,6 +16,7 @@
 #include <linux/uio.h>
 #include <net/net_namespace.h>
 #include <net/tcp.h>
+#include <asm/bridge.h>
 #include <asm/host.h>
 #include <asm/l3net.h>
 
@@ -57,6 +58,8 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_L3_STATS,
 	TCPCC_CONTROL_TCP_INFO,
 	TCPCC_CONTROL_HOST_BACKEND_PROBE,
+	TCPCC_CONTROL_BRIDGE_START,
+	TCPCC_CONTROL_BRIDGE_JOIN,
 };
 
 struct tcpcc_control_request {
@@ -651,6 +654,8 @@ static int tcpcc_control_host_backend_probe(
 	if (request->handle || request->length || request->arg0 != INADDR_LOOPBACK ||
 	    !request->arg1 || request->arg1 > 0xffffU)
 		return -EINVAL;
+	if (tcpcc_bridge_active())
+		return -EBUSY;
 
 	fd = tcpcc_host_tcp_socket();
 	if (fd < 0)
@@ -721,6 +726,61 @@ out:
 	return ret;
 }
 
+static int tcpcc_control_bridge_start(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct socket *public_sock = tcpcc_control_lookup(request->handle);
+	int bridge_handle;
+	int ret;
+
+	if (!public_sock)
+		return -EBADF;
+	if (request->length || request->arg0 != INADDR_LOOPBACK ||
+	    !request->arg1 || request->arg1 > 0xffffU)
+		return -EINVAL;
+	if (public_sock->sk->sk_state != TCP_ESTABLISHED)
+		return -ENOTCONN;
+
+	ret = tcpcc_bridge_start(public_sock, htonl(request->arg0),
+				 htons((u16)request->arg1), &bridge_handle);
+	if (ret)
+		return ret;
+
+	/* tcpcc_bridge_start() owns the accepted socket after success. */
+	tcpcc_control_sockets[request->handle - 1] = NULL;
+	response->handle = bridge_handle;
+	return 0;
+}
+
+static int tcpcc_control_bridge_join(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_bridge_result result;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(result) != 40);
+	BUILD_BUG_ON(sizeof(result) > TCPCC_CONTROL_MAX_PAYLOAD);
+
+	if (request->length || request->arg1 || !request->arg0 ||
+	    request->arg0 > 30000U)
+		return -EINVAL;
+
+	ret = tcpcc_bridge_join(request->handle,
+				msecs_to_jiffies(request->arg0), &result);
+	if (ret)
+		return ret;
+
+	memcpy(response->data, &result, sizeof(result));
+	response->length = sizeof(result);
+	pr_notice("tcpcc: M8.2.4 single-session bridge passed (%llu public-to-backend, %llu backend-to-public bytes, %u-byte buffers)\n",
+		  (unsigned long long)result.public_to_backend_bytes,
+		  (unsigned long long)result.backend_to_public_bytes,
+		  result.buffer_limit);
+	return 0;
+}
+
 static int tcpcc_control_l3_attach(const struct tcpcc_control_request *request,
 				   struct tcpcc_control_response *response)
 {
@@ -782,6 +842,10 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_tcp_info(request, response);
 	case TCPCC_CONTROL_HOST_BACKEND_PROBE:
 		return tcpcc_control_host_backend_probe(request, response);
+	case TCPCC_CONTROL_BRIDGE_START:
+		return tcpcc_control_bridge_start(request, response);
+	case TCPCC_CONTROL_BRIDGE_JOIN:
+		return tcpcc_control_bridge_join(request, response);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -894,6 +958,7 @@ static int __init tcpcc_control_selftest(void)
 	if (!tcpcc_control_result && ret)
 		tcpcc_control_result = ret;
 	tcpcc_control_task = NULL;
+	tcpcc_bridge_cancel();
 	tcpcc_control_release_all();
 
 	if (!tcpcc_control_result) {
