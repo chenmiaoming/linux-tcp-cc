@@ -760,7 +760,7 @@ static int tcpcc_control_bridge_join(
 	struct tcpcc_bridge_result result;
 	int ret;
 
-	BUILD_BUG_ON(sizeof(result) != 40);
+	BUILD_BUG_ON(sizeof(result) != 64);
 	BUILD_BUG_ON(sizeof(result) > TCPCC_CONTROL_MAX_PAYLOAD);
 
 	if (request->length || request->arg1 || !request->arg0 ||
@@ -774,9 +774,11 @@ static int tcpcc_control_bridge_join(
 
 	memcpy(response->data, &result, sizeof(result));
 	response->length = sizeof(result);
-	pr_notice("tcpcc: M8.2.4 single-session bridge passed (%llu public-to-backend, %llu backend-to-public bytes, %u-byte buffers)\n",
+	pr_notice("tcpcc: M8.2.5 session %d bridge joined (%llu public-to-backend, %llu backend-to-public bytes, %u send EAGAIN, %u-byte buffers)\n",
+		  request->handle,
 		  (unsigned long long)result.public_to_backend_bytes,
 		  (unsigned long long)result.backend_to_public_bytes,
+		  result.host_send_eagain,
 		  result.buffer_limit);
 	return 0;
 }
