@@ -34,11 +34,13 @@ if readelf -lW "$OUT/vmlinux" | grep -q 'INTERP'; then
   echo "tcpcc vmlinux unexpectedly requires a userspace ELF interpreter" >&2
   exit 1
 fi
-if ! nm "$OUT/vmlinux" | grep -Eq '[[:space:]]tcpcc_host_start$'; then
+if ! nm "$OUT/vmlinux" | \
+  awk '$NF == "tcpcc_host_start" { found = 1 } END { exit !found }'; then
   echo "tcpcc host entry symbol is missing" >&2
   exit 1
 fi
-if ! nm "$OUT/vmlinux" | grep -Eq '[[:space:]]tcpcc_switch_context$'; then
+if ! nm "$OUT/vmlinux" | \
+  awk '$NF == "tcpcc_switch_context" { found = 1 } END { exit !found }'; then
   echo "tcpcc hosted context-switch primitive is missing" >&2
   exit 1
 fi
@@ -62,6 +64,8 @@ grep -F 'tcpcc: M3.2 one-shot hrtimer stress passed (32 rounds,' "$BOOT_LOG" >/d
 grep -F 'tcpcc: M3.3 task-switch stress passed (4 workers x 32 sleep/wake rounds)' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.4 host epoll event loop initialized' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit token)' \
+  "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.4 IRQ/softirq event-loop stress passed (64 rounds)' \
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M4.1 loopback TCP stress starting (16 rounds x 65536 bytes each direction)' \

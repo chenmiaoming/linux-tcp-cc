@@ -73,7 +73,7 @@ static void tcpcc_dispatch_host_irq(unsigned int irq)
 
 void tcpcc_host_idle_wait(void)
 {
-	u64 token;
+	struct tcpcc_host_event event;
 	int ret;
 
 	/*
@@ -85,23 +85,27 @@ void tcpcc_host_idle_wait(void)
 		panic("tcpcc: hosted event wait entered with local IRQs enabled");
 
 	local_irq_enable();
-	ret = tcpcc_host_event_wait(&token);
+	ret = tcpcc_host_event_wait(&event);
 	if (ret)
 		panic("tcpcc: host event wait failed: %d", ret);
 
-	if (token == TCPCC_HOST_EVENT_TIMER) {
+	if (event.token == TCPCC_HOST_EVENT_TIMER) {
+		if (!(event.events & TCPCC_HOST_EVENT_READABLE))
+			panic("tcpcc: host timer event was not readable: 0x%x",
+			      event.events);
 		tcpcc_timer_dispatch();
 		return;
 	}
 
-	if (token >= TCPCC_HOST_EVENT_IRQ_BASE &&
-	    token < TCPCC_HOST_EVENT_IRQ_BASE + NR_IRQS) {
-		tcpcc_dispatch_host_irq((unsigned int)(token - TCPCC_HOST_EVENT_IRQ_BASE));
+	if (event.token >= TCPCC_HOST_EVENT_IRQ_BASE &&
+	    event.token < TCPCC_HOST_EVENT_IRQ_BASE + NR_IRQS) {
+		tcpcc_dispatch_host_irq((unsigned int)(event.token -
+						       TCPCC_HOST_EVENT_IRQ_BASE));
 		return;
 	}
 
-	panic("tcpcc: unknown host event token %llu",
-	      (unsigned long long)token);
+	panic("tcpcc: unknown host event token %llu mask 0x%x",
+	      (unsigned long long)event.token, event.events);
 }
 
 void __init init_IRQ(void)
@@ -111,12 +115,16 @@ void __init init_IRQ(void)
 	ret = tcpcc_host_event_loop_init();
 	if (ret)
 		panic("tcpcc: host event-loop initialization failed: %d", ret);
+	ret = tcpcc_host_event_selftest();
+	if (ret)
+		panic("tcpcc: M8.2 host readiness selftest failed: %d", ret);
 
 	irq_set_chip_and_handler(TCPCC_HOST_TEST_IRQ, &tcpcc_host_irq_chip,
 				 handle_simple_irq);
 	irq_clear_status_flags(TCPCC_HOST_TEST_IRQ, IRQ_NOREQUEST | IRQ_NOPROBE);
 
 	pr_notice("tcpcc: M3.4 host epoll event loop initialized\n");
+	pr_notice("tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit token)\n");
 }
 
 static void tcpcc_test_tasklet_fn(struct tasklet_struct *tasklet)
