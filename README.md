@@ -69,14 +69,33 @@ sudo tcpcc \
   --cc bbr
 ```
 
+The optional runtime limits default to eight simultaneous connections and a
+five-second graceful-shutdown window:
+
+```bash
+sudo tcpcc \
+  --listen 203.0.113.10:443 \
+  --backend 127.0.0.1:443 \
+  --cc bbr \
+  --max-connections 8 \
+  --shutdown-grace-period 5
+```
+
+Eight is the current hosted bridge limit. Each active session has fixed
+16-KiB buffers in each stream direction; backend socket send/receive buffer
+requests are also fixed so a slow endpoint produces bounded backpressure
+instead of unbounded userspace accumulation.
+
 The public connection terminates in the hosted Linux stack using BBR; the
 ordinary loopback connection to the application is a separate stream bridge.
 `nft-lib` is the default packet-steering implementation. `nft-exec` and the
 `iptables-nft`/`iptables-legacy` compatibility paths are selected explicitly
 with `--firewall-backend` and `--iptables-variant`; an error never triggers a
 silent fallback. Readiness and shutdown are emitted as newline-delimited
-`tcpcc.runtime.v1` JSON on stdout. SIGINT and SIGTERM remove the owned firewall
-resource, stop the hosted kernel, and finally close the nonpersistent TUN.
+`tcpcc.runtime.v1` JSON on stdout. On SIGINT or SIGTERM tcpcc closes the hosted
+listener, lets active streams finish for the configured grace period, cancels
+only the remainder, stops the hosted kernel, removes its exact DNAT resource,
+and finally closes the nonpersistent TUN.
 
 ## Fetch the pinned Linux source
 

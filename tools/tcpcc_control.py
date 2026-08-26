@@ -36,6 +36,7 @@ OP_BRIDGE_JOIN = 17
 OP_BRIDGE_CANCEL = 18
 OP_ACCEPT_NONBLOCK = 19
 OP_SHUTDOWN = 20
+OP_BRIDGE_JOIN_RESULT = 21
 
 OP_NAMES = {
     OP_SOCKET: "socket",
@@ -58,6 +59,7 @@ OP_NAMES = {
     OP_BRIDGE_CANCEL: "bridge-cancel",
     OP_ACCEPT_NONBLOCK: "accept-nonblock",
     OP_SHUTDOWN: "shutdown",
+    OP_BRIDGE_JOIN_RESULT: "bridge-join-result",
 }
 
 REQUEST = struct.Struct("<IHHiIII256s")
@@ -190,7 +192,11 @@ def decode_response(raw: bytes, expected_operation: int) -> ControlResponse:
     return ControlResponse(operation, status, handle, payload[:length])
 
 
-def decode_bridge_result(data: bytes) -> BridgeResult:
+def decode_bridge_result(
+    data: bytes,
+    *,
+    allow_terminal_error: bool = False,
+) -> BridgeResult:
     """Decode and validate the stable 64-byte bridge completion snapshot."""
 
     if not isinstance(data, bytes) or len(data) != BRIDGE_RESULT.size:
@@ -217,9 +223,13 @@ def decode_bridge_result(data: bytes) -> BridgeResult:
         raise ControlProtocolError(
             f"bridge result reserved fields are {reserved0}/{reserved1}"
         )
-    if status:
+    if status and not allow_terminal_error:
         raise ControlProtocolError(
             f"successful bridge response contains status {status}"
+        )
+    if status > 0:
+        raise ControlProtocolError(
+            f"bridge result contains positive terminal status {status}"
         )
     if session_limit < 1:
         raise ControlProtocolError("bridge result reports a zero session limit")

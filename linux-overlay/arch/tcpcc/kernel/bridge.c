@@ -702,6 +702,12 @@ int tcpcc_bridge_start(struct socket *public_sock, __be32 backend_address,
 		ret = session->host_fd;
 		goto fail;
 	}
+	ret = tcpcc_host_set_socket_buffers(
+		session->host_fd,
+		TCPCC_BRIDGE_HOST_SOCKET_BUFFER_REQUEST,
+		TCPCC_BRIDGE_HOST_SOCKET_BUFFER_REQUEST);
+	if (ret)
+		goto fail;
 	ret = tcpcc_bridge_connect(session, backend_address, backend_port);
 	if (ret)
 		goto fail;
@@ -805,10 +811,12 @@ static int tcpcc_bridge_reap(struct tcpcc_bridge_session *session,
 	return status;
 }
 
-int tcpcc_bridge_join(int handle, unsigned long timeout,
-		      struct tcpcc_bridge_result *result)
+static int tcpcc_bridge_join_common(int handle, unsigned long timeout,
+				    struct tcpcc_bridge_result *result,
+				    bool return_session_status)
 {
 	struct tcpcc_bridge_session *session;
+	int session_status;
 	int ret;
 
 	mutex_lock(&tcpcc_bridge_control_lock);
@@ -822,10 +830,23 @@ int tcpcc_bridge_join(int handle, unsigned long timeout,
 		goto unlock;
 	}
 
-	ret = tcpcc_bridge_reap(session, result);
+	session_status = tcpcc_bridge_reap(session, result);
+	ret = return_session_status ? session_status : 0;
 unlock:
 	mutex_unlock(&tcpcc_bridge_control_lock);
 	return ret;
+}
+
+int tcpcc_bridge_join(int handle, unsigned long timeout,
+		      struct tcpcc_bridge_result *result)
+{
+	return tcpcc_bridge_join_common(handle, timeout, result, true);
+}
+
+int tcpcc_bridge_join_result(int handle, unsigned long timeout,
+			     struct tcpcc_bridge_result *result)
+{
+	return tcpcc_bridge_join_common(handle, timeout, result, false);
 }
 
 int tcpcc_bridge_cancel_session(int handle)

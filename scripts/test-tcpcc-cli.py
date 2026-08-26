@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Deterministic tests for the stable M8.4 tcpcc command and control path."""
+"""Deterministic tests for the stable tcpcc command and control path."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ from tcpcc_control import (  # noqa: E402
     OP_ACCEPT_NONBLOCK,
     OP_BIND,
     OP_BRIDGE_CANCEL,
-    OP_BRIDGE_JOIN,
+    OP_BRIDGE_JOIN_RESULT,
     OP_BRIDGE_START,
     OP_CLOSE,
     OP_GET_CC,
@@ -203,6 +203,28 @@ class ControlCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(ControlProtocolError, "reserved"):
             decode_bridge_result(data)
 
+    def test_bridge_result_exposes_terminal_errno_only_when_requested(self) -> None:
+        data = BRIDGE_RESULT.pack(
+            1,
+            2,
+            3,
+            BRIDGE_BUFFER_LIMIT,
+            BRIDGE_TOTAL_BUFFER_LIMIT,
+            1 << 3,
+            4,
+            5,
+            6,
+            BRIDGE_SESSION_LIMIT,
+            -errno.ECONNRESET,
+            0,
+            0,
+        )
+        with self.assertRaisesRegex(ControlProtocolError, "status"):
+            decode_bridge_result(data)
+        result = decode_bridge_result(data, allow_terminal_error=True)
+        self.assertEqual(result.status, -errno.ECONNRESET)
+        self.assertEqual(result.host_send_eagain, 4)
+
 
 class ParserTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -235,6 +257,32 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(config.cc, "bbr")
         self.assertEqual(config.kernel, self.kernel.resolve())
         self.assertEqual(config.firewall_backend, "nft-lib")
+        self.assertEqual(config.max_connections, BRIDGE_SESSION_LIMIT)
+        self.assertEqual(config.shutdown_grace_period, 5.0)
+
+    def test_runtime_limits_are_explicit_and_bounded(self) -> None:
+        namespace = build_parser(environ={}).parse_args(
+            self.arguments(
+                "--max-connections",
+                "4",
+                "--shutdown-grace-period",
+                "1.25",
+            )
+        )
+        config = config_from_namespace(namespace)
+        self.assertEqual(config.max_connections, 4)
+        self.assertEqual(config.shutdown_grace_period, 1.25)
+
+        for arguments, message in (
+            (("--max-connections", "9"), "max connections"),
+            (("--shutdown-grace-period", "-1"), "grace period"),
+        ):
+            with self.subTest(arguments=arguments):
+                invalid = build_parser(environ={}).parse_args(
+                    self.arguments(*arguments)
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    config_from_namespace(invalid)
 
     def test_endpoints_reject_forward_proxy_and_nonliteral_forms(self) -> None:
         invalid = (
@@ -365,30 +413,43 @@ class FakeControl:
         cc: str = "bbr",
         accepted_cc: str | None = None,
         accept_once: bool = True,
+        accept_limit: int | None = None,
+        terminal_status: int = 0,
+        terminal_events: int = 0,
+        complete_after_join_calls: int | None = 2,
     ) -> None:
         self.process = process
         self.cc = cc
         self.accepted_cc = cc if accepted_cc is None else accepted_cc
-        self.accept_once = accept_once
-        self.accepted = False
-        self.cancelled = False
-        self.join_calls = 0
+        self.accept_limit = (
+            1 if accept_once else 0
+        ) if accept_limit is None else accept_limit
+        self.accepted_count = 0
+        self.cancelled: set[int] = set()
+        self.join_calls: dict[int, int] = {}
+        self.terminal_status = terminal_status
+        self.terminal_events = terminal_events
+        self.complete_after_join_calls = complete_after_join_calls
         self.operations: list[tuple[int, int, int, int, bytes]] = []
 
-    @staticmethod
-    def _bridge_data() -> bytes:
+    def _bridge_data(
+        self,
+        *,
+        status: int | None = None,
+        terminal_events: int | None = None,
+    ) -> bytes:
         return BRIDGE_RESULT.pack(
             0x8000000100000002,
             123,
             456,
             BRIDGE_BUFFER_LIMIT,
             BRIDGE_TOTAL_BUFFER_LIMIT,
-            0,
-            0,
+            self.terminal_events if terminal_events is None else terminal_events,
+            3,
             0,
             0,
             BRIDGE_SESSION_LIMIT,
-            0,
+            self.terminal_status if status is None else status,
             0,
             0,
         )
@@ -425,23 +486,26 @@ class FakeControl:
             response_handle = 1
         elif operation == OP_GET_CC:
             response_data = (
-                self.accepted_cc if handle == 2 else self.cc
+                self.accepted_cc if handle != 1 else self.cc
             ).encode("ascii")
         elif operation == OP_ACCEPT_NONBLOCK:
-            if self.accept_once and not self.accepted:
-                self.accepted = True
-                response_handle = 2
+            if self.accepted_count < self.accept_limit:
+                self.accepted_count += 1
+                response_handle = 1 + self.accepted_count
             else:
                 status = -errno.EAGAIN
         elif operation == OP_BRIDGE_START:
-            response_handle = 17
+            response_handle = 15 + handle
         elif operation == OP_BRIDGE_CANCEL:
-            self.cancelled = True
-        elif operation == OP_BRIDGE_JOIN:
-            self.join_calls += 1
-            if self.cancelled:
-                status = -errno.ECANCELED
-            elif self.join_calls == 1:
+            self.cancelled.add(handle)
+        elif operation == OP_BRIDGE_JOIN_RESULT:
+            self.join_calls[handle] = self.join_calls.get(handle, 0) + 1
+            if handle in self.cancelled:
+                response_data = self._bridge_data(status=-errno.ECANCELED)
+            elif (
+                self.complete_after_join_calls is None
+                or self.join_calls[handle] < self.complete_after_join_calls
+            ):
                 status = -errno.ETIMEDOUT
             else:
                 response_data = self._bridge_data()
@@ -463,12 +527,13 @@ class FakeControl:
         )
 
 
-def runtime_config(kernel: Path) -> ServiceConfig:
+def runtime_config(kernel: Path, **options: object) -> ServiceConfig:
     return ServiceConfig(
         listen=Endpoint("203.0.113.10", 443),
         backend=Endpoint("127.0.0.1", 8443),
         cc="bbr",
         kernel=kernel,
+        **options,
     )
 
 
@@ -483,13 +548,22 @@ class RuntimeTests(unittest.TestCase):
         self.process = FakeProcess()
         self.control = FakeControl(self.process)
 
-    def runtime(self, control: FakeControl | None = None) -> HostedKernelRuntime:
+    def runtime(
+        self,
+        control: FakeControl | None = None,
+        runtime_clock: object | None = None,
+        **config_options: object,
+    ) -> HostedKernelRuntime:
         selected = self.control if control is None else control
+        runtime_options = {}
+        if runtime_clock is not None:
+            runtime_options["clock"] = runtime_clock
         return HostedKernelRuntime(
-            runtime_config(Path("/fixture/vmlinux")),
+            runtime_config(Path("/fixture/vmlinux"), **config_options),
             emitter=self.emitter,
             process_factory=lambda *_args, **_kwargs: self.process,
             control_factory=lambda _stdin, _stdout: selected,
+            **runtime_options,
         )
 
     def test_start_sets_listener_cc_before_bind_and_listen(self) -> None:
@@ -526,6 +600,7 @@ class RuntimeTests(unittest.TestCase):
         event = json.loads(self.output.getvalue().splitlines()[-1])
         self.assertEqual(event["event"], "connection-closed")
         self.assertEqual(event["public_to_backend_bytes"], 123)
+        self.assertEqual(event["host_send_eagain"], 3)
 
     def test_inheritance_mismatch_closes_accepted_socket(self) -> None:
         control = FakeControl(self.process, accepted_cc="cubic")
@@ -539,7 +614,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.active_bridges, set())
 
     def test_shutdown_closes_listener_cancels_session_then_exits_zero(self) -> None:
-        runtime = self.runtime()
+        runtime = self.runtime(shutdown_grace_period=0)
         runtime.start(101)
         runtime.poll_once()
 
@@ -558,6 +633,105 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.process.status, 0)
         self.assertTrue(self.process.stdin.closed)
         self.assertTrue(self.process.stdout.closed)
+
+    def test_shutdown_drains_completed_session_before_hosted_exit(self) -> None:
+        runtime = self.runtime()
+        runtime.start(101)
+        runtime.poll_once()
+
+        runtime.shutdown()
+
+        operations = [entry[0] for entry in self.control.operations]
+        self.assertNotIn(OP_BRIDGE_CANCEL, operations)
+        self.assertLess(
+            operations.index(OP_BRIDGE_JOIN_RESULT),
+            operations.index(OP_SHUTDOWN),
+        )
+        documents = [
+            json.loads(line) for line in self.output.getvalue().splitlines()
+        ]
+        self.assertIn("draining", [document["event"] for document in documents])
+        self.assertEqual(documents[-1]["event"], "connection-closed")
+        self.assertEqual(documents[-1]["status"], 0)
+
+    def test_shutdown_cancels_only_after_grace_period_expires(self) -> None:
+        control = FakeControl(
+            self.process,
+            complete_after_join_calls=None,
+        )
+        now = 0.0
+
+        def clock() -> float:
+            nonlocal now
+            now += 0.05
+            return now
+
+        runtime = self.runtime(
+            control,
+            runtime_clock=clock,
+            shutdown_grace_period=0.15,
+        )
+        runtime.start(101)
+        runtime.poll_once()
+
+        runtime.shutdown()
+
+        operations = [entry[0] for entry in control.operations]
+        self.assertIn(OP_BRIDGE_CANCEL, operations)
+        documents = [
+            json.loads(line) for line in self.output.getvalue().splitlines()
+        ]
+        events = [document["event"] for document in documents]
+        self.assertIn("drain-timeout", events)
+        closed = next(
+            document for document in documents
+            if document["event"] == "connection-closed"
+        )
+        self.assertEqual(closed["status"], -errno.ECANCELED)
+
+    def test_capacity_stops_accepting_at_configured_limit(self) -> None:
+        control = FakeControl(self.process, accept_limit=3)
+        runtime = self.runtime(
+            control,
+            max_connections=2,
+            shutdown_grace_period=0,
+        )
+        runtime.start(101)
+
+        runtime.poll_once()
+
+        self.assertEqual(runtime.active_bridges, {17, 18})
+        accepts = [
+            entry for entry in control.operations
+            if entry[0] == OP_ACCEPT_NONBLOCK
+        ]
+        self.assertEqual(len(accepts), 2)
+        opened = [
+            json.loads(line)
+            for line in self.output.getvalue().splitlines()
+            if json.loads(line)["event"] == "connection-opened"
+        ]
+        self.assertEqual([event["active_connections"] for event in opened], [1, 2])
+        runtime.shutdown()
+
+    def test_terminal_reset_is_reported_without_stopping_runtime(self) -> None:
+        control = FakeControl(
+            self.process,
+            terminal_status=-errno.ECONNRESET,
+            terminal_events=1 << 3,
+        )
+        runtime = self.runtime(control)
+        runtime.start(101)
+        runtime.poll_once()
+        runtime.poll_once()
+        runtime.poll_once()
+
+        self.assertEqual(runtime.active_bridges, set())
+        self.assertIsNone(self.process.poll())
+        closed = json.loads(self.output.getvalue().splitlines()[-1])
+        self.assertEqual(closed["status"], -errno.ECONNRESET)
+        self.assertEqual(closed["terminal_events"], 1 << 3)
+        runtime.shutdown()
 
     def test_unexpected_child_exit_is_runtime_failure(self) -> None:
         runtime = self.runtime()

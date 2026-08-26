@@ -64,6 +64,7 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_BRIDGE_CANCEL,
 	TCPCC_CONTROL_ACCEPT_NONBLOCK,
 	TCPCC_CONTROL_SHUTDOWN,
+	TCPCC_CONTROL_BRIDGE_JOIN_RESULT,
 };
 
 struct tcpcc_control_request {
@@ -803,6 +804,35 @@ static int tcpcc_control_bridge_join(
 	return 0;
 }
 
+static int tcpcc_control_bridge_join_result(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_bridge_result result;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(result) != 64);
+	BUILD_BUG_ON(sizeof(result) > TCPCC_CONTROL_MAX_PAYLOAD);
+
+	if (request->length || request->arg1 || !request->arg0 ||
+	    request->arg0 > 30000U)
+		return -EINVAL;
+
+	ret = tcpcc_bridge_join_result(request->handle,
+				       msecs_to_jiffies(request->arg0),
+				       &result);
+	if (ret)
+		return ret;
+
+	memcpy(response->data, &result, sizeof(result));
+	response->length = sizeof(result);
+	pr_notice("tcpcc: M8.5 session %d bridge result joined (status %d, %llu public-to-backend, %llu backend-to-public bytes)\n",
+		  request->handle, result.status,
+		  (unsigned long long)result.public_to_backend_bytes,
+		  (unsigned long long)result.backend_to_public_bytes);
+	return 0;
+}
+
 static int tcpcc_control_bridge_cancel(
 				const struct tcpcc_control_request *request)
 {
@@ -896,6 +926,8 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_accept_nonblock(request, response);
 	case TCPCC_CONTROL_SHUTDOWN:
 		return tcpcc_control_shutdown(request);
+	case TCPCC_CONTROL_BRIDGE_JOIN_RESULT:
+		return tcpcc_control_bridge_join_result(request, response);
 	default:
 		return -EOPNOTSUPP;
 	}

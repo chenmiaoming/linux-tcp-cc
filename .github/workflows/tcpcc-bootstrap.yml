@@ -81,7 +81,7 @@ jobs:
       - name: Execute hosted M6.1 native BBR/default-fq regression
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
-      - name: Execute hosted M8.1 inbound TUN TCP milestone
+      - name: Exercise real-TUN capacity, reset isolation, and stream regressions
         run: bash scripts/validate-tcpcc-tun.sh
 
       - name: Execute M8.4 nonblocking accept and clean shutdown boundary
@@ -90,13 +90,13 @@ jobs:
             --kernel .build/tcpcc-bootstrap-out/vmlinux \
             --boot-log .build/tcpcc-m84-runtime.log
 
-      - name: Stage the installed M8.4 command layout
+      - name: Stage the installed M8.5 command layout
         run: |
           make \
-            DESTDIR="$PWD/.build/m84-install-root" \
+            DESTDIR="$PWD/.build/m85-install-root" \
             VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
             install
-          .build/m84-install-root/usr/local/bin/tcpcc --help >/dev/null
+          .build/m85-install-root/usr/local/bin/tcpcc --help >/dev/null
 
       - name: Execute hosted M6.3 lossless delayed-path milestone
         run: bash scripts/validate-tcpcc-long-fat.sh
@@ -113,10 +113,10 @@ jobs:
             --output .build/m7-hosted-lossless.json
           cat .build/m7-hosted-lossless.json
 
-      - name: Upload M8.4 hosted kernel
+      - name: Upload M8.5 hosted kernel
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-m84-vmlinux
+          name: tcpcc-m85-vmlinux
           path: .build/tcpcc-bootstrap-out/vmlinux
           if-no-files-found: error
 
@@ -176,10 +176,10 @@ jobs:
       - name: Checkout linux-tcp-cc
         uses: actions/checkout@v4
 
-      - name: Download M8.4 hosted kernel
+      - name: Download M8.5 hosted kernel
         uses: actions/download-artifact@v4
         with:
-          name: tcpcc-m84-vmlinux
+          name: tcpcc-m85-vmlinux
           path: .build/tcpcc-bootstrap-out
 
       - name: Install privileged ingress dependencies
@@ -208,19 +208,19 @@ jobs:
           sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 
-      - name: Prove public BBR ingress and orderly cleanup
+      - name: Prove concurrent BBR ingress, backpressure, and signal drain
         run: |
           sudo -n python3 scripts/test-tcpcc-cli-integration.py \
             --integration \
             --firewall-backend '${{ matrix.backend }}' \
             --iptables-variant '${{ matrix.iptables_variant }}' \
             --kernel .build/tcpcc-bootstrap-out/vmlinux \
-            --output-dir '.build/m8-cli-${{ matrix.name }}'
+            --output-dir '.build/m85-cli-${{ matrix.name }}'
 
-      - name: Upload M8.4 ingress diagnostics
+      - name: Upload M8.5 ingress diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tcpcc-m84-cli-${{ matrix.name }}
-          path: .build/m8-cli-${{ matrix.name }}
+          name: tcpcc-m85-cli-${{ matrix.name }}
+          path: .build/m85-cli-${{ matrix.name }}
           if-no-files-found: warn

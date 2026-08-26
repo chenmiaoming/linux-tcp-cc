@@ -27,6 +27,7 @@ int tcpcc_host_set_nonblock(int fd);
 int tcpcc_host_tcp_socket(void);
 int tcpcc_host_tcp_connect(int fd, __be32 address, __be16 port);
 int tcpcc_host_socket_error(int fd);
+int tcpcc_host_set_socket_buffers(int fd, int send_bytes, int receive_bytes);
 ssize_t tcpcc_host_send_fd(int fd, const void *buf, size_t len);
 ssize_t tcpcc_host_recv_fd(int fd, void *buf, size_t len);
 int tcpcc_host_shutdown(int fd, int how);

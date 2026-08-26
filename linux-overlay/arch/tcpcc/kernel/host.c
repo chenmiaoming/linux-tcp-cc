@@ -18,6 +18,7 @@
 #define TCPCC_HOST_NR_RECVFROM        45
 #define TCPCC_HOST_NR_SHUTDOWN        48
 #define TCPCC_HOST_NR_SOCKETPAIR      53
+#define TCPCC_HOST_NR_SETSOCKOPT      54
 #define TCPCC_HOST_NR_GETSOCKOPT      55
 #define TCPCC_HOST_NR_FCNTL           72
 #define TCPCC_HOST_NR_EPOLL_WAIT      232
@@ -42,6 +43,8 @@
 
 #define TCPCC_HOST_SOL_SOCKET   1
 #define TCPCC_HOST_SO_ERROR     4
+#define TCPCC_HOST_SO_SNDBUF    7
+#define TCPCC_HOST_SO_RCVBUF    8
 #define TCPCC_HOST_MSG_NOSIGNAL 0x4000
 
 #define TCPCC_HOST_F_GETFL    3
@@ -285,6 +288,30 @@ int tcpcc_host_socket_error(int fd)
 	if (length != sizeof(error))
 		return -TCPCC_HOST_EIO;
 	return error ? -error : 0;
+}
+
+static int tcpcc_host_set_socket_buffer(int fd, int option, int bytes)
+{
+	long ret;
+
+	if (bytes <= 0)
+		return -TCPCC_HOST_EINVAL;
+	ret = tcpcc_host_syscall5(TCPCC_HOST_NR_SETSOCKOPT, fd,
+				 TCPCC_HOST_SOL_SOCKET, option,
+				 (long)&bytes, sizeof(bytes));
+	return ret < 0 ? (int)ret : 0;
+}
+
+int tcpcc_host_set_socket_buffers(int fd, int send_bytes, int receive_bytes)
+{
+	int ret;
+
+	ret = tcpcc_host_set_socket_buffer(fd, TCPCC_HOST_SO_SNDBUF,
+					   send_bytes);
+	if (ret)
+		return ret;
+	return tcpcc_host_set_socket_buffer(fd, TCPCC_HOST_SO_RCVBUF,
+					    receive_bytes);
 }
 
 ssize_t tcpcc_host_send_fd(int fd, const void *buf, size_t len)

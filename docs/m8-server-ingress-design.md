@@ -18,7 +18,7 @@ accepted socket must inherit the requested algorithm. A separate ordinary host
 TCP connection carries the stream to the local backend; its congestion-control
 choice is outside tcpcc's public-side contract.
 
-### M8.4 command contract
+### M8.4-M8.5 command contract
 
 The repository launcher is `./tcpcc`. `sudo make install` installs the launcher
 as `PREFIX/bin/tcpcc`, its private modules under `PREFIX/lib/tcpcc`, and the
@@ -36,6 +36,12 @@ backend boundary deliberately accepts only `127.0.0.1`:
 --cc ALGORITHM
 ```
 
+`--max-connections` controls admission from 1 through the hosted bridge limit
+of 8 and defaults to 8. `--shutdown-grace-period` controls how long signal
+shutdown waits for active streams to finish before canceling them; it defaults
+to 5 seconds and accepts 0 through 300 seconds. Zero requests immediate
+cancellation after listener closure.
+
 The default internal point-to-point endpoints are `198.18.0.1` on the host and
 `198.18.0.2/32` in the hosted stack. Advanced deployments can set
 `--tun-host-address`, `--tun-guest-address`, and `--tun-name`; those values are
@@ -52,19 +58,59 @@ no automatic fallback after compatibility, startup, or runtime failure.
 
 The CLI launches the project-owned `ARCH=tcpcc` executable with only the owned
 TUN fd inherited. It attaches L3, creates a hosted listener, applies and reads
-back the requested `TCP_CONGESTION`, then uses nonblocking accept while at most
-eight asynchronous bridge sessions run. Every accepted child is read back to
-verify congestion-control inheritance before ownership transfers to the
-bridge.
+back the requested `TCP_CONGESTION`, then uses nonblocking accept while no more
+than the configured number of asynchronous bridge sessions run. Every accepted
+child is read back to verify congestion-control inheritance before ownership
+transfers to the bridge. The kernel independently enforces the absolute
+eight-session limit and returns `ENOSPC` if a caller exceeds it.
 
 Stdout is newline-delimited JSON with schema `tcpcc.runtime.v1`. The `ready`
 record includes the exact public/backend endpoints, requested CC, TUN name,
-hosted ifindex/PID, and owned firewall resource. Connection records expose the
-verified accepted CC and terminal byte counts. Human diagnostics and hosted
-kernel logs use stderr. SIGINT/SIGTERM first close the hosted listener, cancel
-and reap bridge sessions, request a clean hosted exit, then remove DNAT and
-finally close the nonpersistent TUN fd. Startup and runtime failures are
+hosted ifindex/PID, owned firewall resource, connection limit, and shutdown
+grace period. `connection-opened` records expose the verified inherited CC and
+current admission count. A completed session's `connection-closed` record
+carries the actual terminal status plus byte counts, host readiness flags,
+`EAGAIN` counts, and partial-write counts, including reset and cancellation
+outcomes. A control-channel failure that prevents retrieval instead reports
+that control status without inventing counters. Human diagnostics and hosted
+kernel logs use stderr.
+
+SIGINT/SIGTERM first close the hosted listener and emit `draining`. Existing
+sessions continue until all finish or the monotonic grace deadline expires. A
+deadline expiry emits `drain-timeout`, after which only remaining sessions are
+canceled and joined. tcpcc then requests a clean hosted exit, removes DNAT, and
+finally closes the nonpersistent TUN fd. Startup and runtime failures are
 nonzero and still attempt every owned cleanup boundary.
+
+### M8.5 runtime hardening boundary
+
+The hosted bridge owns eight generation-tagged session slots. Reaping a
+terminal result releases exactly its slot; a later connection may reuse that
+slot with a new generation, while stale handles remain invalid. Admission is
+therefore bounded and recoverable rather than queueing accepted sockets outside
+the hosted stack.
+
+Each session owns two 16-KiB bridge buffers, one per stream direction, for a
+fixed 256-KiB bridge-buffer ceiling at eight sessions. Every ordinary host
+backend socket requests 32 KiB for `SO_SNDBUF` and `SO_RCVBUF` (Linux accounts
+each as a 64-KiB effective limit). Readiness-driven nonblocking I/O and partial
+writes propagate pressure from a slow backend or public peer without growing
+an application-level queue.
+
+The original bridge-join control operation retains its existing success/error
+ABI. A new append-only result-join operation always returns the complete
+64-byte terminal snapshot once a session finishes; the snapshot itself holds
+the terminal errno. This lets the CLI report byte and backpressure counters for
+clean EOF, RST, and explicit cancellation without changing earlier callers.
+
+The real-TUN gate fills all eight slots concurrently, verifies that a ninth
+start returns `ENOSPC`, reaps them, and proves a replacement connection can use
+a released slot. Separate backend-RST and public-RST cases must fail only their
+own sessions while a survivor continues to a clean bidirectional half-close.
+The privileged CLI matrix additionally runs four delayed 512-KiB flows, sends
+SIGTERM at the configured admission limit, observes real host-send
+backpressure, drains without cancellation, and verifies exact DNAT/TUN cleanup
+through `nft-lib`, `nft-exec`, `iptables-nft`, and `iptables-legacy`.
 
 ## Data path
 
