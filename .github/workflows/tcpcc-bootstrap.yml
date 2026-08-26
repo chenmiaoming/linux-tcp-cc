@@ -8,6 +8,7 @@ on:
       - '.github/workflows/tcpcc-bootstrap.yml'
       - '.github/workflows/tcpcc-link.yml'
       - 'benchmarks/m7/**'
+      - 'benchmarks/m8/**'
       - 'linux-overlay/**'
       - 'Makefile'
       - 'patches/**'
@@ -20,8 +21,10 @@ on:
       - 'scripts/run-tcpcc-runtime-test.py'
       - 'scripts/run-tcpcc-m6-diagnostic.py'
       - 'scripts/run-tcpcc-tun-test.py'
+      - 'scripts/run-tcpcc-high-bdp-iperf.py'
       - 'scripts/test-tcpcc-cli.py'
       - 'scripts/test-tcpcc-cli-integration.py'
+      - 'scripts/test-tcpcc-high-bdp-iperf.py'
       - 'scripts/collect-m7-hosted-report.py'
       - 'tools/tcpcc_cli.py'
       - 'tools/tcpcc_control.py'
@@ -67,16 +70,22 @@ jobs:
           python3 -m py_compile scripts/run-tcpcc-runtime-test.py
           python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
           python3 -m py_compile scripts/run-tcpcc-tun-test.py
+          python3 -m py_compile scripts/run-tcpcc-high-bdp-iperf.py
           python3 -m py_compile scripts/test-tcpcc-cli.py
           python3 -m py_compile scripts/test-tcpcc-cli-integration.py
+          python3 -m py_compile scripts/test-tcpcc-high-bdp-iperf.py
           python3 -m py_compile scripts/collect-m7-hosted-report.py
           python3 -m py_compile tools/tcpcc_cli.py
           python3 -m py_compile tools/tcpcc_control.py
           python3 -m py_compile tools/tcpcc_host.py
           python3 -m json.tool benchmarks/m7/scenarios-v1.json >/dev/null
+          python3 -m json.tool benchmarks/m8/iperf-high-bdp-loss-v1.json >/dev/null
 
       - name: Exercise stable CLI and hosted runtime fault boundaries
         run: python3 scripts/test-tcpcc-cli.py
+
+      - name: Exercise high-BDP iperf report contracts
+        run: python3 scripts/test-tcpcc-high-bdp-iperf.py
 
       - name: Execute hosted M6.1 native BBR/default-fq regression
         run: bash scripts/validate-tcpcc-bootstrap.sh
@@ -223,4 +232,67 @@ jobs:
         with:
           name: tcpcc-m85-cli-${{ matrix.name }}
           path: .build/m85-cli-${{ matrix.name }}
+          if-no-files-found: warn
+
+  high-bdp-iperf:
+    name: High-BDP iperf native vs tcpcc
+    needs: start-kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Download M8.5 hosted kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: tcpcc-m85-vmlinux
+          path: .build/tcpcc-bootstrap-out
+
+      - name: Install privileged benchmark dependencies
+        run: |
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends \
+              ethtool \
+              iperf3 \
+              iproute2 \
+              iputils-ping \
+              libnftables1 \
+              nftables \
+              procps
+
+      - name: Load TUN, BBR, NAT, and conntrack prerequisites
+        run: |
+          sudo -n modprobe tun || true
+          sudo -n modprobe tcp_bbr || true
+          sudo -n modprobe nf_tables || true
+          sudo -n modprobe nf_nat || true
+          sudo -n modprobe nf_conntrack || true
+          test -c /dev/net/tun
+          sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
+
+      - name: Compare native CUBIC, native BBR, and tcpcc BBR
+        run: |
+          sudo -n env GITHUB_SHA="$GITHUB_SHA" \
+            python3 scripts/run-tcpcc-high-bdp-iperf.py \
+              --integration \
+              --kernel .build/tcpcc-bootstrap-out/vmlinux \
+              --scenario-file benchmarks/m8/iperf-high-bdp-loss-v1.json \
+              --output-dir .build/m8-high-bdp
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path(".build/m8-high-bdp/report.json").read_text())
+          print(json.dumps(report["summaries"], indent=2, sort_keys=True))
+          PY
+
+      - name: Upload high-BDP iperf report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-m85-high-bdp-iperf
+          path: .build/m8-high-bdp
           if-no-files-found: warn
