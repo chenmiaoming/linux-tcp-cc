@@ -14,6 +14,7 @@ import stat
 import struct
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, TextIO
@@ -22,7 +23,7 @@ from tcpcc_control import (
     OP_ACCEPT_NONBLOCK,
     OP_BIND,
     OP_BRIDGE_CANCEL,
-    OP_BRIDGE_JOIN,
+    OP_BRIDGE_JOIN_RESULT,
     OP_BRIDGE_START,
     OP_CLOSE,
     OP_GET_CC,
@@ -58,9 +59,13 @@ DEFAULT_BACKLOG = 128
 DEFAULT_POLL_INTERVAL = 0.01
 DEFAULT_KERNEL_SHUTDOWN_TIMEOUT = 10.0
 BRIDGE_SESSION_LIMIT = 8
+DEFAULT_MAX_CONNECTIONS = BRIDGE_SESSION_LIMIT
+DEFAULT_SHUTDOWN_GRACE_PERIOD = 5.0
+MAX_SHUTDOWN_GRACE_PERIOD = 300.0
 BRIDGE_BUFFER_LIMIT = 16 * 1024
 BRIDGE_TOTAL_BUFFER_LIMIT = 2 * BRIDGE_SESSION_LIMIT * BRIDGE_BUFFER_LIMIT
 BRIDGE_JOIN_POLL_MS = 1
+BRIDGE_DRAIN_JOIN_SLICE_MS = 50
 BRIDGE_SHUTDOWN_JOIN_MS = 5000
 HOST_EVENT_ERROR = 1 << 3
 ENDPOINT = re.compile(r"([^:]+):([0-9]{1,5})\Z")
@@ -161,6 +166,8 @@ class ServiceConfig:
     tun_host_address: str = DEFAULT_TUN_HOST_ADDRESS
     tun_guest_address: str = DEFAULT_TUN_GUEST_ADDRESS
     backlog: int = DEFAULT_BACKLOG
+    max_connections: int = DEFAULT_MAX_CONNECTIONS
+    shutdown_grace_period: float = DEFAULT_SHUTDOWN_GRACE_PERIOD
     poll_interval: float = DEFAULT_POLL_INTERVAL
 
     def __post_init__(self) -> None:
@@ -193,6 +200,24 @@ class ServiceConfig:
             or not 1 <= self.backlog <= 4096
         ):
             raise ValueError("backlog must be from 1 through 4096")
+        if (
+            isinstance(self.max_connections, bool)
+            or not isinstance(self.max_connections, int)
+            or not 1 <= self.max_connections <= BRIDGE_SESSION_LIMIT
+        ):
+            raise ValueError(
+                "max connections must be from 1 through "
+                f"{BRIDGE_SESSION_LIMIT}"
+            )
+        if (
+            isinstance(self.shutdown_grace_period, bool)
+            or not isinstance(self.shutdown_grace_period, (int, float))
+            or not 0 <= self.shutdown_grace_period <= MAX_SHUTDOWN_GRACE_PERIOD
+        ):
+            raise ValueError(
+                "shutdown grace period must be from 0 through "
+                f"{MAX_SHUTDOWN_GRACE_PERIOD:g} seconds"
+            )
         if (
             isinstance(self.poll_interval, bool)
             or not isinstance(self.poll_interval, (int, float))
@@ -439,6 +464,26 @@ def build_parser(*, environ: dict[str, str] | None = None) -> argparse.ArgumentP
         metavar="N",
         help="hosted listener backlog (default: 128)",
     )
+    parser.add_argument(
+        "--max-connections",
+        type=int,
+        default=DEFAULT_MAX_CONNECTIONS,
+        metavar="N",
+        help=(
+            "maximum simultaneous bridged connections "
+            f"(default and hosted limit: {BRIDGE_SESSION_LIMIT})"
+        ),
+    )
+    parser.add_argument(
+        "--shutdown-grace-period",
+        type=float,
+        default=DEFAULT_SHUTDOWN_GRACE_PERIOD,
+        metavar="SECONDS",
+        help=(
+            "time to drain active connections before cancellation "
+            f"(default: {DEFAULT_SHUTDOWN_GRACE_PERIOD:g})"
+        ),
+    )
     return parser
 
 
@@ -463,6 +508,8 @@ def config_from_namespace(namespace: argparse.Namespace) -> ServiceConfig:
         tun_host_address=namespace.tun_host_address,
         tun_guest_address=namespace.tun_guest_address,
         backlog=namespace.backlog,
+        max_connections=namespace.max_connections,
+        shutdown_grace_period=namespace.shutdown_grace_period,
     )
 
 
@@ -501,12 +548,14 @@ class HostedKernelRuntime:
         process_factory: ProcessFactory = subprocess.Popen,
         control_factory: ControlFactory = ControlClient,
         shutdown_timeout: float = DEFAULT_KERNEL_SHUTDOWN_TIMEOUT,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
         self.emitter = emitter
         self.process_factory = process_factory
         self.control_factory = control_factory
         self.shutdown_timeout = shutdown_timeout
+        self.clock = clock
         self.process: Process | None = None
         self.control: ControlChannel | None = None
         self.ifindex: int | None = None
@@ -605,37 +654,58 @@ class HostedKernelRuntime:
                 f"hosted kernel exited unexpectedly with status {status}"
             )
 
-    def _reap_bridges(self) -> None:
-        for handle in tuple(self.active_bridges):
-            try:
-                response = self._channel().transact(
-                    OP_BRIDGE_JOIN,
-                    handle,
-                    BRIDGE_JOIN_POLL_MS,
-                )
-            except ControlOperationError as error:
-                if error.status == -errno.ETIMEDOUT:
-                    continue
-                self.active_bridges.discard(handle)
-                self.emitter.event(
-                    "connection-closed",
-                    bridge_handle=handle,
-                    status=error.status,
-                )
-                self.emitter.diagnostic(
-                    f"bridge {handle} closed with hosted status {error.status}"
-                )
-                continue
-            result = decode_bridge_result(response.data)
-            self._validate_bridge_contract(result)
+    def _join_bridge_result(self, handle: int, timeout_ms: int) -> bool:
+        try:
+            response = self._channel().transact(
+                OP_BRIDGE_JOIN_RESULT,
+                handle,
+                timeout_ms,
+            )
+        except ControlOperationError as error:
+            if error.status == -errno.ETIMEDOUT:
+                return False
             self.active_bridges.discard(handle)
             self.emitter.event(
                 "connection-closed",
                 bridge_handle=handle,
-                status=0,
-                public_to_backend_bytes=result.public_to_backend_bytes,
-                backend_to_public_bytes=result.backend_to_public_bytes,
+                status=error.status,
+                active_connections=len(self.active_bridges),
+                max_connections=self.config.max_connections,
             )
+            self.emitter.diagnostic(
+                f"bridge {handle} could not return its terminal result: "
+                f"hosted status {error.status}"
+            )
+            return True
+
+        result = decode_bridge_result(
+            response.data,
+            allow_terminal_error=True,
+        )
+        self._validate_bridge_contract(result)
+        self.active_bridges.discard(handle)
+        self.emitter.event(
+            "connection-closed",
+            bridge_handle=handle,
+            status=result.status,
+            active_connections=len(self.active_bridges),
+            max_connections=self.config.max_connections,
+            public_to_backend_bytes=result.public_to_backend_bytes,
+            backend_to_public_bytes=result.backend_to_public_bytes,
+            terminal_events=result.terminal_events,
+            host_send_eagain=result.host_send_eagain,
+            host_partial_writes=result.host_partial_writes,
+            host_recv_eagain=result.host_recv_eagain,
+        )
+        if result.status:
+            self.emitter.diagnostic(
+                f"bridge {handle} closed with hosted status {result.status}"
+            )
+        return True
+
+    def _reap_bridges(self) -> None:
+        for handle in tuple(self.active_bridges):
+            self._join_bridge_result(handle, BRIDGE_JOIN_POLL_MS)
 
     @staticmethod
     def _validate_bridge_contract(result: BridgeResult) -> None:
@@ -649,7 +719,7 @@ class HostedKernelRuntime:
             or result.total_buffer_limit != BRIDGE_TOTAL_BUFFER_LIMIT
         ):
             raise ControlProtocolError("hosted bridge buffer contract changed")
-        if result.terminal_events & HOST_EVENT_ERROR:
+        if not result.status and result.terminal_events & HOST_EVENT_ERROR:
             raise ControlProtocolError(
                 "successful hosted bridge result contains a host error event"
             )
@@ -657,7 +727,7 @@ class HostedKernelRuntime:
     def _accept_available(self) -> None:
         if self.listener_handle is None:
             raise RuntimeError("hosted listener is unavailable")
-        while len(self.active_bridges) < BRIDGE_SESSION_LIMIT:
+        while len(self.active_bridges) < self.config.max_connections:
             try:
                 accepted = self._channel().transact(
                     OP_ACCEPT_NONBLOCK,
@@ -703,6 +773,8 @@ class HostedKernelRuntime:
                     bridge_handle=response.handle,
                     accepted_cc=self.config.cc,
                     backend=str(self.config.backend),
+                    active_connections=len(self.active_bridges),
+                    max_connections=self.config.max_connections,
                 )
             finally:
                 if not transferred:
@@ -743,6 +815,47 @@ class HostedKernelRuntime:
             self.process.kill()
             self.process.wait(timeout=2.0)
 
+    def _drain_bridges(self) -> None:
+        if not self.active_bridges:
+            return
+
+        grace_period = float(self.config.shutdown_grace_period)
+        self.emitter.event(
+            "draining",
+            active_connections=len(self.active_bridges),
+            grace_period=grace_period,
+        )
+        if grace_period <= 0:
+            return
+
+        deadline = self.clock() + grace_period
+        while self.active_bridges:
+            for handle in tuple(self.active_bridges):
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    break
+                timeout_ms = max(
+                    1,
+                    min(
+                        BRIDGE_DRAIN_JOIN_SLICE_MS,
+                        int(remaining * 1000),
+                    ),
+                )
+                self._join_bridge_result(handle, timeout_ms)
+            if self.clock() >= deadline:
+                break
+
+        if self.active_bridges:
+            self.emitter.event(
+                "drain-timeout",
+                remaining_connections=len(self.active_bridges),
+                grace_period=grace_period,
+            )
+            self.emitter.diagnostic(
+                f"shutdown grace period expired with "
+                f"{len(self.active_bridges)} active connection(s)"
+            )
+
     def shutdown(self) -> None:
         if self._closed:
             return
@@ -766,6 +879,11 @@ class HostedKernelRuntime:
                     except BaseException as error:
                         failures.append(error)
 
+                try:
+                    self._drain_bridges()
+                except BaseException as error:
+                    failures.append(error)
+
                 for handle in tuple(self.active_bridges):
                     try:
                         self._channel().transact(
@@ -777,12 +895,16 @@ class HostedKernelRuntime:
                         failures.append(error)
                 for handle in tuple(self.active_bridges):
                     try:
-                        self._channel().transact(
-                            OP_BRIDGE_JOIN,
+                        if not self._join_bridge_result(
                             handle,
                             BRIDGE_SHUTDOWN_JOIN_MS,
-                            allowed_statuses=(0, -errno.ECANCELED, -errno.ENOENT),
-                        )
+                        ):
+                            failures.append(
+                                TimeoutError(
+                                    f"bridge {handle} did not stop within "
+                                    f"{BRIDGE_SHUTDOWN_JOIN_MS} ms"
+                                )
+                            )
                     except BaseException as error:
                         failures.append(error)
                     finally:
@@ -881,6 +1003,8 @@ def run_service(
                         hosted_address=config.tun_guest_address,
                         hosted_ifindex=runtime.ifindex,
                         hosted_pid=runtime.pid,
+                        max_connections=config.max_connections,
+                        shutdown_grace_period=config.shutdown_grace_period,
                     )
                     emitter.diagnostic(
                         f"ready on {config.listen} with {config.cc}; "

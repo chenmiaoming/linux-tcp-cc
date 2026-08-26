@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Privileged end-to-end M8.4 ingress test across one firewall backend."""
+"""Privileged end-to-end M8.5 ingress hardening across one firewall path."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -28,6 +29,11 @@ HOSTED_ADDRESS = "198.18.0.2"
 HOSTED_PREFIX = 32
 HTTP_BODY = b"tcpcc-m8.4-backend\n"
 TIMEOUT = 20.0
+HARDENING_CONNECTIONS = 4
+HARDENING_PAYLOAD_BYTES = 512 * 1024 + 137
+HARDENING_BACKEND_DELAY = 2.0
+HARDENING_CLIENT_READ_DELAY = 1.0
+HARDENING_GRACE_PERIOD = 10.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--backend-server", action="store_true")
     parser.add_argument("--http-client", action="store_true")
+    parser.add_argument("--hardening-backend", action="store_true")
+    parser.add_argument("--hardening-client", action="store_true")
+    parser.add_argument("--connections", type=int)
     parser.add_argument("--port", type=int)
     parser.add_argument("--address")
     return parser.parse_args()
@@ -114,6 +123,135 @@ def http_client(address: str, port: int) -> int:
     if body != HTTP_BODY:
         raise RuntimeError(f"client body is {body!r}, expected {HTTP_BODY!r}")
     print(body.decode("ascii").strip())
+    return 0
+
+
+def hardening_payload(index: int) -> bytes:
+    prefix = f"tcpcc-m8.5-flow-{index}:".encode("ascii")
+    repeats = (HARDENING_PAYLOAD_BYTES + len(prefix) - 1) // len(prefix)
+    return (prefix * repeats)[:HARDENING_PAYLOAD_BYTES]
+
+
+def hardening_backend(port: int, connections: int) -> int:
+    if not 1 <= connections <= 8:
+        raise ValueError("hardening backend connections must be from 1 through 8")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    listener.settimeout(TIMEOUT)
+    listener.bind(("127.0.0.1", port))
+    listener.listen(connections)
+    print("hardening-backend-ready", flush=True)
+
+    release = threading.Event()
+    failures: list[BaseException] = []
+    workers: list[threading.Thread] = []
+
+    def handle(connection: socket.socket, peer: tuple[str, int]) -> None:
+        try:
+            connection.settimeout(TIMEOUT)
+            if peer[0] != "127.0.0.1":
+                raise RuntimeError(f"hardening backend peer is {peer[0]}")
+            if not release.wait(TIMEOUT):
+                raise TimeoutError("hardening backend release timed out")
+            received = bytearray()
+            while True:
+                chunk = connection.recv(16 * 1024)
+                if not chunk:
+                    break
+                received.extend(chunk)
+                if len(received) > HARDENING_PAYLOAD_BYTES:
+                    raise RuntimeError("hardening backend received excess bytes")
+            if len(received) != HARDENING_PAYLOAD_BYTES:
+                raise RuntimeError(
+                    "hardening backend received "
+                    f"{len(received)}/{HARDENING_PAYLOAD_BYTES} bytes"
+                )
+            if not bytes(received).startswith(b"tcpcc-m8.5-flow-"):
+                raise RuntimeError("hardening backend payload marker is invalid")
+            connection.sendall(received)
+            connection.shutdown(socket.SHUT_WR)
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            connection.close()
+
+    try:
+        for _index in range(connections):
+            connection, peer = listener.accept()
+            worker = threading.Thread(
+                target=handle,
+                args=(connection, peer),
+                daemon=True,
+            )
+            workers.append(worker)
+            worker.start()
+        time.sleep(HARDENING_BACKEND_DELAY)
+        release.set()
+        for worker in workers:
+            worker.join(TIMEOUT)
+            if worker.is_alive():
+                raise TimeoutError("hardening backend worker did not finish")
+        if failures:
+            raise RuntimeError(
+                "hardening backend worker failed: "
+                + "; ".join(str(error) for error in failures)
+            )
+        print("hardening-backend-passed", flush=True)
+        return 0
+    finally:
+        release.set()
+        listener.close()
+
+
+def hardening_client(address: str, port: int, connections: int) -> int:
+    if not 1 <= connections <= 8:
+        raise ValueError("hardening client connections must be from 1 through 8")
+    start = threading.Barrier(connections)
+    failures: list[BaseException] = []
+    workers: list[threading.Thread] = []
+
+    def exchange(index: int) -> None:
+        connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            connection.settimeout(TIMEOUT)
+            start.wait(TIMEOUT)
+            connection.connect((address, port))
+            payload = hardening_payload(index)
+            connection.sendall(payload)
+            connection.shutdown(socket.SHUT_WR)
+            time.sleep(HARDENING_CLIENT_READ_DELAY)
+            echoed = bytearray()
+            while True:
+                chunk = connection.recv(16 * 1024)
+                if not chunk:
+                    break
+                echoed.extend(chunk)
+            if bytes(echoed) != payload:
+                raise RuntimeError(
+                    f"hardening client {index} echo mismatch: "
+                    f"{len(echoed)}/{len(payload)} bytes"
+                )
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            connection.close()
+
+    for index in range(connections):
+        worker = threading.Thread(target=exchange, args=(index,), daemon=True)
+        workers.append(worker)
+        worker.start()
+    for worker in workers:
+        worker.join(TIMEOUT)
+        if worker.is_alive():
+            raise TimeoutError("hardening client worker did not finish")
+    if failures:
+        raise RuntimeError(
+            "hardening client worker failed: "
+            + "; ".join(str(error) for error in failures)
+        )
+    print("hardening-client-passed")
     return 0
 
 
@@ -203,6 +341,34 @@ def wait_event(
             )
         time.sleep(0.05)
     raise TimeoutError(f"tcpcc did not emit {event!r} within {TIMEOUT:.0f}s")
+
+
+def wait_event_count(
+    path: Path,
+    process: subprocess.Popen[bytes],
+    event: str,
+    count: int,
+) -> list[dict[str, object]]:
+    deadline = time.monotonic() + TIMEOUT
+    while time.monotonic() < deadline:
+        matches = [
+            document
+            for document in read_events(path)
+            if document.get("event") == event
+        ]
+        if len(matches) >= count:
+            return matches
+        status = process.poll()
+        if status is not None:
+            raise RuntimeError(
+                f"tcpcc exited with {status} before {count} {event!r} events; "
+                f"events={read_events(path)!r}"
+            )
+        time.sleep(0.05)
+    raise TimeoutError(
+        f"tcpcc emitted fewer than {count} {event!r} events within "
+        f"{TIMEOUT:.0f}s"
+    )
 
 
 def stop_process(process: subprocess.Popen[object] | None) -> None:
@@ -312,14 +478,18 @@ def integration(args: argparse.Namespace) -> int:
     client_link = f"tc{suffix}"
     tun_name = f"tcpe2e{suffix}"
     backend_process: subprocess.Popen[str] | None = None
+    hardening_backend_process: subprocess.Popen[str] | None = None
+    hardening_client_process: subprocess.Popen[bytes] | None = None
     tcpcc_process: subprocess.Popen[bytes] | None = None
     namespaces: list[str] = []
 
-    with tempfile.TemporaryDirectory(prefix="tcpcc-m84-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="tcpcc-m85-") as temporary:
         temp = Path(temporary)
         event_log = temp / "tcpcc-events.jsonl"
         diagnostic_log = temp / "tcpcc.log"
         backend_log = temp / "backend.log"
+        hardening_backend_log = temp / "hardening-backend.log"
+        hardening_client_log = temp / "hardening-client.log"
         try:
             for namespace in (router, client):
                 run(["ip", "netns", "add", namespace])
@@ -401,6 +571,10 @@ def integration(args: argparse.Namespace) -> int:
                 args.firewall_backend,
                 "--tun-name",
                 tun_name,
+                "--max-connections",
+                str(HARDENING_CONNECTIONS),
+                "--shutdown-grace-period",
+                str(HARDENING_GRACE_PERIOD),
             )
             if args.firewall_backend == "iptables":
                 command.extend(("--iptables-variant", args.iptables_variant))
@@ -420,6 +594,11 @@ def integration(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"tcpcc readiness contract mismatch: {ready}")
             if ready.get("firewall_backend") != args.firewall_backend:
                 raise RuntimeError(f"tcpcc selected an unexpected backend: {ready}")
+            if (
+                ready.get("max_connections") != HARDENING_CONNECTIONS
+                or ready.get("shutdown_grace_period") != HARDENING_GRACE_PERIOD
+            ):
+                raise RuntimeError(f"tcpcc readiness omitted runtime limits: {ready}")
 
             client_result = run(
                 ns_command(
@@ -444,8 +623,96 @@ def integration(args: argparse.Namespace) -> int:
             opened = wait_event(event_log, tcpcc_process, "connection-opened")
             if opened.get("accepted_cc") != "bbr":
                 raise RuntimeError(f"accepted socket CC was not verified: {opened}")
+            first_closed = wait_event_count(
+                event_log,
+                tcpcc_process,
+                "connection-closed",
+                1,
+            )[0]
+            if first_closed.get("status") != 0:
+                raise RuntimeError(f"HTTP bridge did not close cleanly: {first_closed}")
+
+            hardening_backend_stderr = hardening_backend_log.open("wb")
+            hardening_backend_process = subprocess.Popen(
+                ns_command(
+                    router,
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--hardening-backend",
+                    "--port",
+                    str(BACKEND_PORT),
+                    "--connections",
+                    str(HARDENING_CONNECTIONS),
+                ),
+                stdout=subprocess.PIPE,
+                stderr=hardening_backend_stderr,
+                text=True,
+                bufsize=1,
+            )
+            hardening_backend_stderr.close()
+            if (
+                wait_pipe_line(hardening_backend_process, "hardening backend")
+                != "hardening-backend-ready"
+            ):
+                raise RuntimeError(
+                    "hardening backend emitted an invalid readiness marker"
+                )
+
+            hardening_client_stream = hardening_client_log.open("wb")
+            hardening_client_process = subprocess.Popen(
+                ns_command(
+                    client,
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--hardening-client",
+                    "--address",
+                    PUBLIC_ADDRESS,
+                    "--port",
+                    str(PUBLIC_PORT),
+                    "--connections",
+                    str(HARDENING_CONNECTIONS),
+                ),
+                stdout=hardening_client_stream,
+                stderr=subprocess.STDOUT,
+            )
+            hardening_client_stream.close()
+
+            all_opened = wait_event_count(
+                event_log,
+                tcpcc_process,
+                "connection-opened",
+                1 + HARDENING_CONNECTIONS,
+            )
+            hardening_opened = all_opened[1:]
+            if any(
+                event.get("accepted_cc") != "bbr"
+                or event.get("max_connections") != HARDENING_CONNECTIONS
+                for event in hardening_opened
+            ):
+                raise RuntimeError(
+                    f"hardening accepted-socket contract mismatch: {hardening_opened}"
+                )
+            if max(
+                int(event.get("active_connections", 0))
+                for event in hardening_opened
+            ) != HARDENING_CONNECTIONS:
+                raise RuntimeError(
+                    f"hardening flows never reached capacity: {hardening_opened}"
+                )
 
             tcpcc_process.send_signal(signal.SIGTERM)
+            hardening_client_status = hardening_client_process.wait(timeout=TIMEOUT)
+            if hardening_client_status != 0:
+                raise RuntimeError(
+                    f"hardening client exited with {hardening_client_status}: "
+                    f"{hardening_client_log.read_text(errors='replace')}"
+                )
+            hardening_backend_status = hardening_backend_process.wait(timeout=TIMEOUT)
+            if hardening_backend_status != 0:
+                raise RuntimeError(
+                    f"hardening backend exited with {hardening_backend_status}: "
+                    f"{hardening_backend_log.read_text(errors='replace')}"
+                )
             tcpcc_status = tcpcc_process.wait(timeout=TIMEOUT)
             if tcpcc_status != 0:
                 raise RuntimeError(
@@ -462,6 +729,53 @@ def integration(args: argparse.Namespace) -> int:
             )
             if stopped is None or stopped.get("clean") is not True:
                 raise RuntimeError(f"tcpcc emitted no clean stop event: {stopped}")
+            documents = read_events(event_log)
+            draining = next(
+                (
+                    document
+                    for document in documents
+                    if document.get("event") == "draining"
+                ),
+                None,
+            )
+            if (
+                draining is None
+                or draining.get("active_connections") != HARDENING_CONNECTIONS
+                or draining.get("grace_period") != HARDENING_GRACE_PERIOD
+            ):
+                raise RuntimeError(f"tcpcc did not drain active flows: {draining}")
+            if any(
+                document.get("event") == "drain-timeout"
+                for document in documents
+            ):
+                raise RuntimeError("hardening flows exceeded the shutdown grace period")
+            closed = [
+                document
+                for document in documents
+                if document.get("event") == "connection-closed"
+            ]
+            if len(closed) != 1 + HARDENING_CONNECTIONS:
+                raise RuntimeError(f"unexpected terminal event count: {closed}")
+            hardening_closed = closed[1:]
+            for terminal in hardening_closed:
+                if (
+                    terminal.get("status") != 0
+                    or terminal.get("public_to_backend_bytes")
+                    != HARDENING_PAYLOAD_BYTES
+                    or terminal.get("backend_to_public_bytes")
+                    != HARDENING_PAYLOAD_BYTES
+                ):
+                    raise RuntimeError(
+                        f"hardening bridge terminal result mismatch: {terminal}"
+                    )
+            send_eagain = sum(
+                int(terminal.get("host_send_eagain", 0))
+                for terminal in hardening_closed
+            )
+            if send_eagain < 1:
+                raise RuntimeError(
+                    "delayed backend did not exercise host-send backpressure"
+                )
             firewall_resource = ready.get("firewall_resource")
             if not isinstance(firewall_resource, str) or not firewall_resource:
                 raise RuntimeError("readiness omitted the owned firewall resource")
@@ -483,6 +797,13 @@ def integration(args: argparse.Namespace) -> int:
                         "hosted": f"{HOSTED_ADDRESS}/{HOSTED_PREFIX}",
                         "accepted_cc": opened["accepted_cc"],
                         "http_body": HTTP_BODY.decode("ascii").strip(),
+                        "concurrent_connections": HARDENING_CONNECTIONS,
+                        "bytes_each_direction_per_connection": (
+                            HARDENING_PAYLOAD_BYTES
+                        ),
+                        "host_send_eagain": send_eagain,
+                        "half_close": "bidirectional",
+                        "signal_drain": "clean",
                         "shutdown": "clean",
                     },
                     sort_keys=True,
@@ -491,7 +812,13 @@ def integration(args: argparse.Namespace) -> int:
             )
             publish_artifacts(
                 args.output_dir,
-                (event_log, diagnostic_log, backend_log),
+                (
+                    event_log,
+                    diagnostic_log,
+                    backend_log,
+                    hardening_backend_log,
+                    hardening_client_log,
+                ),
             )
             return 0
         except BaseException as error:
@@ -503,16 +830,24 @@ def integration(args: argparse.Namespace) -> int:
             events = read_events(event_log) if event_log.exists() else []
             publish_artifacts(
                 args.output_dir,
-                (event_log, diagnostic_log, backend_log),
+                (
+                    event_log,
+                    diagnostic_log,
+                    backend_log,
+                    hardening_backend_log,
+                    hardening_client_log,
+                ),
             )
             raise RuntimeError(
-                f"M8.4 CLI integration failed: {error}\n"
+                f"M8.5 CLI integration failed: {error}\n"
                 f"events={events!r}\n"
                 f"tcpcc diagnostics:\n{diagnostics}"
             ) from error
         finally:
             stop_process(tcpcc_process)
             stop_process(backend_process)
+            stop_process(hardening_client_process)
+            stop_process(hardening_backend_process)
             for namespace in reversed(namespaces):
                 run(["ip", "netns", "delete", namespace], check=False)
 
@@ -527,6 +862,22 @@ def main() -> int:
         if args.address is None or args.port is None:
             raise ValueError("--http-client requires --address and --port")
         return http_client(args.address, args.port)
+    if args.hardening_backend:
+        if args.port is None or args.connections is None:
+            raise ValueError(
+                "--hardening-backend requires --port and --connections"
+            )
+        return hardening_backend(args.port, args.connections)
+    if args.hardening_client:
+        if (
+            args.address is None
+            or args.port is None
+            or args.connections is None
+        ):
+            raise ValueError(
+                "--hardening-client requires --address, --port, and --connections"
+            )
+        return hardening_client(args.address, args.port, args.connections)
     if not args.integration:
         raise ValueError("refusing privileged setup without --integration")
     return integration(args)

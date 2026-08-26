@@ -69,6 +69,7 @@ grep -F 'tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation toke
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2.5 session ' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2.6 session ' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M8.5 session ' "$BOOT_LOG" >/dev/null
 grep -F ' cancel requested' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
@@ -109,6 +110,11 @@ grep -F 'data_plane_control_bytes=0 token=0x' \
 grep -F 'bridge-concurrency: fast_handle=' "$TCP_LOG" >/dev/null
 grep -F 'stale_handle_status=-2 release_barrier=passed delayed_send_eagain=' \
   "$TCP_LOG" >/dev/null
+grep -F 'bridge-capacity: active_limit=8 unique_slots=8 overflow_status=-28 ' \
+  "$TCP_LOG" >/dev/null
+grep -F 'slot_recovery=passed' "$TCP_LOG" >/dev/null
+grep -F 'bridge-reset-isolation: backend_status=-' "$TCP_LOG" >/dev/null
+grep -F 'survivor_isolation=passed' "$TCP_LOG" >/dev/null
 grep -F 'total_buffer_limit=262144 session_limit=8' \
   "$TCP_LOG" >/dev/null
 grep -F 'bridge-cancel-victim-bbr: guest=192.0.2.2:18449' \
@@ -133,5 +139,5 @@ grep -F "${TUN_NAME}:" "$LINK_LOG" >/dev/null
 grep -F 'mtu 1500' "$LINK_LOG" >/dev/null
 grep -F "inet $HOST_ADDR peer $GUEST_ADDR/32" "$LINK_LOG" >/dev/null
 
-printf 'M8.2.6 real TUN adapter passed concurrent bridge cancellation and %s\n' \
-  'clean global teardown'
+printf 'M8.5 real TUN adapter passed capacity, reset isolation, %s\n' \
+  'concurrent cancellation, and clean global teardown'
