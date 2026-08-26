@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Privileged namespace proof for exact nftables DNAT over real TUN queues."""
+"""Privileged traffic proof for every exact-DNAT firewall backend."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import argparse
 import errno
 import json
 import os
+import re
 import secrets
 import select
 import selectors
@@ -25,11 +26,13 @@ from tcpcc_host import (  # noqa: E402
     NftDnatConfig,
     OwnershipJournal,
     TunConfig,
+    create_firewall_backend,
     create_tun_queue,
-    install_nft_dnat,
+    current_nft_ownership,
 )
 
 PUBLIC_ADDRESS = "192.0.2.1"
+OTHER_PUBLIC_ADDRESS = "192.0.2.3"
 CLIENT_ADDRESS = "192.0.2.2"
 CLIENT_PREFIX = "192.0.2.0/24"
 PUBLIC_PORT = 18443
@@ -41,6 +44,8 @@ PAYLOAD = b"tcpcc exact DNAT over two nonpersistent TUN queues"
 REPLY_PREFIX = b"hosted-reply:"
 KEEP_TABLE = "tcpcc_keep"
 WORKER_TIMEOUT = 20.0
+BACKENDS = ("nft-lib", "nft-exec", "iptables")
+IPTABLES_VARIANTS = ("iptables", "iptables-nft", "iptables-legacy")
 
 
 def _run(
@@ -63,6 +68,17 @@ def _run(
 
 def _netns_argv(namespace: str, argv: list[str]) -> list[str]:
     return ["ip", "netns", "exec", namespace, *argv]
+
+
+def _firewall(backend: str, iptables_variant: str):
+    if backend == "iptables":
+        return create_firewall_backend(
+            backend,
+            iptables_path=iptables_variant,
+            iptables_restore_path=f"{iptables_variant}-restore",
+            iptables_save_path=f"{iptables_variant}-save",
+        )
+    return create_firewall_backend(backend)
 
 
 def _write_tun_packet(fd: int, packet: bytes) -> None:
@@ -117,7 +133,11 @@ def _print_ready(**fields: object) -> None:
     )
 
 
-def run_router_worker(relay_fd: int) -> None:
+def run_router_worker(
+    relay_fd: int,
+    backend_id: str,
+    iptables_variant: str,
+) -> None:
     relay = socket.socket(fileno=relay_fd)
     journal = OwnershipJournal()
     try:
@@ -129,16 +149,22 @@ def run_router_worker(relay_fd: int) -> None:
             )
         )
         journal.defer(f"tun:{queue.name}", queue.close)
-        dnat = install_nft_dnat(
+        firewall = _firewall(backend_id, iptables_variant)
+        dnat = firewall.install(
             NftDnatConfig(
                 listen_address=PUBLIC_ADDRESS,
                 listen_port=PUBLIC_PORT,
                 target_address=HOSTED_ADDRESS,
                 target_port=HOSTED_PORT,
-            )
+            ),
+            current_nft_ownership(queue.name),
         )
-        journal.defer(f"nft:{dnat.table_name}", dnat.close)
-        _print_ready(tun=queue.name, table=dnat.table_name)
+        journal.defer(f"{dnat.backend_id}:{dnat.resource_name}", dnat.close)
+        _print_ready(
+            tun=queue.name,
+            backend=dnat.backend_id,
+            resource=dnat.resource_name,
+        )
         _relay_packets(queue.fd, relay)
     finally:
         relay.close()
@@ -280,30 +306,60 @@ def run_client() -> None:
     )
 
 
-def run_collision_probe() -> None:
+def run_negative_client() -> None:
+    rejected: list[str] = []
+    for address, port in (
+        (PUBLIC_ADDRESS, PUBLIC_PORT + 1),
+        (OTHER_PUBLIC_ADDRESS, PUBLIC_PORT),
+    ):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.settimeout(2.0)
+            try:
+                connection.connect((address, port))
+            except OSError:
+                rejected.append(f"{address}:{port}")
+                continue
+        raise AssertionError(
+            f"nonmatching endpoint was unexpectedly translated: {address}:{port}"
+        )
+    print(
+        json.dumps(
+            {
+                "nonmatching_endpoints_rejected": rejected,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def run_collision_probe(backend_id: str, iptables_variant: str) -> None:
+    firewall = _firewall(backend_id, iptables_variant)
     try:
-        install_nft_dnat(
+        lease = firewall.install(
             NftDnatConfig(
                 listen_address=PUBLIC_ADDRESS,
                 listen_port=PUBLIC_PORT,
                 target_address=HOSTED_ADDRESS,
                 target_port=HOSTED_PORT,
                 table_name=KEEP_TABLE,
-            )
+            ),
+            current_nft_ownership("tcpcc-probe"),
         )
-    except subprocess.CalledProcessError as error:
+    except (subprocess.CalledProcessError, RuntimeError) as error:
         print(
             json.dumps(
                 {
-                    "existing_table_rejected": True,
-                    "returncode": error.returncode,
+                    "existing_resource_rejected": True,
+                    "error_type": type(error).__name__,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
             )
         )
         return
-    raise AssertionError(f"existing nftables table was adopted: {KEEP_TABLE}")
+    lease.close()
+    raise AssertionError(f"existing firewall resource was adopted: {KEEP_TABLE}")
 
 
 def _wait_ready(
@@ -389,6 +445,121 @@ def _counter_packets(document: dict[str, object]) -> int:
     return maximum
 
 
+def _create_unrelated_state(
+    namespace: str,
+    backend_id: str,
+    iptables_variant: str,
+) -> str:
+    if backend_id.startswith("nft-"):
+        keep_batch = (
+            f"create table ip {KEEP_TABLE}\n"
+            f"add chain ip {KEEP_TABLE} sentinel\n"
+        )
+        _run(
+            _netns_argv(namespace, ["nft", "--file", "-"]),
+            input_text=keep_batch,
+        )
+    else:
+        _run(
+            _netns_argv(
+                namespace,
+                [iptables_variant, "--wait", "-t", "nat", "-N", KEEP_TABLE],
+            )
+        )
+        _run(
+            _netns_argv(
+                namespace,
+                [
+                    iptables_variant,
+                    "--wait",
+                    "-t",
+                    "nat",
+                    "-A",
+                    KEEP_TABLE,
+                    "-j",
+                    "RETURN",
+                ],
+            )
+        )
+    return _read_unrelated_state(namespace, backend_id, iptables_variant)
+
+
+def _read_unrelated_state(
+    namespace: str,
+    backend_id: str,
+    iptables_variant: str,
+) -> str:
+    if backend_id.startswith("nft-"):
+        argv = ["nft", "list", "table", "ip", KEEP_TABLE]
+    else:
+        argv = [
+            iptables_variant,
+            "--wait",
+            "-t",
+            "nat",
+            "-S",
+            KEEP_TABLE,
+        ]
+    return _run(_netns_argv(namespace, argv)).stdout
+
+
+def _resource_exists(
+    namespace: str,
+    backend_id: str,
+    iptables_variant: str,
+    resource_name: str,
+) -> bool:
+    if backend_id.startswith("nft-"):
+        argv = ["nft", "list", "table", "ip", resource_name]
+    else:
+        argv = [
+            iptables_variant,
+            "--wait",
+            "-t",
+            "nat",
+            "-n",
+            "-L",
+            resource_name,
+        ]
+    return _run(_netns_argv(namespace, argv), check=False).returncode == 0
+
+
+def _dnat_counter_packets(
+    namespace: str,
+    backend_id: str,
+    iptables_variant: str,
+    resource_name: str,
+) -> int:
+    if backend_id.startswith("nft-"):
+        document = json.loads(
+            _run(
+                _netns_argv(
+                    namespace,
+                    ["nft", "--json", "list", "table", "ip", resource_name],
+                )
+            ).stdout
+        )
+        return _counter_packets(document)
+
+    ruleset = _run(
+        _netns_argv(
+            namespace,
+            [f"{iptables_variant}-save", "-c", "-t", "nat"],
+        )
+    ).stdout
+    pattern = re.compile(
+        rf"^\[([0-9]+):[0-9]+\] -A {re.escape(resource_name)} .*"
+        r"--comment \"tcpcc\.owner\.v1 "
+    )
+    for line in ruleset.splitlines():
+        match = pattern.search(line)
+        if match is not None:
+            return int(match.group(1))
+    raise AssertionError(
+        f"iptables ownership rule counter was not found in: {ruleset}"
+    )
+
+
 def _assert_conntrack_reverse(output: str) -> str:
     expected = (
         f"src={CLIENT_ADDRESS} dst={PUBLIC_ADDRESS}",
@@ -417,14 +588,27 @@ def _namespace_names() -> tuple[str, str, str, str, str]:
     )
 
 
-def run_privileged_integration() -> None:
+def run_privileged_integration(
+    backend_id: str,
+    iptables_variant: str,
+) -> None:
     if os.geteuid() != 0:
-        raise RuntimeError("nftables namespace integration must run as root")
+        raise RuntimeError("firewall namespace integration must run as root")
     if not Path("/dev/net/tun").is_char_device():
         raise RuntimeError("/dev/net/tun is not an available character device")
-    for command in ("ip", "nft", "conntrack", "sysctl"):
+    firewall_commands = ["nft"]
+    if backend_id == "iptables":
+        firewall_commands = [
+            iptables_variant,
+            f"{iptables_variant}-restore",
+            f"{iptables_variant}-save",
+        ]
+    for command in ("ip", "conntrack", "sysctl", *firewall_commands):
         if shutil.which(command) is None:
             raise RuntimeError(f"required integration command is missing: {command}")
+    if backend_id == "nft-lib":
+        # Resolve the shared library before creating any test namespace.
+        _firewall(backend_id, iptables_variant).transport.library_path
 
     router_ns, client_ns, hosted_ns, router_veth, client_veth = (
         _namespace_names()
@@ -478,6 +662,18 @@ def run_privileged_integration() -> None:
             [
                 "ip",
                 "-n",
+                router_ns,
+                "address",
+                "add",
+                f"{OTHER_PUBLIC_ADDRESS}/32",
+                "dev",
+                router_veth,
+            ]
+        )
+        _run(
+            [
+                "ip",
+                "-n",
                 client_ns,
                 "address",
                 "add",
@@ -515,32 +711,36 @@ def run_privileged_integration() -> None:
             )
         )
 
-        keep_batch = (
-            f"create table ip {KEEP_TABLE}\n"
-            f"add chain ip {KEEP_TABLE} sentinel\n"
+        keep_before = _create_unrelated_state(
+            router_ns,
+            backend_id,
+            iptables_variant,
         )
-        _run(
-            _netns_argv(router_ns, ["nft", "--file", "-"]),
-            input_text=keep_batch,
-        )
-        keep_before = _run(
-            _netns_argv(router_ns, ["nft", "list", "table", "ip", KEEP_TABLE])
-        ).stdout
         collision_report = json.loads(
             _run(
                 _netns_argv(
                     router_ns,
-                    [sys.executable, str(Path(__file__).resolve()), "--collision"],
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--collision",
+                        "--backend",
+                        backend_id,
+                        "--iptables-variant",
+                        iptables_variant,
+                    ],
                 )
             ).stdout
         )
-        if collision_report.get("existing_table_rejected") is not True:
+        if collision_report.get("existing_resource_rejected") is not True:
             raise AssertionError(f"invalid collision report: {collision_report}")
-        keep_after_collision = _run(
-            _netns_argv(router_ns, ["nft", "list", "table", "ip", KEEP_TABLE])
-        ).stdout
+        keep_after_collision = _read_unrelated_state(
+            router_ns,
+            backend_id,
+            iptables_variant,
+        )
         if keep_after_collision != keep_before:
-            raise AssertionError("exclusive create changed the existing table")
+            raise AssertionError("exclusive create changed the existing resource")
 
         relay_router, relay_hosted = socket.socketpair(
             socket.AF_UNIX,
@@ -556,6 +756,10 @@ def run_privileged_integration() -> None:
                     "--router-worker",
                     "--relay-fd",
                     str(relay_router.fileno()),
+                    "--backend",
+                    backend_id,
+                    "--iptables-variant",
+                    iptables_variant,
                 ],
             ),
             stdin=subprocess.PIPE,
@@ -592,7 +796,22 @@ def run_privileged_integration() -> None:
         router_ready = _wait_ready(router_process, "router")
         router_tun = str(router_ready["tun"])
         hosted_tun = str(hosted_ready["tun"])
-        owned_table = str(router_ready["table"])
+        owned_resource = str(router_ready["resource"])
+        if router_ready.get("backend") != backend_id:
+            raise AssertionError(f"worker selected wrong backend: {router_ready}")
+
+        negative_report = json.loads(
+            _run(
+                _netns_argv(
+                    client_ns,
+                    [sys.executable, script, "--negative-client"],
+                )
+            ).stdout
+        )
+        if len(negative_report["nonmatching_endpoints_rejected"]) != 2:
+            raise AssertionError(
+                f"invalid negative-match report: {negative_report}"
+            )
 
         client_result = _run(
             _netns_argv(
@@ -613,30 +832,26 @@ def run_privileged_integration() -> None:
             )
         ).stdout
         conntrack_line = _assert_conntrack_reverse(conntrack)
-        nft_document = json.loads(
-            _run(
-                _netns_argv(
-                    router_ns,
-                    ["nft", "--json", "list", "table", "ip", owned_table],
-                )
-            ).stdout
+        packets = _dnat_counter_packets(
+            router_ns,
+            backend_id,
+            iptables_variant,
+            owned_resource,
         )
-        packets = _counter_packets(nft_document)
         if packets < 1:
             raise AssertionError("exact DNAT rule counter did not observe the flow")
 
         _stop_worker(router_process, "router")
         _stop_worker(hosted_process, "hosted")
 
-        if _run(
-            _netns_argv(
-                router_ns,
-                ["nft", "list", "table", "ip", owned_table],
-            ),
-            check=False,
-        ).returncode == 0:
+        if _resource_exists(
+            router_ns,
+            backend_id,
+            iptables_variant,
+            owned_resource,
+        ):
             raise AssertionError(
-                f"owned nftables table survived cleanup: {owned_table}"
+                f"owned firewall resource survived cleanup: {owned_resource}"
             )
         if _run(
             ["ip", "-n", router_ns, "link", "show", "dev", router_tun],
@@ -649,24 +864,31 @@ def run_privileged_integration() -> None:
         ).returncode == 0:
             raise AssertionError(f"hosted TUN survived cleanup: {hosted_tun}")
 
-        keep_after = _run(
-            _netns_argv(router_ns, ["nft", "list", "table", "ip", KEEP_TABLE])
-        ).stdout
+        keep_after = _read_unrelated_state(
+            router_ns,
+            backend_id,
+            iptables_variant,
+        )
         if keep_after != keep_before:
-            raise AssertionError("unrelated nftables table changed byte-for-byte")
+            raise AssertionError("unrelated firewall state changed byte-for-byte")
 
         final_report = {
-            "schema": "tcpcc.nft-dnat-integration.v1",
+            "schema": "tcpcc.firewall-dnat-integration.v1",
+            "backend": backend_id,
+            "iptables_variant": (
+                iptables_variant if backend_id == "iptables" else None
+            ),
             "public_endpoint": f"{PUBLIC_ADDRESS}:{PUBLIC_PORT}",
             "hosted_endpoint": f"{HOSTED_ADDRESS}:{HOSTED_PORT}",
             "payload_round_trip": True,
             "conntrack_reverse_translation": True,
             "conntrack_entry": conntrack_line,
             "dnat_counter_packets": packets,
+            "nonmatching_address_and_port_rejected": True,
             "real_tun_relay": True,
             "owned_resources_removed": True,
-            "existing_table_rejected": True,
-            "unrelated_table_unchanged": True,
+            "existing_resource_rejected": True,
+            "unrelated_firewall_state_unchanged": True,
         }
     except BaseException as error:
         primary_error = error
@@ -715,20 +937,33 @@ def main() -> None:
     mode.add_argument("--router-worker", action="store_true")
     mode.add_argument("--hosted-worker", action="store_true")
     mode.add_argument("--client", action="store_true")
+    mode.add_argument("--negative-client", action="store_true")
     mode.add_argument("--collision", action="store_true")
     parser.add_argument("--relay-fd", type=int)
+    parser.add_argument("--backend", choices=BACKENDS, default="nft-exec")
+    parser.add_argument(
+        "--iptables-variant",
+        choices=IPTABLES_VARIANTS,
+        default="iptables",
+    )
     arguments = parser.parse_args()
 
     if arguments.integration:
-        run_privileged_integration()
+        run_privileged_integration(arguments.backend, arguments.iptables_variant)
     elif arguments.client:
         run_client()
+    elif arguments.negative_client:
+        run_negative_client()
     elif arguments.collision:
-        run_collision_probe()
+        run_collision_probe(arguments.backend, arguments.iptables_variant)
     elif arguments.relay_fd is None:
         parser.error("worker modes require --relay-fd")
     elif arguments.router_worker:
-        run_router_worker(arguments.relay_fd)
+        run_router_worker(
+            arguments.relay_fd,
+            arguments.backend,
+            arguments.iptables_variant,
+        )
     else:
         run_hosted_worker(arguments.relay_fd)
 

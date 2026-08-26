@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import errno
+import ctypes
+import ctypes.util
 import fcntl
 import ipaddress
 import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import stat
@@ -19,7 +22,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 CAP_NET_ADMIN = 12
 CC_NAME = re.compile(r"[a-z0-9_-]{1,15}\Z")
@@ -30,6 +33,12 @@ NFT_OWNER_MARKER = re.compile(
     r"tcpcc\.owner\.v1 pid=([1-9][0-9]*) start=([1-9][0-9]*) "
     r"tun=([A-Za-z0-9_.-]{1,15})\Z"
 )
+FIREWALL_BACKENDS = frozenset(("nft-lib", "nft-exec", "iptables"))
+IPTABLES_CHAIN_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,27}\Z")
+IPTABLES_OWNED_CHAIN = re.compile(r"TCPCC_[a-f0-9]{12}\Z")
+IPTABLES_CHAIN_PREFIX = "TCPCC_"
+IPTABLES_JUMP_PREFIX = "tcpcc.jump."
+NFT_CTX_OUTPUT_JSON = 1 << 4
 
 # Linux UAPI values from include/uapi/linux/if_tun.h. IFF_TUN_EXCL makes
 # creation atomic: TUNSETIFF must not attach this fd to a pre-existing device.
@@ -48,6 +57,7 @@ DEFAULT_NAME_ATTEMPTS = 8
 
 Reader = Callable[[Path], str]
 Resolver = Callable[[str], str | None]
+LibraryResolver = Callable[[str], str | None]
 Statter = Callable[[Path], os.stat_result]
 AccessChecker = Callable[[Path, int], bool]
 TunOpener = Callable[[str, int], int]
@@ -58,6 +68,7 @@ NameFactory = Callable[[], str]
 CleanupCallback = Callable[[], None]
 NftRunner = Callable[[list[str], str | None], None]
 OutputRunner = Callable[[list[str]], str]
+FirewallCommandRunner = Callable[[list[str], str | None], str]
 
 
 def _read_text(path: Path) -> str:
@@ -105,6 +116,17 @@ def _new_nft_table_name() -> str:
 def _read_command(argv: list[str]) -> str:
     return subprocess.run(
         argv,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout
+
+
+def _run_firewall_command(argv: list[str], input_text: str | None) -> str:
+    return subprocess.run(
+        argv,
+        input=input_text,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -171,6 +193,7 @@ class HostInspector:
         dev_root: Path = Path("/dev"),
         reader: Reader = _read_text,
         resolver: Resolver = shutil.which,
+        library_resolver: LibraryResolver = ctypes.util.find_library,
         statter: Statter = _stat_path,
         access: AccessChecker = _access_path,
     ) -> None:
@@ -178,6 +201,7 @@ class HostInspector:
         self.dev_root = dev_root
         self.reader = reader
         self.resolver = resolver
+        self.library_resolver = library_resolver
         self.statter = statter
         self.access = access
 
@@ -286,6 +310,25 @@ def _tool(inspector: HostInspector, name: str, remediation: str) -> CheckResult:
     )
 
 
+def _library(
+    inspector: HostInspector,
+    name: str,
+    remediation: str,
+) -> CheckResult:
+    try:
+        resolved = inspector.library_resolver(name)
+    except OSError:
+        resolved = None
+    return _check(
+        f"library.{name}",
+        resolved is not None,
+        "required",
+        resolved or "missing",
+        f"{name} shared library available to the dynamic loader",
+        remediation,
+    )
+
+
 def _required_sysctl(
     inspector: HostInspector,
     check_id: str,
@@ -336,6 +379,8 @@ def _rp_filter(inspector: HostInspector, scope: str) -> CheckResult:
 def collect_preflight(
     requested_cc: str,
     inspector: HostInspector | None = None,
+    *,
+    firewall_backend: str = "nft-exec",
 ) -> PreflightReport:
     """Collect every prerequisite without mutating the inspected host."""
 
@@ -347,7 +392,7 @@ def collect_preflight(
     if inspector is None:
         inspector = HostInspector()
 
-    checks = (
+    prefix_checks = (
         _cap_net_admin(inspector),
         _tun_device(inspector),
         _tool(
@@ -355,11 +400,42 @@ def collect_preflight(
             "ip",
             "install iproute2 and expose the ip executable on PATH",
         ),
-        _tool(
-            inspector,
-            "nft",
-            "install nftables and expose the nft executable on PATH",
-        ),
+    )
+
+    if firewall_backend == "nft-exec":
+        firewall_checks = (
+            _tool(
+                inspector,
+                "nft",
+                "install nftables and expose the nft executable on PATH",
+            ),
+        )
+    elif firewall_backend == "nft-lib":
+        firewall_checks = (
+            _library(
+                inspector,
+                "nftables",
+                "install the libnftables shared library",
+            ),
+        )
+    elif firewall_backend == "iptables":
+        firewall_checks = tuple(
+            _tool(
+                inspector,
+                tool,
+                f"install iptables and expose the {tool} executable on PATH",
+            )
+            for tool in ("iptables", "iptables-restore", "iptables-save")
+        )
+    else:
+        raise ValueError(
+            "firewall_backend must be one of: "
+            + ", ".join(sorted(FIREWALL_BACKENDS))
+        )
+
+    checks = (
+        *prefix_checks,
+        *firewall_checks,
         _required_sysctl(
             inspector,
             "sysctl.ipv4_forward",
@@ -999,8 +1075,10 @@ class NftDnatLease:
         table_name: str,
         nft_path: str,
         runner: NftRunner,
+        backend_id: str = "nft-exec",
     ) -> None:
         self.table_name = table_name
+        self.backend_id = backend_id
         self._nft_path = nft_path
         self._runner = runner
         self._closed = False
@@ -1008,6 +1086,10 @@ class NftDnatLease:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def resource_name(self) -> str:
+        return self.table_name
 
     def close(self) -> None:
         if self._closed:
@@ -1032,6 +1114,7 @@ def install_nft_dnat(
     runner: NftRunner = _run_nft,
     table_name_factory: NameFactory = _new_nft_table_name,
     ownership: NftOwnership | None = None,
+    backend_id: str = "nft-exec",
 ) -> NftDnatLease:
     """Atomically install one exact-match DNAT table and own its deletion."""
 
@@ -1046,7 +1129,811 @@ def install_nft_dnat(
         [nft_path, "--file", "-"],
         _dnat_batch(config, table_name, ownership),
     )
-    return NftDnatLease(table_name, nft_path, runner)
+    return NftDnatLease(table_name, nft_path, runner, backend_id)
+
+
+class FirewallDnatLease(Protocol):
+    """Resource lease returned by any packet-steering backend."""
+
+    backend_id: str
+
+    @property
+    def resource_name(self) -> str: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    def close(self) -> None: ...
+
+
+class FirewallBackend(Protocol):
+    """Structured lifecycle boundary shared by every firewall transport."""
+
+    backend_id: str
+
+    def inspect_ownership(self) -> NftOwnershipReport: ...
+
+    def check_compatibility(self, config: NftDnatConfig) -> None: ...
+
+    def install(
+        self,
+        config: NftDnatConfig,
+        ownership: NftOwnership,
+    ) -> FirewallDnatLease: ...
+
+
+class NftTransport(Protocol):
+    """One way of submitting the common nftables command buffer."""
+
+    backend_id: str
+    command_name: str
+
+    def run(self, argv: list[str], input_text: str | None) -> None: ...
+
+    def read(self, argv: list[str]) -> str: ...
+
+
+class NftExecTransport:
+    """Docker-style nft subprocess transport with argv and stdin only."""
+
+    backend_id = "nft-exec"
+
+    def __init__(
+        self,
+        nft_path: str = "nft",
+        *,
+        runner: FirewallCommandRunner = _run_firewall_command,
+    ) -> None:
+        if not isinstance(nft_path, str) or not nft_path or "\0" in nft_path:
+            raise ValueError("nft_path must name one executable")
+        self.command_name = nft_path
+        self._runner = runner
+
+    def run(self, argv: list[str], input_text: str | None) -> None:
+        self._runner(argv, input_text)
+
+    def read(self, argv: list[str]) -> str:
+        return self._runner(argv, None)
+
+
+class LibNftablesError(RuntimeError):
+    """An in-process libnftables request failed."""
+
+    def __init__(self, operation: str, return_code: int, stderr: str) -> None:
+        self.operation = operation
+        self.return_code = return_code
+        self.stderr = stderr
+        detail = stderr.strip() or "libnftables returned no diagnostic"
+        super().__init__(f"libnftables {operation} failed ({return_code}): {detail}")
+
+
+class LibNftablesTransport:
+    """In-process libnftables transport; no firewall child process is started."""
+
+    backend_id = "nft-lib"
+    command_name = "libnftables"
+
+    def __init__(
+        self,
+        library_path: str | None = None,
+        *,
+        finder: Callable[[str], str | None] = ctypes.util.find_library,
+        loader: Callable[[str], object] = ctypes.CDLL,
+    ) -> None:
+        if library_path is not None and (
+            not isinstance(library_path, str)
+            or not library_path
+            or "\0" in library_path
+        ):
+            raise ValueError("library_path must name one shared library")
+        self._library_path = library_path
+        self._finder = finder
+        self._loader = loader
+        self._library: object | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def library_path(self) -> str:
+        path = self._library_path or self._finder("nftables")
+        if not path:
+            raise FileNotFoundError(
+                "libnftables shared library was not found; install libnftables"
+            )
+        return path
+
+    @staticmethod
+    def _signature(function: object, argtypes: list[object], restype: object) -> None:
+        setattr(function, "argtypes", argtypes)
+        setattr(function, "restype", restype)
+
+    def _load(self) -> object:
+        if self._library is not None:
+            return self._library
+        library = self._loader(self.library_path)
+        required = (
+            "nft_ctx_new",
+            "nft_ctx_free",
+            "nft_ctx_buffer_output",
+            "nft_ctx_buffer_error",
+            "nft_ctx_get_output_buffer",
+            "nft_ctx_get_error_buffer",
+            "nft_ctx_set_dry_run",
+            "nft_run_cmd_from_buffer",
+        )
+        missing = [name for name in required if not hasattr(library, name)]
+        if missing:
+            raise RuntimeError(
+                "libnftables is missing required symbols: " + ", ".join(missing)
+            )
+        self._signature(
+            library.nft_ctx_new,
+            [ctypes.c_uint32],
+            ctypes.c_void_p,
+        )
+        self._signature(library.nft_ctx_free, [ctypes.c_void_p], None)
+        self._signature(
+            library.nft_ctx_buffer_output,
+            [ctypes.c_void_p],
+            ctypes.c_int,
+        )
+        self._signature(
+            library.nft_ctx_buffer_error,
+            [ctypes.c_void_p],
+            ctypes.c_int,
+        )
+        self._signature(
+            library.nft_ctx_get_output_buffer,
+            [ctypes.c_void_p],
+            ctypes.c_char_p,
+        )
+        self._signature(
+            library.nft_ctx_get_error_buffer,
+            [ctypes.c_void_p],
+            ctypes.c_char_p,
+        )
+        self._signature(
+            library.nft_ctx_set_dry_run,
+            [ctypes.c_void_p, ctypes.c_bool],
+            None,
+        )
+        self._signature(
+            library.nft_run_cmd_from_buffer,
+            [ctypes.c_void_p, ctypes.c_char_p],
+            ctypes.c_int,
+        )
+        if hasattr(library, "nft_ctx_output_set_json"):
+            self._signature(
+                library.nft_ctx_output_set_json,
+                [ctypes.c_void_p, ctypes.c_bool],
+                None,
+            )
+        elif hasattr(library, "nft_ctx_output_get_flags") and hasattr(
+            library,
+            "nft_ctx_output_set_flags",
+        ):
+            self._signature(
+                library.nft_ctx_output_get_flags,
+                [ctypes.c_void_p],
+                ctypes.c_uint,
+            )
+            self._signature(
+                library.nft_ctx_output_set_flags,
+                [ctypes.c_void_p, ctypes.c_uint],
+                None,
+            )
+        else:
+            raise RuntimeError("libnftables cannot enable JSON output")
+        self._library = library
+        return library
+
+    @staticmethod
+    def _decode(value: bytes | None) -> str:
+        return (value or b"").decode("utf-8", errors="replace")
+
+    def _invoke(
+        self,
+        command: str,
+        *,
+        operation: str,
+        dry_run: bool = False,
+        json_output: bool = False,
+    ) -> str:
+        if not isinstance(command, str) or not command or "\0" in command:
+            raise ValueError("libnftables command buffer is invalid")
+        with self._lock:
+            library = self._load()
+            context = library.nft_ctx_new(0)
+            if not context:
+                raise RuntimeError("libnftables could not allocate a context")
+            try:
+                if library.nft_ctx_buffer_output(context) != 0:
+                    raise RuntimeError("libnftables could not buffer output")
+                if library.nft_ctx_buffer_error(context) != 0:
+                    raise RuntimeError("libnftables could not buffer errors")
+                library.nft_ctx_set_dry_run(context, dry_run)
+                if json_output:
+                    if hasattr(library, "nft_ctx_output_set_json"):
+                        library.nft_ctx_output_set_json(context, True)
+                    else:
+                        flags = library.nft_ctx_output_get_flags(context)
+                        library.nft_ctx_output_set_flags(
+                            context,
+                            flags | NFT_CTX_OUTPUT_JSON,
+                        )
+                return_code = library.nft_run_cmd_from_buffer(
+                    context,
+                    command.encode("utf-8"),
+                )
+                stdout = self._decode(library.nft_ctx_get_output_buffer(context))
+                stderr = self._decode(library.nft_ctx_get_error_buffer(context))
+            finally:
+                library.nft_ctx_free(context)
+        if return_code != 0:
+            raise LibNftablesError(operation, return_code, stderr)
+        return stdout
+
+    def run(self, argv: list[str], input_text: str | None) -> None:
+        if argv == [self.command_name, "--file", "-"] and input_text is not None:
+            self._invoke(input_text, operation="apply")
+            return
+        if argv == [
+            self.command_name,
+            "--check",
+            "--file",
+            "-",
+        ] and input_text is not None:
+            self._invoke(input_text, operation="dry-run", dry_run=True)
+            return
+        if (
+            len(argv) == 5
+            and argv[:4] == [self.command_name, "delete", "table", "ip"]
+            and input_text is None
+        ):
+            table_name = _validate_nft_table_name(argv[4])
+            self._invoke(
+                f"delete table ip {table_name}\n",
+                operation="delete",
+            )
+            return
+        raise ValueError(f"unsupported libnftables runner invocation: {argv!r}")
+
+    def read(self, argv: list[str]) -> str:
+        expected = [self.command_name, "--json", "list", "ruleset", "ip"]
+        if argv != expected:
+            raise ValueError(f"unsupported libnftables read invocation: {argv!r}")
+        return self._invoke(
+            "list ruleset ip\n",
+            operation="list-ruleset",
+            json_output=True,
+        )
+
+
+class NftFirewallBackend:
+    """Common nft policy rendered through either supported transport."""
+
+    def __init__(self, transport: NftTransport) -> None:
+        if transport.backend_id not in {"nft-lib", "nft-exec"}:
+            raise ValueError("nft transport has an unsupported backend identifier")
+        self.transport = transport
+        self.backend_id = transport.backend_id
+
+    def inspect_ownership(self) -> NftOwnershipReport:
+        return inspect_nft_ownership(
+            nft_path=self.transport.command_name,
+            runner=self.transport.read,
+        )
+
+    def check_compatibility(self, config: NftDnatConfig) -> None:
+        check_nft_dnat_compatibility(
+            config,
+            ownership=current_nft_ownership("tcpcc-probe"),
+            nft_path=self.transport.command_name,
+            runner=self.transport.run,
+        )
+
+    def install(
+        self,
+        config: NftDnatConfig,
+        ownership: NftOwnership,
+    ) -> NftDnatLease:
+        return install_nft_dnat(
+            config,
+            nft_path=self.transport.command_name,
+            runner=self.transport.run,
+            ownership=ownership,
+            backend_id=self.backend_id,
+        )
+
+
+def _new_iptables_chain_name() -> str:
+    return f"{IPTABLES_CHAIN_PREFIX}{secrets.token_hex(6)}"
+
+
+def _validate_iptables_chain_name(name: str) -> str:
+    if not isinstance(name, str) or IPTABLES_CHAIN_NAME.fullmatch(name) is None:
+        raise ValueError(
+            "iptables chain name must contain 1-28 ASCII letters, digits, "
+            "underscores, or hyphens and start with a letter"
+        )
+    return name
+
+
+def _iptables_rules(
+    config: NftDnatConfig,
+    chain_name: str,
+    ownership: NftOwnership,
+) -> tuple[list[str], list[str]]:
+    exact = [
+        "-d",
+        f"{config.listen_address}/32",
+        "-p",
+        "tcp",
+        "-m",
+        "tcp",
+        "--dport",
+        str(config.listen_port),
+    ]
+    jump = [
+        *exact,
+        "-m",
+        "comment",
+        "--comment",
+        f"tcpcc.jump.v1 chain={chain_name}",
+        "-j",
+        chain_name,
+    ]
+    dnat = [
+        *exact,
+        "-m",
+        "comment",
+        "--comment",
+        ownership.marker(),
+        "-j",
+        "DNAT",
+        "--to-destination",
+        f"{config.target_address}:{config.target_port}",
+    ]
+    return jump, dnat
+
+
+def _iptables_restore_line(chain: str, arguments: list[str]) -> str:
+    rendered: list[str] = ["-A", chain]
+    for argument in arguments:
+        if any(character.isspace() for character in argument):
+            if any(character in argument for character in ('"', "\r", "\n")):
+                raise ValueError("iptables argument cannot be quoted safely")
+            rendered.append(f'"{argument}"')
+        else:
+            rendered.append(argument)
+    return " ".join(rendered)
+
+
+def _iptables_restore_batch(
+    config: NftDnatConfig,
+    chain_name: str,
+    ownership: NftOwnership,
+    *,
+    declare_chain: bool,
+) -> str:
+    jump, dnat = _iptables_rules(config, chain_name, ownership)
+    lines = ["*nat"]
+    if declare_chain:
+        lines.append(f":{chain_name} - [0:0]")
+    lines.extend(
+        (
+            _iptables_restore_line(chain_name, dnat),
+            _iptables_restore_line("PREROUTING", jump),
+            "COMMIT",
+        )
+    )
+    return "\n".join(lines) + "\n"
+
+
+@dataclass(frozen=True)
+class IptablesOwnershipObservation:
+    """Classification of one tcpcc-owned iptables user chain."""
+
+    chain_name: str
+    status: str
+    owner_pid: int | None
+    owner_start_time: int | None
+    tun_name: str | None
+    detail: str
+    remediation: str
+
+    @property
+    def table_name(self) -> str:
+        """Compatibility accessor used by the composed lifecycle diagnostic."""
+
+        return self.chain_name
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "chain": self.chain_name,
+            "status": self.status,
+            "owner_pid": self.owner_pid,
+            "owner_start_time": self.owner_start_time,
+            "tun": self.tun_name,
+            "detail": self.detail,
+            "remediation": self.remediation,
+        }
+
+
+@dataclass(frozen=True)
+class IptablesOwnershipReport:
+    """Stable read-only ownership report for the legacy-compatible backend."""
+
+    observations: tuple[IptablesOwnershipObservation, ...]
+
+    @property
+    def blocking(self) -> bool:
+        return any(item.status != "active" for item in self.observations)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema": "tcpcc.iptables-ownership.v1",
+            "backend": "iptables",
+            "blocking": self.blocking,
+            "chains": [item.as_dict() for item in self.observations],
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
+
+
+class IptablesInstallRollbackError(RuntimeError):
+    """iptables installation failed and its private-chain rollback also failed."""
+
+    def __init__(
+        self,
+        install_error: BaseException,
+        cleanup_errors: tuple[BaseException, ...],
+    ) -> None:
+        self.install_error = install_error
+        self.cleanup_errors = cleanup_errors
+        details = "; ".join(
+            f"{type(error).__name__}: {error}" for error in cleanup_errors
+        )
+        super().__init__(
+            f"iptables install failed ({install_error}) and private-chain "
+            f"rollback failed ({details})"
+        )
+
+
+class IptablesDnatLease:
+    """Own one exact PREROUTING jump and its private iptables user chain."""
+
+    backend_id = "iptables"
+
+    def __init__(
+        self,
+        chain_name: str,
+        jump_arguments: list[str],
+        *,
+        iptables_path: str,
+        runner: FirewallCommandRunner,
+    ) -> None:
+        self.chain_name = _validate_iptables_chain_name(chain_name)
+        self._jump_arguments = list(jump_arguments)
+        self._iptables_path = iptables_path
+        self._runner = runner
+        self._closed = False
+
+    @property
+    def resource_name(self) -> str:
+        return self.chain_name
+
+    @property
+    def table_name(self) -> str:
+        """Compatibility accessor while the CLI still exposes table_name."""
+
+        return self.chain_name
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        commands = (
+            [
+                self._iptables_path,
+                "--wait",
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                *self._jump_arguments,
+            ],
+            [
+                self._iptables_path,
+                "--wait",
+                "-t",
+                "nat",
+                "-F",
+                self.chain_name,
+            ],
+            [
+                self._iptables_path,
+                "--wait",
+                "-t",
+                "nat",
+                "-X",
+                self.chain_name,
+            ],
+        )
+        failures: list[CleanupFailure] = []
+        labels = ("jump", "flush", "delete-chain")
+        for label, command in zip(labels, commands, strict=True):
+            try:
+                self._runner(command, None)
+            except BaseException as error:
+                failures.append(
+                    CleanupFailure(f"iptables:{self.chain_name}:{label}", error)
+                )
+        if failures:
+            raise CleanupError(tuple(failures))
+
+
+class IptablesFirewallBackend:
+    """iptables compatibility path with a private chain and exact shared jump."""
+
+    backend_id = "iptables"
+
+    def __init__(
+        self,
+        *,
+        iptables_path: str = "iptables",
+        restore_path: str = "iptables-restore",
+        save_path: str = "iptables-save",
+        runner: FirewallCommandRunner = _run_firewall_command,
+        chain_name_factory: NameFactory = _new_iptables_chain_name,
+        proc_root: Path = Path("/proc"),
+        reader: Reader = _read_text,
+    ) -> None:
+        for path, field in (
+            (iptables_path, "iptables_path"),
+            (restore_path, "restore_path"),
+            (save_path, "save_path"),
+        ):
+            if not isinstance(path, str) or not path or "\0" in path:
+                raise ValueError(f"{field} must name one executable")
+        self.iptables_path = iptables_path
+        self.restore_path = restore_path
+        self.save_path = save_path
+        self._runner = runner
+        self._chain_name_factory = chain_name_factory
+        self._proc_root = proc_root
+        self._reader = reader
+
+    def _remediation(self, chain_name: str) -> str:
+        return (
+            f"inspect with: {self.iptables_path} -t nat -S PREROUTING and "
+            f"{self.iptables_path} -t nat -S {chain_name}; after verifying "
+            "ownership, delete the exact tcpcc.jump.v1 rule shown after "
+            f"-A PREROUTING with: {self.iptables_path} -t nat -D PREROUTING "
+            f"<rule arguments>; then run: {self.iptables_path} -t nat -F "
+            f"{chain_name}; then run: {self.iptables_path} -t nat -X "
+            f"{chain_name}"
+        )
+
+    def _classify(
+        self,
+        chain_name: str,
+        comment: str,
+    ) -> IptablesOwnershipObservation:
+        match = NFT_OWNER_MARKER.fullmatch(comment)
+        if (
+            IPTABLES_CHAIN_NAME.fullmatch(chain_name) is None
+            or match is None
+        ):
+            safe_chain = (
+                chain_name
+                if IPTABLES_CHAIN_NAME.fullmatch(chain_name) is not None
+                else "malformed"
+            )
+            remediation = "inspect the complete iptables nat table manually"
+            if safe_chain != "malformed":
+                remediation = self._remediation(safe_chain)
+            return IptablesOwnershipObservation(
+                chain_name=safe_chain,
+                status="malformed",
+                owner_pid=None,
+                owner_start_time=None,
+                tun_name=None,
+                detail="unsupported or malformed tcpcc ownership marker",
+                remediation=remediation,
+            )
+
+        pid = int(match.group(1))
+        expected_start = int(match.group(2))
+        tun_name = match.group(3)
+        status = "stale"
+        detail = "owner process is absent"
+        try:
+            actual_start = _process_start_time(
+                pid,
+                proc_root=self._proc_root,
+                reader=self._reader,
+            )
+        except FileNotFoundError:
+            pass
+        except (OSError, UnicodeError, ValueError):
+            detail = "owner process identity is unreadable"
+        else:
+            if actual_start == expected_start:
+                status = "active"
+                detail = "owner pid and process start time match"
+            else:
+                detail = "owner pid was reused by a different process"
+        return IptablesOwnershipObservation(
+            chain_name=chain_name,
+            status=status,
+            owner_pid=pid,
+            owner_start_time=expected_start,
+            tun_name=tun_name,
+            detail=detail,
+            remediation="" if status == "active" else self._remediation(chain_name),
+        )
+
+    def inspect_ownership(self) -> IptablesOwnershipReport:
+        raw = self._runner([self.save_path, "-t", "nat"], None)
+        reserved_chains: set[str] = set()
+        markers: dict[str, list[str]] = {}
+        for line in raw.splitlines():
+            if line.startswith(":"):
+                chain_name = line[1:].split(None, 1)[0]
+                if IPTABLES_OWNED_CHAIN.fullmatch(chain_name) is not None:
+                    reserved_chains.add(chain_name)
+                continue
+            if not line.startswith("-A "):
+                continue
+            try:
+                tokens = shlex.split(line)
+            except ValueError:
+                continue
+            if len(tokens) < 2 or tokens[0] != "-A":
+                continue
+            try:
+                comment_index = tokens.index("--comment")
+                comment = tokens[comment_index + 1]
+            except (ValueError, IndexError):
+                continue
+            if not comment.startswith(NFT_OWNER_PREFIX):
+                continue
+            markers.setdefault(tokens[1], []).append(comment)
+
+        observations: list[IptablesOwnershipObservation] = []
+        for chain_name in sorted(reserved_chains | set(markers)):
+            owned_markers = markers.get(chain_name, [])
+            if len(owned_markers) != 1:
+                detail = (
+                    "reserved tcpcc chain has no ownership marker"
+                    if not owned_markers
+                    else "tcpcc chain has multiple ownership markers"
+                )
+                observations.append(
+                    IptablesOwnershipObservation(
+                        chain_name=chain_name,
+                        status="malformed",
+                        owner_pid=None,
+                        owner_start_time=None,
+                        tun_name=None,
+                        detail=detail,
+                        remediation=self._remediation(chain_name),
+                    )
+                )
+                continue
+            observations.append(self._classify(chain_name, owned_markers[0]))
+        return IptablesOwnershipReport(tuple(observations))
+
+    def check_compatibility(self, config: NftDnatConfig) -> None:
+        if not isinstance(config, NftDnatConfig):
+            raise TypeError("config must be an NftDnatConfig")
+        chain_name = _validate_iptables_chain_name(self._chain_name_factory())
+        ownership = current_nft_ownership("tcpcc-probe")
+        self._runner(
+            [self.restore_path, "--wait", "--test", "--noflush"],
+            _iptables_restore_batch(
+                config,
+                chain_name,
+                ownership,
+                declare_chain=True,
+            ),
+        )
+
+    def install(
+        self,
+        config: NftDnatConfig,
+        ownership: NftOwnership,
+    ) -> IptablesDnatLease:
+        if not isinstance(config, NftDnatConfig):
+            raise TypeError("config must be an NftDnatConfig")
+        if not isinstance(ownership, NftOwnership):
+            raise TypeError("ownership must be an NftOwnership")
+        chain_name = _validate_iptables_chain_name(
+            self._chain_name_factory()
+            if config.table_name is None
+            else config.table_name
+        )
+        jump, _dnat = _iptables_rules(config, chain_name, ownership)
+        self._runner(
+            [
+                self.iptables_path,
+                "--wait",
+                "-t",
+                "nat",
+                "-N",
+                chain_name,
+            ],
+            None,
+        )
+        try:
+            self._runner(
+                [self.restore_path, "--wait", "--noflush"],
+                _iptables_restore_batch(
+                    config,
+                    chain_name,
+                    ownership,
+                    declare_chain=False,
+                ),
+            )
+        except BaseException as install_error:
+            cleanup_errors: list[BaseException] = []
+            for action in ("-F", "-X"):
+                try:
+                    self._runner(
+                        [
+                            self.iptables_path,
+                            "--wait",
+                            "-t",
+                            "nat",
+                            action,
+                            chain_name,
+                        ],
+                        None,
+                    )
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if cleanup_errors:
+                raise IptablesInstallRollbackError(
+                    install_error,
+                    tuple(cleanup_errors),
+                ) from install_error
+            raise
+        return IptablesDnatLease(
+            chain_name,
+            jump,
+            iptables_path=self.iptables_path,
+            runner=self._runner,
+        )
+
+
+def create_firewall_backend(
+    backend_id: str,
+    *,
+    nft_path: str = "nft",
+    iptables_path: str = "iptables",
+    iptables_restore_path: str = "iptables-restore",
+    iptables_save_path: str = "iptables-save",
+) -> FirewallBackend:
+    """Construct one explicit backend; automatic fallback is a later CLI policy."""
+
+    if backend_id == "nft-lib":
+        return NftFirewallBackend(LibNftablesTransport())
+    if backend_id == "nft-exec":
+        return NftFirewallBackend(NftExecTransport(nft_path))
+    if backend_id == "iptables":
+        return IptablesFirewallBackend(
+            iptables_path=iptables_path,
+            restore_path=iptables_restore_path,
+            save_path=iptables_save_path,
+        )
+    raise ValueError(
+        "firewall backend must be one of: " + ", ".join(sorted(FIREWALL_BACKENDS))
+    )
 
 
 @dataclass(frozen=True)
@@ -1056,6 +1943,7 @@ class HostNetworkConfig:
     requested_cc: str
     tun: TunConfig
     dnat: NftDnatConfig
+    firewall_backend: str = "nft-exec"
 
     def __post_init__(self) -> None:
         if not isinstance(self.requested_cc, str) or CC_NAME.fullmatch(
@@ -1066,6 +1954,11 @@ class HostNetworkConfig:
             raise TypeError("tun must be a TunConfig")
         if not isinstance(self.dnat, NftDnatConfig):
             raise TypeError("dnat must be an NftDnatConfig")
+        if self.firewall_backend not in FIREWALL_BACKENDS:
+            raise ValueError(
+                "firewall_backend must be one of: "
+                + ", ".join(sorted(FIREWALL_BACKENDS))
+            )
         if self.dnat.target_address != self.tun.guest_address:
             raise ValueError("DNAT target address must equal the TUN guest address")
 
@@ -1084,14 +1977,18 @@ class HostPreflightError(RuntimeError):
 class StaleOwnershipError(RuntimeError):
     """Marked stale or malformed tables require explicit operator action."""
 
-    def __init__(self, report: NftOwnershipReport) -> None:
+    def __init__(
+        self,
+        report: NftOwnershipReport | IptablesOwnershipReport,
+    ) -> None:
         self.report = report
         blocked = ", ".join(
             f"{item.table_name}({item.status})"
             for item in report.observations
             if item.status != "active"
         )
-        super().__init__(f"unsafe tcpcc nftables ownership state: {blocked}")
+        backend = "iptables" if isinstance(report, IptablesOwnershipReport) else "nft"
+        super().__init__(f"unsafe tcpcc {backend} ownership state: {blocked}")
 
 
 class StartupRollbackError(RuntimeError):
@@ -1121,9 +2018,9 @@ class HostNetworkLease:
         self,
         *,
         preflight: PreflightReport,
-        ownership: NftOwnershipReport,
+        ownership: NftOwnershipReport | IptablesOwnershipReport,
         tun: TunQueue,
-        dnat: NftDnatLease,
+        dnat: FirewallDnatLease,
         journal: OwnershipJournal,
     ) -> None:
         self.preflight = preflight
@@ -1142,7 +2039,15 @@ class HostNetworkLease:
 
     @property
     def table_name(self) -> str:
-        return self.dnat.table_name
+        return self.dnat.resource_name
+
+    @property
+    def firewall_backend(self) -> str:
+        return self.dnat.backend_id
+
+    @property
+    def firewall_resource(self) -> str:
+        return self.dnat.resource_name
 
     @property
     def closed(self) -> bool:
@@ -1195,12 +2100,18 @@ def acquire_host_network(
     *,
     host_inspector: HostInspector | None = None,
     nft_path: str = "nft",
+    iptables_path: str = "iptables",
+    iptables_restore_path: str = "iptables-restore",
+    iptables_save_path: str = "iptables-save",
+    firewall: FirewallBackend | None = None,
     preflight_collector: Callable[[str], PreflightReport] | None = None,
-    ownership_collector: Callable[[], NftOwnershipReport] | None = None,
+    ownership_collector: Callable[
+        [], NftOwnershipReport | IptablesOwnershipReport
+    ] | None = None,
     compatibility_checker: Callable[[NftDnatConfig], None] | None = None,
     tun_acquirer: Callable[[TunConfig], TunQueue] = create_tun_queue,
     dnat_acquirer: Callable[
-        [NftDnatConfig, NftOwnership], NftDnatLease
+        [NftDnatConfig, NftOwnership], FirewallDnatLease
     ] | None = None,
     identity_factory: Callable[[str], NftOwnership] = current_nft_ownership,
     journal_factory: Callable[[], OwnershipJournal] = OwnershipJournal,
@@ -1210,21 +2121,34 @@ def acquire_host_network(
     if not isinstance(config, HostNetworkConfig):
         raise TypeError("config must be a HostNetworkConfig")
     if preflight_collector is None:
-        preflight_collector = lambda cc: collect_preflight(cc, host_inspector)
+        preflight_collector = lambda cc: collect_preflight(
+            cc,
+            host_inspector,
+            firewall_backend=config.firewall_backend,
+        )
+    if (
+        ownership_collector is None
+        or compatibility_checker is None
+        or dnat_acquirer is None
+    ):
+        if firewall is None:
+            firewall = create_firewall_backend(
+                config.firewall_backend,
+                nft_path=nft_path,
+                iptables_path=iptables_path,
+                iptables_restore_path=iptables_restore_path,
+                iptables_save_path=iptables_save_path,
+            )
+        if firewall.backend_id != config.firewall_backend:
+            raise ValueError(
+                "configured firewall backend does not match injected backend"
+            )
     if ownership_collector is None:
-        ownership_collector = lambda: inspect_nft_ownership(nft_path=nft_path)
+        ownership_collector = firewall.inspect_ownership
     if compatibility_checker is None:
-        compatibility_checker = lambda dnat: check_nft_dnat_compatibility(
-            dnat,
-            nft_path=nft_path,
-            ownership=current_nft_ownership("tcpcc-probe"),
-        )
+        compatibility_checker = firewall.check_compatibility
     if dnat_acquirer is None:
-        dnat_acquirer = lambda dnat, owner: install_nft_dnat(
-            dnat,
-            nft_path=nft_path,
-            ownership=owner,
-        )
+        dnat_acquirer = firewall.install
 
     preflight = preflight_collector(config.requested_cc)
     if not isinstance(preflight, PreflightReport):
@@ -1232,7 +2156,7 @@ def acquire_host_network(
     if not preflight.ok:
         raise HostPreflightError(preflight)
     ownership = ownership_collector()
-    if not isinstance(ownership, NftOwnershipReport):
+    if not isinstance(ownership, (NftOwnershipReport, IptablesOwnershipReport)):
         raise TypeError("ownership_collector returned an invalid report")
     if ownership.blocking:
         raise StaleOwnershipError(ownership)
@@ -1246,7 +2170,13 @@ def acquire_host_network(
         _register_resource(journal, f"tun:{tun.name}", tun.close)
         owner = identity_factory(tun.name)
         dnat = dnat_acquirer(config.dnat, owner)
-        _register_resource(journal, f"nft:{dnat.table_name}", dnat.close)
+        if not isinstance(dnat.backend_id, str) or not dnat.resource_name:
+            raise TypeError("dnat_acquirer returned an invalid firewall lease")
+        _register_resource(
+            journal,
+            f"{dnat.backend_id}:{dnat.resource_name}",
+            dnat.close,
+        )
     except StartupRollbackError:
         raise
     except BaseException as startup_error:

@@ -74,7 +74,11 @@ problem from one run.
 | `cap.net_admin` | required | effective `CAP_NET_ADMIN` bit 12 |
 | `device.tun` | required | character device with read/write access |
 | `tool.ip` | required | iproute2 frontend on `PATH` |
-| `tool.nft` | required by the M8.3 transport | nftables frontend on `PATH` |
+| `library.nftables` | required by `nft-lib` | libnftables available to the dynamic loader |
+| `tool.nft` | required by `nft-exec` | nftables frontend on `PATH` |
+| `tool.iptables` | required by `iptables` | selected xtables frontend on `PATH` |
+| `tool.iptables-restore` | required by `iptables` | matching restore frontend on `PATH` |
+| `tool.iptables-save` | required by `iptables` | matching read-only save frontend on `PATH` |
 | `sysctl.ipv4_forward` | required | `net.ipv4.ip_forward=1` |
 | `sysctl.tcp_congestion_control` | required | value equals the requested algorithm |
 | `sysctl.tcp_available_congestion_control` | required | requested algorithm is listed |
@@ -89,7 +93,7 @@ to change them.
 
 The lifecycle ownership journal starts only after this report is green. It may
 later own the newly opened nonpersistent TUN queue, configuration attached to
-that interface, and a uniquely named firewall table. Global sysctls and any
+that interface, and a uniquely named firewall resource. Global sysctls and any
 pre-existing interface, route, table, chain, or rule are outside the journal
 and are never adopted for cleanup.
 
@@ -126,11 +130,15 @@ registered after the TUN and is removed before the final TUN fd is closed.
 ### Exact-match DNAT transaction
 
 Packet steering is acquired only after the TUN queue is configured and entered
-in the ownership journal. tcpcc creates one collision-resistant table in the
-IPv4 nftables family through a single `nft --file -` invocation. The batch uses
-`create table`, whose exclusive semantics reject an existing name; `add table`
-is deliberately forbidden because nftables permits it to reuse an existing
-table.
+in the ownership journal. Every backend consumes the same validated exact-DNAT
+description and returns an owned resource lease. Backend selection is explicit;
+a failed backend never silently falls through to another implementation.
+
+The two nft paths create one collision-resistant table in the IPv4 nftables
+family from a common command buffer. `nft-lib` submits it in-process, while
+`nft-exec` invokes `nft --file -` without a shell. The batch uses `create
+table`, whose exclusive semantics reject an existing name; `add table` is
+deliberately forbidden because nftables permits it to reuse an existing table.
 
 The same atomic batch creates one base chain and one rule equivalent to:
 
@@ -140,12 +148,18 @@ add chain ip tcpcc_<instance> prerouting { type nat hook prerouting priority dst
 add rule ip tcpcc_<instance> prerouting ip daddr <listen-address> tcp dport <listen-port> counter dnat to <hosted-address>:<hosted-port>
 ```
 
-Addresses, ports, and the optional bounded table identifier are validated
-before invoking nftables. The command is an argv array and the generated batch
-is passed on stdin; no shell interprets either input. A rejected transaction
-creates no partial table, chain, or rule and therefore acquires no cleanup
-ownership. A successful lease deletes only `table ip tcpcc_<instance>`, once,
-and reports a failed deletion through the journal.
+The iptables path exclusively creates `TCPCC_<instance>`, appends the owned
+DNAT rule to that private chain, and appends one exact-match jump from
+`nat/PREROUTING`. The two appends share one `iptables-restore --noflush`
+transaction. A restore failure flushes and deletes only the newly created
+private chain; normal cleanup deletes the exact jump before flushing and
+deleting that chain. It never flushes `PREROUTING` or another shared chain.
+
+Addresses, ports, and bounded resource identifiers are validated before a
+firewall call. Subprocess transports use argv arrays and standard input; no
+shell interprets either input. A rejected exclusive create is never adopted or
+registered for cleanup. A successful lease deletes only its instance-scoped
+resource, once, and reports cleanup failures through the journal.
 
 The rule intentionally matches both the exact public IPv4 address and exact
 TCP destination port. It does not redirect other addresses, UDP, or another
@@ -159,21 +173,23 @@ The privileged lifecycle gate builds disposable client, router, and hosted
 network namespaces. The router and hosted namespaces each own a real
 nonpersistent TUN queue, with userspace relaying only their raw IP packets. A
 TCP payload must therefore traverse exact DNAT and the TUN path in both
-directions. The gate verifies the nft counter and conntrack original/reply
-tuples, rejects an existing requested table, then proves reverse cleanup
-removes DNAT before TUN while an unrelated table remains byte-for-byte
-unchanged. Namespace-scoped test prerequisites are destroyed with the test;
-they are not product behavior.
+directions. For every backend, the gate rejects same-address/wrong-port and
+same-port/wrong-address flows, verifies the owned rule counter and conntrack
+original/reply tuples, rejects an existing requested resource, then proves
+reverse cleanup removes DNAT before TUN while unrelated firewall state remains
+byte-for-byte unchanged. Namespace-scoped test prerequisites are destroyed
+with the test; they are not product behavior.
 
 ### Composed lifecycle and crash diagnostics
 
 The complete host transaction runs five boundaries in strict order:
 
 1. collect every read-only prerequisite result;
-2. list and classify marked tcpcc nftables rules without modifying them;
-3. ask nftables to dry-run the exact table, chain, rule, and ownership marker;
+2. use the selected backend to list and classify marked tcpcc rules without
+   modifying them;
+3. ask that backend to dry-run the exact resource, rules, and ownership marker;
 4. create, configure, and immediately journal the nonpersistent TUN queue;
-5. create and immediately journal the exact DNAT table.
+5. create and immediately journal the exact DNAT resource.
 
 A required preflight failure or unsafe ownership report stops before opening
 `/dev/net/tun`. Failure after TUN acquisition closes that queue. Failure while
@@ -191,30 +207,33 @@ tcpcc.owner.v1 pid=<pid> start=<proc-start-time> tun=<interface>
 
 Rule comments are used instead of table comments because rule-comment support
 predates table-comment support and therefore keeps the host-kernel baseline
-lower. The read-only scan uses nftables JSON ruleset output and associates the
-marker with its containing table.
+lower. The read-only nft scan uses JSON ruleset output and associates the
+marker with its table. The iptables scan parses `iptables-save -t nat`, accepts
+only one valid marker in a reserved private chain, and ignores unmarked
+unrelated chains.
 
 The process start time from `/proc/<pid>/stat` distinguishes an active owner
 from PID reuse. At the next startup, a matching PID and start time is active
 and may belong to another running tcpcc instance. A missing/mismatched process
 is stale; an unsupported or invalid tcpcc marker is malformed. Stale and
-malformed markers block mutation and include the exact table plus an operator
-remediation. tcpcc never automatically deletes a discovered table. Unmarked
-tables—even similarly named ones—are outside this ownership protocol and are
-ignored.
+malformed markers block mutation and include the exact table or private chain
+plus an operator remediation. For iptables, remediation removes the exact
+owned `PREROUTING` jump before the private chain. tcpcc never automatically
+deletes a discovered resource. Unmarked resources outside the reserved naming
+and marker protocol are ignored.
 
 `SIGINT` and `SIGTERM` handlers only set an orderly-shutdown request. Normal
 control flow removes DNAT, closes the TUN fd, and restores the prior handlers;
 repeated requests and cleanup calls are harmless. `SIGKILL` cannot run
 userspace cleanup: the kernel still removes the nonpersistent TUN when the
-process fd closes, while the surviving marked nftables table is detected and
-reported at the next startup for explicit operator deletion.
+process fd closes, while the surviving marked firewall resource is detected
+and reported at the next startup for explicit operator deletion.
 
 ### Firewall backend boundary
 
 The lifecycle consumes a validated DNAT description and must not expose shell
 text as its public API. Following Docker's split between firewall policy and
-transport, the completed product has three independently tested paths:
+transport, the lifecycle implementation has three independently tested paths:
 
 1. `nft-lib`: call `libnftables` in-process and submit one atomic batch;
 2. `nft-exec`: invoke `nft -f -` without a shell and pass the same batch on
@@ -226,8 +245,8 @@ The two nft transports share table naming, ownership markers, stale-resource
 classification, and rollback semantics. The iptables transport owns a unique
 user chain plus one exact jump from `nat/PREROUTING`; cleanup removes that jump
 before deleting the chain and never flushes a built-in or unrelated chain.
-`iptables-nft` and `iptables-legacy` are both exercised against that transport
-when the CI runner exposes them.
+`iptables-nft` and `iptables-legacy` are separate mandatory CI matrix entries
+against that transport.
 
 CI must not treat the transports as interchangeable coverage. Every path has
 its own unit and privileged namespace matrix covering exact destination and
