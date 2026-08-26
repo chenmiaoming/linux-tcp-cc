@@ -9,6 +9,7 @@ on:
       - 'docs/m8-server-ingress-design.md'
       - 'scripts/test-tcpcc-composed-integration.py'
       - 'scripts/test-tcpcc-composed-lifecycle.py'
+      - 'scripts/test-tcpcc-firewall-backends.py'
       - 'scripts/test-tcpcc-host-preflight.py'
       - 'scripts/test-tcpcc-nft-integration.py'
       - 'scripts/test-tcpcc-nft-lifecycle.py'
@@ -35,6 +36,7 @@ jobs:
           python3 -m py_compile tools/tcpcc_host.py
           python3 -m py_compile scripts/test-tcpcc-composed-integration.py
           python3 -m py_compile scripts/test-tcpcc-composed-lifecycle.py
+          python3 -m py_compile scripts/test-tcpcc-firewall-backends.py
           python3 -m py_compile scripts/test-tcpcc-host-preflight.py
           python3 -m py_compile scripts/test-tcpcc-nft-integration.py
           python3 -m py_compile scripts/test-tcpcc-nft-lifecycle.py
@@ -52,6 +54,9 @@ jobs:
       - name: Exercise composed lifecycle failure matrix
         run: python3 scripts/test-tcpcc-composed-lifecycle.py
 
+      - name: Exercise all firewall backend boundaries and injected failures
+        run: python3 scripts/test-tcpcc-firewall-backends.py
+
       - name: Prove nonpersistent TUN fd lifetime
         run: |
           command -v ip
@@ -61,20 +66,66 @@ jobs:
           test -c /dev/net/tun
           sudo -n python3 scripts/test-tcpcc-tun-lifecycle.py --integration
 
-      - name: Install namespace DNAT test tools
+  firewall-backends:
+    name: Firewall ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: nft-lib
+            backend: nft-lib
+            iptables_variant: iptables
+          - name: nft-exec
+            backend: nft-exec
+            iptables_variant: iptables
+          - name: iptables-nft
+            backend: iptables
+            iptables_variant: iptables-nft
+          - name: iptables-legacy
+            backend: iptables
+            iptables_variant: iptables-legacy
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Install privileged network test dependencies
         run: |
           sudo -n apt-get update
           sudo -n env DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y iproute2 nftables conntrack procps
+            apt-get install -y \
+              conntrack \
+              iproute2 \
+              iptables \
+              libnftables1 \
+              nftables \
+              procps
 
-      - name: Prove exact DNAT, TUN routing, and reverse conntrack
+      - name: Load available TUN, NAT, and conntrack modules
         run: |
+          sudo -n modprobe tun || true
           sudo -n modprobe nf_tables || true
           sudo -n modprobe nf_nat || true
           sudo -n modprobe nf_conntrack || true
-          sudo -n python3 scripts/test-tcpcc-nft-integration.py --integration
+          sudo -n modprobe ip_tables || true
+          sudo -n modprobe iptable_nat || true
+          sudo -n modprobe xt_comment || true
+          test -c /dev/net/tun
+          command -v '${{ matrix.iptables_variant }}'
 
-      - name: Prove rollback, signals, and stale ownership diagnostics
+      - name: Prove exact matching, TUN traffic, and reverse conntrack
         run: |
           sudo -n python3 \
-            scripts/test-tcpcc-composed-integration.py --integration
+            scripts/test-tcpcc-nft-integration.py \
+            --integration \
+            --backend '${{ matrix.backend }}' \
+            --iptables-variant '${{ matrix.iptables_variant }}'
+
+      - name: Prove rollback, signal cleanup, and stale diagnostics
+        run: |
+          sudo -n python3 \
+            scripts/test-tcpcc-composed-integration.py \
+            --integration \
+            --backend '${{ matrix.backend }}' \
+            --iptables-variant '${{ matrix.iptables_variant }}'

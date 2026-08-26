@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Privileged failure, signal, and stale-resource tests for M8.3."""
+"""Privileged failure, signal, and stale-resource tests for all firewalls."""
 
 from __future__ import annotations
 
@@ -21,15 +21,13 @@ from tcpcc_host import (  # noqa: E402
     CheckResult,
     HostNetworkConfig,
     NftDnatConfig,
-    NftOwnershipReport,
     PreflightReport,
     ShutdownSignals,
     StaleOwnershipError,
     TunConfig,
     acquire_host_network,
+    create_firewall_backend,
     create_tun_queue,
-    inspect_nft_ownership,
-    install_nft_dnat,
 )
 
 LISTEN_ADDRESS = "203.0.113.10"
@@ -38,9 +36,12 @@ TUN_HOST = "198.19.0.1"
 TUN_GUEST = "198.19.0.2"
 TARGET_PORT = 28443
 STALE_TABLE = "tcpcc_stale_ci"
+STALE_CHAIN = "TCPCC_deadbeef0001"
 STALE_TUN = "tcpcc-stale0"
 FAIL_TABLE = "tcpcc_fail_ci"
 TIMEOUT = 20.0
+BACKENDS = ("nft-lib", "nft-exec", "iptables")
+IPTABLES_VARIANTS = ("iptables", "iptables-nft", "iptables-legacy")
 
 
 def _run(
@@ -69,7 +70,22 @@ def _green_preflight(_requested_cc: str) -> PreflightReport:
     )
 
 
-def _config(*, tun_name: str | None = None) -> HostNetworkConfig:
+def _firewall(backend: str, iptables_variant: str):
+    if backend == "iptables":
+        return create_firewall_backend(
+            backend,
+            iptables_path=iptables_variant,
+            iptables_restore_path=f"{iptables_variant}-restore",
+            iptables_save_path=f"{iptables_variant}-save",
+        )
+    return create_firewall_backend(backend)
+
+
+def _config(
+    backend: str,
+    *,
+    tun_name: str | None = None,
+) -> HostNetworkConfig:
     return HostNetworkConfig(
         requested_cc="cubic",
         tun=TunConfig(
@@ -83,15 +99,47 @@ def _config(*, tun_name: str | None = None) -> HostNetworkConfig:
             target_address=TUN_GUEST,
             target_port=TARGET_PORT,
         ),
+        firewall_backend=backend,
     )
 
 
-def run_install_failure_probe() -> None:
+def _create_failure_resource(backend: str, iptables_variant: str) -> None:
+    if backend.startswith("nft-"):
+        _run(["nft", "create", "table", "ip", FAIL_TABLE])
+    else:
+        _run(
+            [
+                iptables_variant,
+                "--wait",
+                "-t",
+                "nat",
+                "-N",
+                FAIL_TABLE,
+            ]
+        )
+
+
+def _read_failure_resource(backend: str, iptables_variant: str) -> str:
+    if backend.startswith("nft-"):
+        argv = ["nft", "list", "table", "ip", FAIL_TABLE]
+    else:
+        argv = [iptables_variant, "--wait", "-t", "nat", "-S", FAIL_TABLE]
+    return _run(argv).stdout
+
+
+def _delete_failure_resource(backend: str, iptables_variant: str) -> None:
+    if backend.startswith("nft-"):
+        argv = ["nft", "delete", "table", "ip", FAIL_TABLE]
+    else:
+        argv = [iptables_variant, "--wait", "-t", "nat", "-X", FAIL_TABLE]
+    _run(argv)
+
+
+def run_install_failure_probe(backend: str, iptables_variant: str) -> None:
     acquired = {}
-    _run(["nft", "create", "table", "ip", FAIL_TABLE])
-    table_before = _run(
-        ["nft", "list", "table", "ip", FAIL_TABLE]
-    ).stdout
+    firewall = _firewall(backend, iptables_variant)
+    _create_failure_resource(backend, iptables_variant)
+    resource_before = _read_failure_resource(backend, iptables_variant)
 
     def acquire_tun(config: TunConfig):
         queue = create_tun_queue(config)
@@ -99,7 +147,7 @@ def run_install_failure_probe() -> None:
         return queue
 
     def reject_dnat(config: NftDnatConfig, ownership):
-        return install_nft_dnat(
+        return firewall.install(
             NftDnatConfig(
                 listen_address=config.listen_address,
                 listen_port=config.listen_port,
@@ -107,21 +155,22 @@ def run_install_failure_probe() -> None:
                 target_port=config.target_port,
                 table_name=FAIL_TABLE,
             ),
-            ownership=ownership,
+            ownership,
         )
 
     try:
         acquire_host_network(
-            _config(tun_name="tcpcc-fail0"),
+            _config(backend, tun_name="tcpcc-fail0"),
+            firewall=firewall,
             preflight_collector=_green_preflight,
-            ownership_collector=lambda: NftOwnershipReport(()),
+            compatibility_checker=lambda _config: None,
             tun_acquirer=acquire_tun,
             dnat_acquirer=reject_dnat,
         )
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, RuntimeError):
         pass
     else:
-        raise AssertionError("injected nft failure unexpectedly succeeded")
+        raise AssertionError("injected firewall failure unexpectedly succeeded")
 
     queue = acquired["queue"]
     link = _run(
@@ -130,17 +179,16 @@ def run_install_failure_probe() -> None:
     )
     if not queue.closed or link.returncode == 0:
         raise AssertionError("TUN survived failed DNAT acquisition")
-    table_after = _run(
-        ["nft", "list", "table", "ip", FAIL_TABLE]
-    ).stdout
-    if table_after != table_before:
+    resource_after = _read_failure_resource(backend, iptables_variant)
+    if resource_after != resource_before:
         raise AssertionError("rejected DNAT transaction changed existing table")
-    _run(["nft", "delete", "table", "ip", FAIL_TABLE])
+    _delete_failure_resource(backend, iptables_variant)
     print(
         json.dumps(
             {
+                "backend": backend,
                 "dnat_failure_reported": True,
-                "existing_table_unchanged": True,
+                "existing_resource_unchanged": True,
                 "tun_removed": True,
                 "tun": queue.name,
             },
@@ -150,11 +198,13 @@ def run_install_failure_probe() -> None:
     )
 
 
-def run_signal_worker() -> None:
+def run_signal_worker(backend: str, iptables_variant: str) -> None:
     lease = None
+    firewall = _firewall(backend, iptables_variant)
     with ShutdownSignals() as shutdown:
         lease = acquire_host_network(
-            _config(),
+            _config(backend),
+            firewall=firewall,
             preflight_collector=_green_preflight,
         )
         try:
@@ -164,7 +214,8 @@ def run_signal_worker() -> None:
                         "status": "ready",
                         "pid": os.getpid(),
                         "tun": lease.tun_name,
-                        "table": lease.table_name,
+                        "backend": lease.firewall_backend,
+                        "resource": lease.firewall_resource,
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -189,8 +240,9 @@ def run_signal_worker() -> None:
     )
 
 
-def run_stale_probe() -> None:
-    report = inspect_nft_ownership()
+def run_stale_probe(backend: str, iptables_variant: str) -> None:
+    firewall = _firewall(backend, iptables_variant)
+    report = firewall.inspect_ownership()
     called = False
 
     def forbidden_tun(_config: TunConfig):
@@ -200,7 +252,8 @@ def run_stale_probe() -> None:
 
     try:
         acquire_host_network(
-            _config(tun_name=STALE_TUN),
+            _config(backend, tun_name=STALE_TUN),
+            firewall=firewall,
             preflight_collector=_green_preflight,
             tun_acquirer=forbidden_tun,
         )
@@ -223,12 +276,217 @@ def run_stale_probe() -> None:
     )
 
 
-def run_inspection_probe() -> None:
-    print(inspect_nft_ownership().to_json())
+def run_inspection_probe(backend: str, iptables_variant: str) -> None:
+    print(_firewall(backend, iptables_variant).inspect_ownership().to_json())
 
 
 def _netns(namespace: str, argv: list[str]) -> list[str]:
     return ["ip", "netns", "exec", namespace, *argv]
+
+
+def _backend_cli_args(backend: str, iptables_variant: str) -> list[str]:
+    return ["--backend", backend, "--iptables-variant", iptables_variant]
+
+
+def _report_observations(report: dict[str, object]) -> list[dict[str, object]]:
+    observations = report.get("tables", report.get("chains"))
+    if not isinstance(observations, list):
+        raise AssertionError(f"ownership report has no observations: {report}")
+    return observations
+
+
+def _observation_resource(observation: dict[str, object]) -> str:
+    resource = observation.get("table", observation.get("chain"))
+    if not isinstance(resource, str):
+        raise AssertionError(f"ownership observation has no resource: {observation}")
+    return resource
+
+
+def _resource_exists(
+    namespace: str,
+    backend: str,
+    iptables_variant: str,
+    resource: str,
+) -> bool:
+    if backend.startswith("nft-"):
+        argv = ["nft", "list", "table", "ip", resource]
+    else:
+        argv = [
+            iptables_variant,
+            "--wait",
+            "-t",
+            "nat",
+            "-n",
+            "-L",
+            resource,
+        ]
+    return _run(_netns(namespace, argv), check=False).returncode == 0
+
+
+def _stale_resource(backend: str) -> str:
+    return STALE_TABLE if backend.startswith("nft-") else STALE_CHAIN
+
+
+def _stale_jump_arguments() -> list[str]:
+    return [
+        "-d",
+        f"{LISTEN_ADDRESS}/32",
+        "-p",
+        "tcp",
+        "-m",
+        "tcp",
+        "--dport",
+        str(LISTEN_PORT),
+        "-m",
+        "comment",
+        "--comment",
+        f"tcpcc.jump.v1 chain={STALE_CHAIN}",
+        "-j",
+        STALE_CHAIN,
+    ]
+
+
+def _create_stale_resource(
+    namespace: str,
+    backend: str,
+    iptables_variant: str,
+) -> str:
+    marker = f"tcpcc.owner.v1 pid=99999999 start=1 tun={STALE_TUN}"
+    if backend.startswith("nft-"):
+        batch = (
+            f"create table ip {STALE_TABLE}\n"
+            f"add chain ip {STALE_TABLE} sentinel\n"
+            f"add rule ip {STALE_TABLE} sentinel counter comment \"{marker}\"\n"
+        )
+        _run(
+            _netns(namespace, ["nft", "--file", "-"]),
+            input_text=batch,
+        )
+        return _run(
+            _netns(namespace, ["nft", "list", "table", "ip", STALE_TABLE])
+        ).stdout
+
+    _run(
+        _netns(
+            namespace,
+            [iptables_variant, "--wait", "-t", "nat", "-N", STALE_CHAIN],
+        )
+    )
+    _run(
+        _netns(
+            namespace,
+            [
+                iptables_variant,
+                "--wait",
+                "-t",
+                "nat",
+                "-A",
+                STALE_CHAIN,
+                "-m",
+                "comment",
+                "--comment",
+                marker,
+                "-j",
+                "RETURN",
+            ],
+        )
+    )
+    _run(
+        _netns(
+            namespace,
+            [
+                iptables_variant,
+                "--wait",
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                *_stale_jump_arguments(),
+            ],
+        )
+    )
+    return _read_stale_resource(namespace, backend, iptables_variant)
+
+
+def _read_stale_resource(
+    namespace: str,
+    backend: str,
+    iptables_variant: str,
+) -> str:
+    if backend.startswith("nft-"):
+        argv = ["nft", "list", "table", "ip", STALE_TABLE]
+        return _run(_netns(namespace, argv)).stdout
+
+    chain_state = _run(
+        _netns(
+            namespace,
+            [
+                iptables_variant,
+                "--wait",
+                "-t",
+                "nat",
+                "-S",
+                STALE_CHAIN,
+            ],
+        )
+    ).stdout
+    prerouting = _run(
+        _netns(
+            namespace,
+            [
+                iptables_variant,
+                "--wait",
+                "-t",
+                "nat",
+                "-S",
+                "PREROUTING",
+            ],
+        )
+    ).stdout
+    owned_jumps = "\n".join(
+        line for line in prerouting.splitlines() if STALE_CHAIN in line
+    )
+    return f"{chain_state}{owned_jumps}\n"
+
+
+def _delete_stale_resource(
+    namespace: str,
+    backend: str,
+    iptables_variant: str,
+) -> None:
+    if backend.startswith("nft-"):
+        _run(
+            _netns(namespace, ["nft", "delete", "table", "ip", STALE_TABLE])
+        )
+        return
+    _run(
+        _netns(
+            namespace,
+            [
+                iptables_variant,
+                "--wait",
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                *_stale_jump_arguments(),
+            ],
+        )
+    )
+    for action in ("-F", "-X"):
+        _run(
+            _netns(
+                namespace,
+                [
+                    iptables_variant,
+                    "--wait",
+                    "-t",
+                    "nat",
+                    action,
+                    STALE_CHAIN,
+                ],
+            )
+        )
 
 
 def _wait_ready(process: subprocess.Popen[str]) -> dict[str, object]:
@@ -262,11 +520,13 @@ def _force_stop(process: subprocess.Popen[str] | None) -> None:
         process.wait(timeout=2.0)
 
 
-def run_privileged_integration() -> None:
+def run_privileged_integration(backend: str, iptables_variant: str) -> None:
     if os.geteuid() != 0:
         raise RuntimeError("composed lifecycle integration must run as root")
     if not Path("/dev/net/tun").is_char_device():
         raise RuntimeError("/dev/net/tun is not an available character device")
+    if backend == "nft-lib":
+        _firewall(backend, iptables_variant).transport.library_path
 
     namespace = f"tcc-life-{os.getpid()}-{secrets.token_hex(3)}"
     signal_process: subprocess.Popen[str] | None = None
@@ -282,14 +542,30 @@ def run_privileged_integration() -> None:
 
         failure = json.loads(
             _run(
-                _netns(namespace, [sys.executable, script, "--install-failure"])
+                _netns(
+                    namespace,
+                    [
+                        sys.executable,
+                        script,
+                        "--install-failure",
+                        *_backend_cli_args(backend, iptables_variant),
+                    ],
+                )
             ).stdout
         )
         if failure.get("tun_removed") is not True:
             raise AssertionError(f"invalid failure rollback report: {failure}")
 
         signal_process = subprocess.Popen(
-            _netns(namespace, [sys.executable, script, "--signal-worker"]),
+            _netns(
+                namespace,
+                [
+                    sys.executable,
+                    script,
+                    "--signal-worker",
+                    *_backend_cli_args(backend, iptables_variant),
+                ],
+            ),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -297,35 +573,34 @@ def run_privileged_integration() -> None:
         )
         ready = _wait_ready(signal_process)
         tun_name = str(ready["tun"])
-        table_name = str(ready["table"])
+        resource_name = str(ready["resource"])
+        if ready.get("backend") != backend:
+            raise AssertionError(f"signal worker selected wrong backend: {ready}")
         if _run(
             ["ip", "-n", namespace, "link", "show", "dev", tun_name],
             check=False,
         ).returncode != 0:
             raise AssertionError("signal worker TUN was not visible while active")
-        table_json = json.loads(
-            _run(
-                _netns(namespace, ["nft", "--json", "list", "ruleset", "ip"])
-            ).stdout
-        )
-        marker = ""
-        for entry in table_json["nftables"]:
-            rule = entry.get("rule", {})
-            if rule.get("table") == table_name:
-                marker = rule.get("comment", "")
-        if not marker.startswith(f"tcpcc.owner.v1 pid={ready['pid']} "):
-            raise AssertionError(f"owned table marker is missing: {table_json}")
         active_report = json.loads(
             _run(
-                _netns(namespace, [sys.executable, script, "--inspect"])
+                _netns(
+                    namespace,
+                    [
+                        sys.executable,
+                        script,
+                        "--inspect",
+                        *_backend_cli_args(backend, iptables_variant),
+                    ],
+                )
             ).stdout
         )
-        active_tables = active_report["tables"]
+        active_resources = _report_observations(active_report)
         if (
             active_report["blocking"]
-            or len(active_tables) != 1
-            or active_tables[0]["table"] != table_name
-            or active_tables[0]["status"] != "active"
+            or len(active_resources) != 1
+            or _observation_resource(active_resources[0]) != resource_name
+            or active_resources[0]["status"] != "active"
+            or active_resources[0]["owner_pid"] != ready["pid"]
         ):
             raise AssertionError(f"active owner was misclassified: {active_report}")
 
@@ -343,57 +618,80 @@ def run_privileged_integration() -> None:
             check=False,
         ).returncode == 0:
             raise AssertionError("TUN survived orderly SIGTERM cleanup")
-        if _run(
-            _netns(namespace, ["nft", "list", "table", "ip", table_name]),
-            check=False,
-        ).returncode == 0:
-            raise AssertionError("DNAT table survived orderly SIGTERM cleanup")
-
-        stale_batch = (
-            f"create table ip {STALE_TABLE}\n"
-            f"add chain ip {STALE_TABLE} sentinel\n"
-            f"add rule ip {STALE_TABLE} sentinel counter comment "
-            f'"tcpcc.owner.v1 pid=99999999 start=1 tun={STALE_TUN}"\n'
-        )
-        _run(
-            _netns(namespace, ["nft", "--file", "-"]),
-            input_text=stale_batch,
-        )
-        stale_before = _run(
-            _netns(namespace, ["nft", "list", "table", "ip", STALE_TABLE])
-        ).stdout
-        stale = json.loads(
-            _run(_netns(namespace, [sys.executable, script, "--stale"])).stdout
-        )
-        observations = stale["report"]["tables"]
-        if not stale["blocked_before_tun"] or observations[0]["status"] != "stale":
-            raise AssertionError(f"invalid stale ownership report: {stale}")
-        if (
-            f"nft delete table ip {STALE_TABLE}"
-            not in observations[0]["remediation"]
+        if _resource_exists(
+            namespace,
+            backend,
+            iptables_variant,
+            resource_name,
         ):
+            raise AssertionError(
+                "DNAT firewall resource survived orderly SIGTERM cleanup"
+            )
+
+        stale_before = _create_stale_resource(
+            namespace,
+            backend,
+            iptables_variant,
+        )
+        stale = json.loads(
+            _run(
+                _netns(
+                    namespace,
+                    [
+                        sys.executable,
+                        script,
+                        "--stale",
+                        *_backend_cli_args(backend, iptables_variant),
+                    ],
+                )
+            ).stdout
+        )
+        observations = _report_observations(stale["report"])
+        if (
+            not stale["blocked_before_tun"]
+            or len(observations) != 1
+            or _observation_resource(observations[0]) != _stale_resource(backend)
+            or observations[0]["status"] != "stale"
+        ):
+            raise AssertionError(f"invalid stale ownership report: {stale}")
+        expected_remediation = (
+            f"nft delete table ip {STALE_TABLE}"
+            if backend.startswith("nft-")
+            else f"{iptables_variant} -t nat -D PREROUTING"
+        )
+        if expected_remediation not in observations[0]["remediation"]:
             raise AssertionError(f"stale remediation is incomplete: {stale}")
-        stale_after = _run(
-            _netns(namespace, ["nft", "list", "table", "ip", STALE_TABLE])
-        ).stdout
+        stale_after = _read_stale_resource(
+            namespace,
+            backend,
+            iptables_variant,
+        )
         if stale_after != stale_before:
-            raise AssertionError("stale table changed during read-only diagnosis")
+            raise AssertionError(
+                "stale firewall state changed during read-only diagnosis"
+            )
         if _run(
             ["ip", "-n", namespace, "link", "show", "dev", STALE_TUN],
             check=False,
         ).returncode == 0:
             raise AssertionError("stale diagnosis acquired a TUN")
 
-        _run(
-            _netns(namespace, ["nft", "delete", "table", "ip", STALE_TABLE])
+        _delete_stale_resource(
+            namespace,
+            backend,
+            iptables_variant,
         )
         final_report = {
             "schema": "tcpcc.composed-lifecycle-integration.v1",
+            "backend": backend,
+            "iptables_variant": (
+                iptables_variant if backend == "iptables" else None
+            ),
             "dnat_failure_rolled_back_tun": True,
             "sigterm_removed_tun_and_dnat": True,
             "active_marker_verified": True,
-            "stale_table_blocked_startup": True,
-            "stale_table_left_untouched": True,
+            "stale_resource_blocked_startup": True,
+            "stale_resource_left_untouched": True,
             "operator_cleanup_explicit": True,
         }
     except BaseException as error:
@@ -430,18 +728,24 @@ def main() -> None:
     mode.add_argument("--signal-worker", action="store_true")
     mode.add_argument("--stale", action="store_true")
     mode.add_argument("--inspect", action="store_true")
+    parser.add_argument("--backend", choices=BACKENDS, default="nft-exec")
+    parser.add_argument(
+        "--iptables-variant",
+        choices=IPTABLES_VARIANTS,
+        default="iptables",
+    )
     arguments = parser.parse_args()
 
     if arguments.integration:
-        run_privileged_integration()
+        run_privileged_integration(arguments.backend, arguments.iptables_variant)
     elif arguments.install_failure:
-        run_install_failure_probe()
+        run_install_failure_probe(arguments.backend, arguments.iptables_variant)
     elif arguments.signal_worker:
-        run_signal_worker()
+        run_signal_worker(arguments.backend, arguments.iptables_variant)
     elif arguments.inspect:
-        run_inspection_probe()
+        run_inspection_probe(arguments.backend, arguments.iptables_variant)
     else:
-        run_stale_probe()
+        run_stale_probe(arguments.backend, arguments.iptables_variant)
 
 
 if __name__ == "__main__":

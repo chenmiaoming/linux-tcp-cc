@@ -369,7 +369,7 @@ class ComposedLifecycleTests(unittest.TestCase):
 
         self.assertEqual(
             [item.label for item in raised.exception.failures],
-            ["nft:tcpcc_unit", "tun:tcpcc-unit0"],
+            ["nft-exec:tcpcc_unit", "tun:tcpcc-unit0"],
         )
         self.assertEqual(
             fixture.events[-2:],
