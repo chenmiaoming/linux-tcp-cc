@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "scenario_id": "server-reverse-high-bdp-loss-v1",
+  "description": "Single-stream reverse iperf3 comparison through a symmetric high-BDP path with light random loss.",
+  "network": {
+    "rate_mbps": 50,
+    "one_way_delay_ms": 50,
+    "random_loss_percent": 0.1,
+    "netem_limit_packets": 20000,
+    "mtu": 1500
+  },
+  "iperf": {
+    "duration_seconds": 10,
+    "omit_seconds": 2,
+    "parallel_streams": 1,
+    "repetitions": 3,
+    "settle_seconds": 1
+  },
+  "acceptance": {
+    "minimum_goodput_mbps": 1,
+    "tcpcc_to_native_bbr_min_ratio": 0.5,
+    "tcpcc_to_native_bbr_max_ratio": 1.5,
+    "bbr_over_cubic_is_observational": true
+  }
+}
