@@ -558,6 +558,34 @@ class FirewallBackendTests(unittest.TestCase):
         )
         self.assertNotIn("command", {kind for kind, _value in operations})
 
+        operations.clear()
+        variant_report = collect_preflight(
+            "cubic",
+            inspector,
+            firewall_backend="iptables",
+            iptables_path="iptables-legacy",
+            iptables_restore_path="iptables-legacy-restore",
+            iptables_save_path="iptables-legacy-save",
+        )
+        self.assertTrue(variant_report.ok)
+        self.assertEqual(
+            {
+                check.check_id
+                for check in variant_report.checks
+                if check.check_id.startswith("tool.iptables")
+            },
+            {"tool.iptables", "tool.iptables-restore", "tool.iptables-save"},
+        )
+        self.assertTrue(
+            {
+                "iptables-legacy",
+                "iptables-legacy-restore",
+                "iptables-legacy-save",
+            }.issubset(
+                {value for kind, value in operations if kind == "resolve"}
+            )
+        )
+
     def test_backend_factory_is_explicit_and_never_silently_falls_back(self) -> None:
         self.assertEqual(create_firewall_backend("nft-exec").backend_id, "nft-exec")
         self.assertEqual(create_firewall_backend("nft-lib").backend_id, "nft-lib")

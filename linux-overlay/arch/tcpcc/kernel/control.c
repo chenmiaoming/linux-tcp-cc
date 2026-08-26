@@ -2,6 +2,7 @@
 #include <linux/completion.h>
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/fcntl.h>
 #include <linux/in.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -61,6 +62,8 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_BRIDGE_START,
 	TCPCC_CONTROL_BRIDGE_JOIN,
 	TCPCC_CONTROL_BRIDGE_CANCEL,
+	TCPCC_CONTROL_ACCEPT_NONBLOCK,
+	TCPCC_CONTROL_SHUTDOWN,
 };
 
 struct tcpcc_control_request {
@@ -122,6 +125,7 @@ static struct completion tcpcc_control_request_ready;
 static struct completion tcpcc_control_finished;
 static struct task_struct *tcpcc_control_task;
 static int tcpcc_control_result;
+static u16 tcpcc_control_terminal_op;
 
 static void tcpcc_control_irq_noop(struct irq_data *data)
 {
@@ -294,8 +298,10 @@ static int tcpcc_control_connect(const struct tcpcc_control_request *request)
 	return kernel_connect(sock, (struct sockaddr *)&addr, sizeof(addr), 0);
 }
 
-static int tcpcc_control_accept(const struct tcpcc_control_request *request,
-				struct tcpcc_control_response *response)
+static int tcpcc_control_accept_flags(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response,
+				int flags)
 {
 	struct socket *listener = tcpcc_control_lookup(request->handle);
 	struct socket *accepted;
@@ -305,7 +311,7 @@ static int tcpcc_control_accept(const struct tcpcc_control_request *request,
 	if (!listener)
 		return -EBADF;
 
-	ret = kernel_accept(listener, &accepted, 0);
+	ret = kernel_accept(listener, &accepted, flags);
 	if (ret)
 		return ret;
 
@@ -317,6 +323,19 @@ static int tcpcc_control_accept(const struct tcpcc_control_request *request,
 
 	response->handle = handle;
 	return 0;
+}
+
+static int tcpcc_control_accept(const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	return tcpcc_control_accept_flags(request, response, 0);
+}
+
+static int tcpcc_control_accept_nonblock(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	return tcpcc_control_accept_flags(request, response, O_NONBLOCK);
 }
 
 static int tcpcc_control_send_all(struct socket *sock, const u8 *buf,
@@ -799,6 +818,13 @@ static int tcpcc_control_bridge_cancel(
 	return ret;
 }
 
+static int tcpcc_control_shutdown(const struct tcpcc_control_request *request)
+{
+	if (request->handle || request->arg0 || request->arg1 || request->length)
+		return -EINVAL;
+	return 0;
+}
+
 static int tcpcc_control_l3_attach(const struct tcpcc_control_request *request,
 				   struct tcpcc_control_response *response)
 {
@@ -866,6 +892,10 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_bridge_join(request, response);
 	case TCPCC_CONTROL_BRIDGE_CANCEL:
 		return tcpcc_control_bridge_cancel(request);
+	case TCPCC_CONTROL_ACCEPT_NONBLOCK:
+		return tcpcc_control_accept_nonblock(request, response);
+	case TCPCC_CONTROL_SHUTDOWN:
+		return tcpcc_control_shutdown(request);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -909,8 +939,11 @@ static int tcpcc_control_thread(void *unused)
 			break;
 		}
 
-		if (request.op == TCPCC_CONTROL_FINISH) {
+		if (request.op == TCPCC_CONTROL_FINISH ||
+		    (request.op == TCPCC_CONTROL_SHUTDOWN &&
+		     !response.status)) {
 			tcpcc_control_result = response.status;
+			tcpcc_control_terminal_op = request.op;
 			complete(&tcpcc_control_finished);
 			break;
 		}
@@ -940,6 +973,7 @@ static int __init tcpcc_control_selftest(void)
 	init_completion(&tcpcc_control_request_ready);
 	init_completion(&tcpcc_control_finished);
 	tcpcc_control_result = -EINPROGRESS;
+	tcpcc_control_terminal_op = 0;
 
 	irq_set_chip_and_handler(TCPCC_CONTROL_IRQ, &tcpcc_control_irq_chip,
 				 handle_simple_irq);
@@ -988,6 +1022,11 @@ static int __init tcpcc_control_selftest(void)
 	}
 
 	tcpcc_l3_teardown();
+	if (!tcpcc_control_result &&
+	    tcpcc_control_terminal_op == TCPCC_CONTROL_SHUTDOWN) {
+		pr_notice("tcpcc: M8.4 hosted runtime stopped cleanly\n");
+		tcpcc_host_exit(0);
+	}
 
 	if (tcpcc_control_result)
 		panic("tcpcc: M5.1 host control/L3 validation failed: %d",

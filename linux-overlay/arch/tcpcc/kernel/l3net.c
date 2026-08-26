@@ -15,6 +15,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <net/checksum.h>
+#include <net/ip_fib.h>
 #include <net/ip_tunnels.h>
 #include <net/net_namespace.h>
 #include <net/sch_generic.h>
@@ -374,6 +375,40 @@ static int tcpcc_l3_configure_ipv4(struct net_device *dev, u32 address,
 	return devinet_ioctl(&init_net, SIOCSIFNETMASK, &ifr);
 }
 
+static int tcpcc_l3_configure_default_route(struct net_device *dev,
+					     u32 address)
+{
+	struct fib_config config = {
+		.fc_dst_len = 0,
+		.fc_protocol = RTPROT_BOOT,
+		.fc_scope = RT_SCOPE_LINK,
+		.fc_type = RTN_UNICAST,
+		.fc_table = RT_TABLE_MAIN,
+		.fc_oif = dev->ifindex,
+		.fc_prefsrc = htonl(address),
+		.fc_nlflags = NLM_F_CREATE | NLM_F_EXCL,
+		.fc_nlinfo = {
+			.nl_net = &init_net,
+		},
+	};
+	struct fib_table *table;
+	int ret;
+
+	/*
+	 * tcpcc0 is a point-to-point raw-IP device.  The hosted stack therefore
+	 * needs a device route, not an ARP-resolved gateway, for replies to public
+	 * clients outside the address prefix used by the TUN endpoints.
+	 */
+	rtnl_lock();
+	table = fib_new_table(&init_net, RT_TABLE_MAIN);
+	ret = table ? fib_table_insert(&init_net, table, &config, NULL) : -ENOBUFS;
+	rtnl_unlock();
+	if (!ret)
+		pr_notice("tcpcc: M8.4 default IPv4 route active on %s\n",
+			  dev->name);
+	return ret;
+}
+
 static int tcpcc_l3_validate_fq_qdisc(struct net_device *dev)
 {
 	struct Qdisc *qdisc;
@@ -448,6 +483,10 @@ int tcpcc_l3_attach(int host_fd, u32 ipv4_addr, u32 prefix_len, int *ifindex)
 	}
 
 	ret = tcpcc_l3_configure_ipv4(dev, ipv4_addr, prefix_len);
+	if (ret)
+		goto err_teardown;
+
+	ret = tcpcc_l3_configure_default_route(dev, ipv4_addr);
 	if (ret)
 		goto err_teardown;
 

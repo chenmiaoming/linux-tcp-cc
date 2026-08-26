@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/m8-host-lifecycle.yml'
       - 'docs/m8-server-ingress-design.md'
+      - 'Makefile'
       - 'scripts/test-tcpcc-composed-integration.py'
       - 'scripts/test-tcpcc-composed-lifecycle.py'
       - 'scripts/test-tcpcc-firewall-backends.py'
@@ -14,6 +15,10 @@ on:
       - 'scripts/test-tcpcc-nft-integration.py'
       - 'scripts/test-tcpcc-nft-lifecycle.py'
       - 'scripts/test-tcpcc-tun-lifecycle.py'
+      - 'scripts/test-tcpcc-cli.py'
+      - 'tcpcc'
+      - 'tools/tcpcc_cli.py'
+      - 'tools/tcpcc_control.py'
       - 'tools/tcpcc_host.py'
   push:
     branches:
@@ -41,6 +46,12 @@ jobs:
           python3 -m py_compile scripts/test-tcpcc-nft-integration.py
           python3 -m py_compile scripts/test-tcpcc-nft-lifecycle.py
           python3 -m py_compile scripts/test-tcpcc-tun-lifecycle.py
+          python3 -m py_compile scripts/test-tcpcc-cli.py
+          python3 -m py_compile tools/tcpcc_cli.py
+          python3 -m py_compile tools/tcpcc_control.py
+
+      - name: Exercise stable CLI and hosted runtime fault boundaries
+        run: python3 scripts/test-tcpcc-cli.py
 
       - name: Exercise deterministic host preflight
         run: python3 scripts/test-tcpcc-host-preflight.py
