@@ -405,9 +405,7 @@ def _create_stale_resource(
             ],
         )
     )
-    return _run(
-        _netns(namespace, [f"{iptables_variant}-save", "-t", "nat"])
-    ).stdout
+    return _read_stale_resource(namespace, backend, iptables_variant)
 
 
 def _read_stale_resource(
@@ -417,9 +415,38 @@ def _read_stale_resource(
 ) -> str:
     if backend.startswith("nft-"):
         argv = ["nft", "list", "table", "ip", STALE_TABLE]
-    else:
-        argv = [f"{iptables_variant}-save", "-t", "nat"]
-    return _run(_netns(namespace, argv)).stdout
+        return _run(_netns(namespace, argv)).stdout
+
+    chain_state = _run(
+        _netns(
+            namespace,
+            [
+                iptables_variant,
+                "--wait",
+                "-t",
+                "nat",
+                "-S",
+                STALE_CHAIN,
+            ],
+        )
+    ).stdout
+    prerouting = _run(
+        _netns(
+            namespace,
+            [
+                iptables_variant,
+                "--wait",
+                "-t",
+                "nat",
+                "-S",
+                "PREROUTING",
+            ],
+        )
+    ).stdout
+    owned_jumps = "\n".join(
+        line for line in prerouting.splitlines() if STALE_CHAIN in line
+    )
+    return f"{chain_state}{owned_jumps}\n"
 
 
 def _delete_stale_resource(
