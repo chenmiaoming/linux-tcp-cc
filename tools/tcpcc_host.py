@@ -12,9 +12,11 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import stat
 import struct
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -23,6 +25,11 @@ CAP_NET_ADMIN = 12
 CC_NAME = re.compile(r"[a-z0-9_-]{1,15}\Z")
 TUN_NAME = re.compile(r"[A-Za-z0-9_.-]{1,15}\Z")
 NFT_TABLE_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
+NFT_OWNER_PREFIX = "tcpcc.owner."
+NFT_OWNER_MARKER = re.compile(
+    r"tcpcc\.owner\.v1 pid=([1-9][0-9]*) start=([1-9][0-9]*) "
+    r"tun=([A-Za-z0-9_.-]{1,15})\Z"
+)
 
 # Linux UAPI values from include/uapi/linux/if_tun.h. IFF_TUN_EXCL makes
 # creation atomic: TUNSETIFF must not attach this fd to a pre-existing device.
@@ -50,6 +57,7 @@ CommandRunner = Callable[[list[str]], None]
 NameFactory = Callable[[], str]
 CleanupCallback = Callable[[], None]
 NftRunner = Callable[[list[str], str | None], None]
+OutputRunner = Callable[[list[str]], str]
 
 
 def _read_text(path: Path) -> str:
@@ -92,6 +100,16 @@ def _run_nft(argv: list[str], input_text: str | None) -> None:
 
 def _new_nft_table_name() -> str:
     return f"tcpcc_{secrets.token_hex(6)}"
+
+
+def _read_command(argv: list[str]) -> str:
+    return subprocess.run(
+        argv,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout
 
 
 @dataclass(frozen=True)
@@ -420,7 +438,7 @@ class CleanupFailure:
     """One failed cleanup callback, retained for operator diagnostics."""
 
     label: str
-    error: Exception
+    error: BaseException
 
 
 class CleanupError(RuntimeError):
@@ -480,7 +498,7 @@ class OwnershipJournal:
         for label, callback in reversed(entries):
             try:
                 callback()
-            except Exception as error:
+            except BaseException as error:
                 failures.append(CleanupFailure(label, error))
         if failures:
             raise CleanupError(tuple(failures))
@@ -701,7 +719,228 @@ class NftDnatConfig:
         object.__setattr__(self, "target_port", target_port)
 
 
-def _dnat_batch(config: NftDnatConfig, table_name: str) -> str:
+@dataclass(frozen=True)
+class NftOwnership:
+    """Versioned process identity stored on an instance-owned DNAT rule."""
+
+    pid: int
+    start_time: int
+    tun_name: str
+
+    def __post_init__(self) -> None:
+        for value, field in (
+            (self.pid, "pid"),
+            (self.start_time, "start_time"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"nftables ownership {field} must be positive")
+        _validate_tun_name(self.tun_name)
+
+    def marker(self) -> str:
+        return (
+            f"tcpcc.owner.v1 pid={self.pid} start={self.start_time} "
+            f"tun={self.tun_name}"
+        )
+
+
+@dataclass(frozen=True)
+class NftOwnershipObservation:
+    """Classification of one table carrying a tcpcc ownership marker."""
+
+    table_name: str
+    status: str
+    owner_pid: int | None
+    owner_start_time: int | None
+    tun_name: str | None
+    detail: str
+    remediation: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "table": self.table_name,
+            "status": self.status,
+            "owner_pid": self.owner_pid,
+            "owner_start_time": self.owner_start_time,
+            "tun": self.tun_name,
+            "detail": self.detail,
+            "remediation": self.remediation,
+        }
+
+
+@dataclass(frozen=True)
+class NftOwnershipReport:
+    """Stable read-only stale-resource report collected before acquisition."""
+
+    observations: tuple[NftOwnershipObservation, ...]
+
+    @property
+    def blocking(self) -> bool:
+        return any(item.status != "active" for item in self.observations)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema": "tcpcc.nft-ownership.v1",
+            "blocking": self.blocking,
+            "tables": [item.as_dict() for item in self.observations],
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
+
+
+def _process_start_time(
+    pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+    reader: Reader = _read_text,
+) -> int:
+    value = reader(proc_root / str(pid) / "stat").strip()
+    closing = value.rfind(")")
+    if closing < 0:
+        raise ValueError("process stat has no command terminator")
+    fields = value[closing + 1 :].split()
+    # The first field after the command is field 3; starttime is field 22.
+    if len(fields) <= 19:
+        raise ValueError("process stat has no start-time field")
+    start_time = int(fields[19])
+    if start_time < 1:
+        raise ValueError("process start time is not positive")
+    return start_time
+
+
+def current_nft_ownership(
+    tun_name: str,
+    *,
+    proc_root: Path = Path("/proc"),
+    reader: Reader = _read_text,
+    pid_provider: Callable[[], int] = os.getpid,
+) -> NftOwnership:
+    """Build an identity robust against PID reuse from procfs start time."""
+
+    pid = pid_provider()
+    return NftOwnership(
+        pid=pid,
+        start_time=_process_start_time(pid, proc_root=proc_root, reader=reader),
+        tun_name=tun_name,
+    )
+
+
+def inspect_nft_ownership(
+    *,
+    nft_path: str = "nft",
+    runner: OutputRunner = _read_command,
+    proc_root: Path = Path("/proc"),
+    reader: Reader = _read_text,
+) -> NftOwnershipReport:
+    """Classify marked tables without changing or adopting any of them."""
+
+    if not isinstance(nft_path, str) or not nft_path or "\0" in nft_path:
+        raise ValueError("nft_path must name one executable")
+    raw = runner([nft_path, "--json", "list", "ruleset", "ip"])
+    try:
+        document = json.loads(raw)
+        entries = document["nftables"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise RuntimeError("nftables returned malformed ruleset JSON") from error
+    if not isinstance(entries, list):
+        raise RuntimeError("nftables returned malformed ruleset JSON")
+
+    observations: list[NftOwnershipObservation] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        rule = entry.get("rule")
+        if not isinstance(rule, dict) or rule.get("family") != "ip":
+            continue
+        comment = rule.get("comment")
+        if not isinstance(comment, str) or not comment.startswith(NFT_OWNER_PREFIX):
+            continue
+        table_name = rule.get("table")
+        match = NFT_OWNER_MARKER.fullmatch(comment)
+        if (
+            not isinstance(table_name, str)
+            or NFT_TABLE_NAME.fullmatch(table_name) is None
+            or match is None
+        ):
+            safe_table = (
+                table_name
+                if isinstance(table_name, str)
+                and NFT_TABLE_NAME.fullmatch(table_name) is not None
+                else None
+            )
+            remediation = "inspect the complete nftables ruleset manually"
+            if safe_table is not None:
+                remediation = (
+                    f"inspect with: nft list table ip {safe_table}; after verifying "
+                    f"ownership, remove with: nft delete table ip {safe_table}"
+                )
+            observations.append(
+                NftOwnershipObservation(
+                    table_name=(
+                        table_name if isinstance(table_name, str) else "malformed"
+                    ),
+                    status="malformed",
+                    owner_pid=None,
+                    owner_start_time=None,
+                    tun_name=None,
+                    detail="unsupported or malformed tcpcc ownership marker",
+                    remediation=remediation,
+                )
+            )
+            continue
+
+        pid = int(match.group(1))
+        expected_start = int(match.group(2))
+        tun_name = match.group(3)
+        status = "stale"
+        detail = "owner process is absent"
+        try:
+            actual_start = _process_start_time(
+                pid,
+                proc_root=proc_root,
+                reader=reader,
+            )
+        except FileNotFoundError:
+            pass
+        except (OSError, UnicodeError, ValueError):
+            detail = "owner process identity is unreadable"
+        else:
+            if actual_start == expected_start:
+                status = "active"
+                detail = "owner pid and process start time match"
+            else:
+                detail = "owner pid was reused by a different process"
+
+        remediation = ""
+        if status == "stale":
+            remediation = (
+                "verify the recorded owner is gone, then run: "
+                f"nft delete table ip {table_name}"
+            )
+        observations.append(
+            NftOwnershipObservation(
+                table_name=table_name,
+                status=status,
+                owner_pid=pid,
+                owner_start_time=expected_start,
+                tun_name=tun_name,
+                detail=detail,
+                remediation=remediation,
+            )
+        )
+
+    observations.sort(key=lambda item: item.table_name)
+    return NftOwnershipReport(tuple(observations))
+
+
+def _dnat_batch(
+    config: NftDnatConfig,
+    table_name: str,
+    ownership: NftOwnership | None,
+) -> str:
+    owner_comment = ""
+    if ownership is not None:
+        owner_comment = f' comment "{ownership.marker()}"'
     return (
         f"create table ip {table_name}\n"
         f"add chain ip {table_name} prerouting "
@@ -709,8 +948,47 @@ def _dnat_batch(config: NftDnatConfig, table_name: str) -> str:
         f"add rule ip {table_name} prerouting "
         f"ip daddr {config.listen_address} "
         f"tcp dport {config.listen_port} counter "
-        f"dnat to {config.target_address}:{config.target_port}\n"
+        f"dnat to {config.target_address}:{config.target_port}"
+        f"{owner_comment}\n"
     )
+
+
+class NftCompatibilityError(RuntimeError):
+    """The host rejected a dry-run of the exact nftables transaction."""
+
+    def __init__(self, error: subprocess.CalledProcessError) -> None:
+        self.command_error = error
+        detail = (error.stderr or "nftables rejected the dry-run").strip()
+        super().__init__(
+            "host nftables cannot install tcpcc exact DNAT and ownership "
+            f"metadata: {detail}"
+        )
+
+
+def check_nft_dnat_compatibility(
+    config: NftDnatConfig,
+    *,
+    ownership: NftOwnership,
+    nft_path: str = "nft",
+    runner: NftRunner = _run_nft,
+    table_name_factory: NameFactory = _new_nft_table_name,
+) -> None:
+    """Ask nft/kernel to validate the full batch without applying it."""
+
+    if not isinstance(config, NftDnatConfig):
+        raise TypeError("config must be an NftDnatConfig")
+    if not isinstance(ownership, NftOwnership):
+        raise TypeError("ownership must be an NftOwnership")
+    if not isinstance(nft_path, str) or not nft_path or "\0" in nft_path:
+        raise ValueError("nft_path must name one executable")
+    table_name = _validate_nft_table_name(table_name_factory())
+    try:
+        runner(
+            [nft_path, "--check", "--file", "-"],
+            _dnat_batch(config, table_name, ownership),
+        )
+    except subprocess.CalledProcessError as error:
+        raise NftCompatibilityError(error) from error
 
 
 class NftDnatLease:
@@ -753,6 +1031,7 @@ def install_nft_dnat(
     nft_path: str = "nft",
     runner: NftRunner = _run_nft,
     table_name_factory: NameFactory = _new_nft_table_name,
+    ownership: NftOwnership | None = None,
 ) -> NftDnatLease:
     """Atomically install one exact-match DNAT table and own its deletion."""
 
@@ -765,6 +1044,291 @@ def install_nft_dnat(
     )
     runner(
         [nft_path, "--file", "-"],
-        _dnat_batch(config, table_name),
+        _dnat_batch(config, table_name, ownership),
     )
     return NftDnatLease(table_name, nft_path, runner)
+
+
+@dataclass(frozen=True)
+class HostNetworkConfig:
+    """Validated inputs for one complete server-ingress host transaction."""
+
+    requested_cc: str
+    tun: TunConfig
+    dnat: NftDnatConfig
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.requested_cc, str) or CC_NAME.fullmatch(
+            self.requested_cc
+        ) is None:
+            raise ValueError("requested_cc is not a supported algorithm name")
+        if not isinstance(self.tun, TunConfig):
+            raise TypeError("tun must be a TunConfig")
+        if not isinstance(self.dnat, NftDnatConfig):
+            raise TypeError("dnat must be an NftDnatConfig")
+        if self.dnat.target_address != self.tun.guest_address:
+            raise ValueError("DNAT target address must equal the TUN guest address")
+
+
+class HostPreflightError(RuntimeError):
+    """Required preflight checks failed before any resource acquisition."""
+
+    def __init__(self, report: PreflightReport) -> None:
+        self.report = report
+        failed = ", ".join(
+            check.check_id for check in report.checks if check.status == "fail"
+        )
+        super().__init__(f"host preflight failed: {failed}")
+
+
+class StaleOwnershipError(RuntimeError):
+    """Marked stale or malformed tables require explicit operator action."""
+
+    def __init__(self, report: NftOwnershipReport) -> None:
+        self.report = report
+        blocked = ", ".join(
+            f"{item.table_name}({item.status})"
+            for item in report.observations
+            if item.status != "active"
+        )
+        super().__init__(f"unsafe tcpcc nftables ownership state: {blocked}")
+
+
+class StartupRollbackError(RuntimeError):
+    """Preserve a primary startup error together with every rollback failure."""
+
+    def __init__(
+        self,
+        startup_error: BaseException,
+        cleanup_error: CleanupError,
+    ) -> None:
+        self.startup_error = startup_error
+        self.cleanup_error = cleanup_error
+        details = "; ".join(
+            f"{failure.label}: {type(failure.error).__name__}: {failure.error}"
+            for failure in cleanup_error.failures
+        )
+        super().__init__(
+            f"host-network startup failed ({type(startup_error).__name__}: "
+            f"{startup_error}) and rollback failed ({details})"
+        )
+
+
+class HostNetworkLease:
+    """The exact TUN and DNAT resources owned by one running instance."""
+
+    def __init__(
+        self,
+        *,
+        preflight: PreflightReport,
+        ownership: NftOwnershipReport,
+        tun: TunQueue,
+        dnat: NftDnatLease,
+        journal: OwnershipJournal,
+    ) -> None:
+        self.preflight = preflight
+        self.ownership = ownership
+        self.tun = tun
+        self.dnat = dnat
+        self._journal = journal
+
+    @property
+    def tun_name(self) -> str:
+        return self.tun.name
+
+    @property
+    def tun_fd(self) -> int:
+        return self.tun.fd
+
+    @property
+    def table_name(self) -> str:
+        return self.dnat.table_name
+
+    @property
+    def closed(self) -> bool:
+        return self._journal.closed
+
+    def close(self) -> None:
+        self._journal.close()
+
+
+def _rollback_unregistered_resource(
+    *,
+    journal: OwnershipJournal,
+    label: str,
+    callback: CleanupCallback,
+    startup_error: BaseException,
+) -> None:
+    failures: list[CleanupFailure] = []
+    try:
+        callback()
+    except BaseException as error:
+        failures.append(CleanupFailure(label, error))
+    try:
+        journal.close()
+    except CleanupError as error:
+        failures.extend(error.failures)
+    if failures:
+        cleanup_error = CleanupError(tuple(failures))
+        raise StartupRollbackError(startup_error, cleanup_error) from startup_error
+    raise startup_error
+
+
+def _register_resource(
+    journal: OwnershipJournal,
+    label: str,
+    callback: CleanupCallback,
+) -> None:
+    try:
+        journal.defer(label, callback)
+    except BaseException as error:
+        _rollback_unregistered_resource(
+            journal=journal,
+            label=label,
+            callback=callback,
+            startup_error=error,
+        )
+
+
+def acquire_host_network(
+    config: HostNetworkConfig,
+    *,
+    host_inspector: HostInspector | None = None,
+    nft_path: str = "nft",
+    preflight_collector: Callable[[str], PreflightReport] | None = None,
+    ownership_collector: Callable[[], NftOwnershipReport] | None = None,
+    compatibility_checker: Callable[[NftDnatConfig], None] | None = None,
+    tun_acquirer: Callable[[TunConfig], TunQueue] = create_tun_queue,
+    dnat_acquirer: Callable[
+        [NftDnatConfig, NftOwnership], NftDnatLease
+    ] | None = None,
+    identity_factory: Callable[[str], NftOwnership] = current_nft_ownership,
+    journal_factory: Callable[[], OwnershipJournal] = OwnershipJournal,
+) -> HostNetworkLease:
+    """Acquire preflight, stale scan, TUN, then DNAT as one transaction."""
+
+    if not isinstance(config, HostNetworkConfig):
+        raise TypeError("config must be a HostNetworkConfig")
+    if preflight_collector is None:
+        preflight_collector = lambda cc: collect_preflight(cc, host_inspector)
+    if ownership_collector is None:
+        ownership_collector = lambda: inspect_nft_ownership(nft_path=nft_path)
+    if compatibility_checker is None:
+        compatibility_checker = lambda dnat: check_nft_dnat_compatibility(
+            dnat,
+            nft_path=nft_path,
+            ownership=current_nft_ownership("tcpcc-probe"),
+        )
+    if dnat_acquirer is None:
+        dnat_acquirer = lambda dnat, owner: install_nft_dnat(
+            dnat,
+            nft_path=nft_path,
+            ownership=owner,
+        )
+
+    preflight = preflight_collector(config.requested_cc)
+    if not isinstance(preflight, PreflightReport):
+        raise TypeError("preflight_collector returned an invalid report")
+    if not preflight.ok:
+        raise HostPreflightError(preflight)
+    ownership = ownership_collector()
+    if not isinstance(ownership, NftOwnershipReport):
+        raise TypeError("ownership_collector returned an invalid report")
+    if ownership.blocking:
+        raise StaleOwnershipError(ownership)
+    compatibility_checker(config.dnat)
+
+    journal = journal_factory()
+    if not isinstance(journal, OwnershipJournal):
+        raise TypeError("journal_factory returned an invalid journal")
+    try:
+        tun = tun_acquirer(config.tun)
+        _register_resource(journal, f"tun:{tun.name}", tun.close)
+        owner = identity_factory(tun.name)
+        dnat = dnat_acquirer(config.dnat, owner)
+        _register_resource(journal, f"nft:{dnat.table_name}", dnat.close)
+    except StartupRollbackError:
+        raise
+    except BaseException as startup_error:
+        try:
+            journal.close()
+        except CleanupError as cleanup_error:
+            raise StartupRollbackError(
+                startup_error,
+                cleanup_error,
+            ) from startup_error
+        raise
+    return HostNetworkLease(
+        preflight=preflight,
+        ownership=ownership,
+        tun=tun,
+        dnat=dnat,
+        journal=journal,
+    )
+
+
+class ShutdownSignals:
+    """Turn SIGINT/SIGTERM into an orderly, idempotent shutdown request."""
+
+    def __init__(
+        self,
+        handled: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM),
+    ) -> None:
+        if not handled or len(set(handled)) != len(handled):
+            raise ValueError("handled signals must be a non-empty unique tuple")
+        self._handled = handled
+        self._event = threading.Event()
+        self._requested_signal: int | None = None
+        self._previous: dict[int, object] = {}
+        self._installed = False
+
+    @property
+    def requested(self) -> bool:
+        return self._event.is_set()
+
+    @property
+    def requested_signal(self) -> int | None:
+        return self._requested_signal
+
+    def request(self, signum: int) -> None:
+        if self._requested_signal is None:
+            self._requested_signal = signum
+        self._event.set()
+
+    def _handler(self, signum: int, _frame: object) -> None:
+        self.request(signum)
+
+    def __enter__(self) -> ShutdownSignals:
+        if self._installed:
+            raise RuntimeError("shutdown signal handlers are already installed")
+        installed: list[int] = []
+        try:
+            for signum in self._handled:
+                self._previous[signum] = signal.signal(signum, self._handler)
+                installed.append(signum)
+        except BaseException:
+            for signum in reversed(installed):
+                signal.signal(signum, self._previous[signum])
+            self._previous.clear()
+            raise
+        self._installed = True
+        return self
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._event.wait(timeout)
+
+    def restore(self) -> None:
+        if not self._installed:
+            return
+        for signum in reversed(self._handled):
+            signal.signal(signum, self._previous[signum])
+        self._previous.clear()
+        self._installed = False
+
+    def __exit__(
+        self,
+        _exc_type: object,
+        _exc_value: object,
+        _traceback: object,
+    ) -> None:
+        self.restore()
