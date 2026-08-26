@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/workflows/m8-host-lifecycle.yml'
       - 'docs/m8-server-ingress-design.md'
+      - 'scripts/test-tcpcc-composed-integration.py'
+      - 'scripts/test-tcpcc-composed-lifecycle.py'
       - 'scripts/test-tcpcc-host-preflight.py'
       - 'scripts/test-tcpcc-nft-integration.py'
       - 'scripts/test-tcpcc-nft-lifecycle.py'
@@ -31,6 +33,8 @@ jobs:
       - name: Validate host lifecycle sources
         run: |
           python3 -m py_compile tools/tcpcc_host.py
+          python3 -m py_compile scripts/test-tcpcc-composed-integration.py
+          python3 -m py_compile scripts/test-tcpcc-composed-lifecycle.py
           python3 -m py_compile scripts/test-tcpcc-host-preflight.py
           python3 -m py_compile scripts/test-tcpcc-nft-integration.py
           python3 -m py_compile scripts/test-tcpcc-nft-lifecycle.py
@@ -44,6 +48,9 @@ jobs:
 
       - name: Exercise exact DNAT lifecycle boundaries
         run: python3 scripts/test-tcpcc-nft-lifecycle.py
+
+      - name: Exercise composed lifecycle failure matrix
+        run: python3 scripts/test-tcpcc-composed-lifecycle.py
 
       - name: Prove nonpersistent TUN fd lifetime
         run: |
@@ -66,3 +73,8 @@ jobs:
           sudo -n modprobe nf_nat || true
           sudo -n modprobe nf_conntrack || true
           sudo -n python3 scripts/test-tcpcc-nft-integration.py --integration
+
+      - name: Prove rollback, signals, and stale ownership diagnostics
+        run: |
+          sudo -n python3 \
+            scripts/test-tcpcc-composed-integration.py --integration

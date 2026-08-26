@@ -74,7 +74,7 @@ problem from one run.
 | `cap.net_admin` | required | effective `CAP_NET_ADMIN` bit 12 |
 | `device.tun` | required | character device with read/write access |
 | `tool.ip` | required | iproute2 frontend on `PATH` |
-| `tool.nft` | required | nftables frontend on `PATH` |
+| `tool.nft` | required by the M8.3 transport | nftables frontend on `PATH` |
 | `sysctl.ipv4_forward` | required | `net.ipv4.ip_forward=1` |
 | `sysctl.tcp_congestion_control` | required | value equals the requested algorithm |
 | `sysctl.tcp_available_congestion_control` | required | requested algorithm is listed |
@@ -164,6 +164,77 @@ tuples, rejects an existing requested table, then proves reverse cleanup
 removes DNAT before TUN while an unrelated table remains byte-for-byte
 unchanged. Namespace-scoped test prerequisites are destroyed with the test;
 they are not product behavior.
+
+### Composed lifecycle and crash diagnostics
+
+The complete host transaction runs five boundaries in strict order:
+
+1. collect every read-only prerequisite result;
+2. list and classify marked tcpcc nftables rules without modifying them;
+3. ask nftables to dry-run the exact table, chain, rule, and ownership marker;
+4. create, configure, and immediately journal the nonpersistent TUN queue;
+5. create and immediately journal the exact DNAT table.
+
+A required preflight failure or unsafe ownership report stops before opening
+`/dev/net/tun`. Failure after TUN acquisition closes that queue. Failure while
+registering a newly acquired resource first closes the unregistered resource,
+then rolls back earlier journal entries. If rollback itself fails, tcpcc keeps
+the primary startup exception and reports every cleanup exception rather than
+masking one with another.
+
+The exact DNAT rule acquired by this composed path carries a versioned
+comment:
+
+```text
+tcpcc.owner.v1 pid=<pid> start=<proc-start-time> tun=<interface>
+```
+
+Rule comments are used instead of table comments because rule-comment support
+predates table-comment support and therefore keeps the host-kernel baseline
+lower. The read-only scan uses nftables JSON ruleset output and associates the
+marker with its containing table.
+
+The process start time from `/proc/<pid>/stat` distinguishes an active owner
+from PID reuse. At the next startup, a matching PID and start time is active
+and may belong to another running tcpcc instance. A missing/mismatched process
+is stale; an unsupported or invalid tcpcc marker is malformed. Stale and
+malformed markers block mutation and include the exact table plus an operator
+remediation. tcpcc never automatically deletes a discovered table. Unmarked
+tables—even similarly named ones—are outside this ownership protocol and are
+ignored.
+
+`SIGINT` and `SIGTERM` handlers only set an orderly-shutdown request. Normal
+control flow removes DNAT, closes the TUN fd, and restores the prior handlers;
+repeated requests and cleanup calls are harmless. `SIGKILL` cannot run
+userspace cleanup: the kernel still removes the nonpersistent TUN when the
+process fd closes, while the surviving marked nftables table is detected and
+reported at the next startup for explicit operator deletion.
+
+### Firewall backend boundary
+
+The lifecycle consumes a validated DNAT description and must not expose shell
+text as its public API. Following Docker's split between firewall policy and
+transport, the completed product has three independently tested paths:
+
+1. `nft-lib`: call `libnftables` in-process and submit one atomic batch;
+2. `nft-exec`: invoke `nft -f -` without a shell and pass the same batch on
+   standard input;
+3. `iptables`: use argv-only `iptables` plus `iptables-restore --noflush`
+   standard input for hosts that require the xtables compatibility path.
+
+The two nft transports share table naming, ownership markers, stale-resource
+classification, and rollback semantics. The iptables transport owns a unique
+user chain plus one exact jump from `nat/PREROUTING`; cleanup removes that jump
+before deleting the chain and never flushes a built-in or unrelated chain.
+`iptables-nft` and `iptables-legacy` are both exercised against that transport
+when the CI runner exposes them.
+
+CI must not treat the transports as interchangeable coverage. Every path has
+its own unit and privileged namespace matrix covering exact destination and
+port matching, successful reverse conntrack translation, existing-resource
+collision, rejected install rollback, orderly signal cleanup, stale ownership
+diagnosis, and preservation of unrelated firewall state. A path is not
+release-eligible merely because another path passes.
 
 Per-listener congestion control inside the hosted stack remains tcpcc's
 responsibility and is selected by `--cc`.
