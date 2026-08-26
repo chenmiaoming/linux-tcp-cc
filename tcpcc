@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""Repository launcher for the tcpcc server-ingress command."""
+
+import sys
+from pathlib import Path
+
+PREFIX = Path(__file__).resolve().parent.parent
+TOOL_CANDIDATES = (
+    Path(__file__).resolve().parent / "tools",
+    PREFIX / "lib" / "tcpcc",
+)
+TOOLS = next(
+    (directory for directory in TOOL_CANDIDATES if (directory / "tcpcc_cli.py").is_file()),
+    None,
+)
+if TOOLS is None:
+    raise SystemExit(
+        "tcpcc: error: tcpcc_cli.py was not found beside the repository "
+        "launcher or under PREFIX/lib/tcpcc"
+    )
+sys.path.insert(0, str(TOOLS))
+
+from tcpcc_cli import main  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

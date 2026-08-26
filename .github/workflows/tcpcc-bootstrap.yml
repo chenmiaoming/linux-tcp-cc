@@ -9,6 +9,7 @@ on:
       - '.github/workflows/tcpcc-link.yml'
       - 'benchmarks/m7/**'
       - 'linux-overlay/**'
+      - 'Makefile'
       - 'patches/**'
       - 'scripts/prepare-linux.sh'
       - 'scripts/validate-tcpcc-link.sh'
@@ -16,9 +17,16 @@ on:
       - 'scripts/validate-tcpcc-tun.sh'
       - 'scripts/validate-tcpcc-long-fat.sh'
       - 'scripts/run-tcpcc-control-test.py'
+      - 'scripts/run-tcpcc-runtime-test.py'
       - 'scripts/run-tcpcc-m6-diagnostic.py'
       - 'scripts/run-tcpcc-tun-test.py'
+      - 'scripts/test-tcpcc-cli.py'
+      - 'scripts/test-tcpcc-cli-integration.py'
       - 'scripts/collect-m7-hosted-report.py'
+      - 'tools/tcpcc_cli.py'
+      - 'tools/tcpcc_control.py'
+      - 'tools/tcpcc_host.py'
+      - 'tcpcc'
       - 'upstream/**'
       - 'protected/**'
   push:
@@ -56,16 +64,39 @@ jobs:
           bash -n scripts/validate-tcpcc-tun.sh
           bash -n scripts/validate-tcpcc-long-fat.sh
           python3 -m py_compile scripts/run-tcpcc-control-test.py
+          python3 -m py_compile scripts/run-tcpcc-runtime-test.py
           python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
           python3 -m py_compile scripts/run-tcpcc-tun-test.py
+          python3 -m py_compile scripts/test-tcpcc-cli.py
+          python3 -m py_compile scripts/test-tcpcc-cli-integration.py
           python3 -m py_compile scripts/collect-m7-hosted-report.py
+          python3 -m py_compile tools/tcpcc_cli.py
+          python3 -m py_compile tools/tcpcc_control.py
+          python3 -m py_compile tools/tcpcc_host.py
           python3 -m json.tool benchmarks/m7/scenarios-v1.json >/dev/null
+
+      - name: Exercise stable CLI and hosted runtime fault boundaries
+        run: python3 scripts/test-tcpcc-cli.py
 
       - name: Execute hosted M6.1 native BBR/default-fq regression
         run: bash scripts/validate-tcpcc-bootstrap.sh
 
       - name: Execute hosted M8.1 inbound TUN TCP milestone
         run: bash scripts/validate-tcpcc-tun.sh
+
+      - name: Execute M8.4 nonblocking accept and clean shutdown boundary
+        run: |
+          python3 scripts/run-tcpcc-runtime-test.py \
+            --kernel .build/tcpcc-bootstrap-out/vmlinux \
+            --boot-log .build/tcpcc-m84-runtime.log
+
+      - name: Stage the installed M8.4 command layout
+        run: |
+          make \
+            DESTDIR="$PWD/.build/m84-install-root" \
+            VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
+            install
+          .build/m84-install-root/usr/local/bin/tcpcc --help >/dev/null
 
       - name: Execute hosted M6.3 lossless delayed-path milestone
         run: bash scripts/validate-tcpcc-long-fat.sh
@@ -81,6 +112,13 @@ jobs:
             --qdisc-log .build/tcpcc-long-fat-qdisc.txt \
             --output .build/m7-hosted-lossless.json
           cat .build/m7-hosted-lossless.json
+
+      - name: Upload M8.4 hosted kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-m84-vmlinux
+          path: .build/tcpcc-bootstrap-out/vmlinux
+          if-no-files-found: error
 
       - name: Upload bootstrap diagnostics
         if: always()
@@ -102,6 +140,7 @@ jobs:
             .build/tcpcc-long-fat-tcp.log
             .build/tcpcc-long-fat-link.txt
             .build/tcpcc-long-fat-qdisc.txt
+            .build/tcpcc-m84-runtime.log
             .build/m7-hosted-lossless.json
             .build/tcpcc-vmlinux.program-headers
             .build/tcpcc-vmlinux.elf-header
@@ -110,4 +149,78 @@ jobs:
             .build/upstream.env
             .build/patches.sha256
             .build/overlay.sha256
+          if-no-files-found: warn
+
+  cli-ingress:
+    name: CLI ingress ${{ matrix.name }}
+    needs: start-kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: nft-lib
+            backend: nft-lib
+            iptables_variant: iptables
+          - name: nft-exec
+            backend: nft-exec
+            iptables_variant: iptables
+          - name: iptables-nft
+            backend: iptables
+            iptables_variant: iptables-nft
+          - name: iptables-legacy
+            backend: iptables
+            iptables_variant: iptables-legacy
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Download M8.4 hosted kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: tcpcc-m84-vmlinux
+          path: .build/tcpcc-bootstrap-out
+
+      - name: Install privileged ingress dependencies
+        run: |
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y \
+              iproute2 \
+              iptables \
+              libnftables1 \
+              nftables \
+              procps
+
+      - name: Load available TUN, BBR, NAT, and conntrack modules
+        run: |
+          sudo -n modprobe tun || true
+          sudo -n modprobe tcp_bbr || true
+          sudo -n modprobe nf_tables || true
+          sudo -n modprobe nf_nat || true
+          sudo -n modprobe nf_conntrack || true
+          sudo -n modprobe ip_tables || true
+          sudo -n modprobe iptable_nat || true
+          sudo -n modprobe xt_comment || true
+          test -c /dev/net/tun
+          command -v '${{ matrix.iptables_variant }}'
+          sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
+
+      - name: Prove public BBR ingress and orderly cleanup
+        run: |
+          sudo -n python3 scripts/test-tcpcc-cli-integration.py \
+            --integration \
+            --firewall-backend '${{ matrix.backend }}' \
+            --iptables-variant '${{ matrix.iptables_variant }}' \
+            --kernel .build/tcpcc-bootstrap-out/vmlinux \
+            --output-dir '.build/m8-cli-${{ matrix.name }}'
+
+      - name: Upload M8.4 ingress diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-m84-cli-${{ matrix.name }}
+          path: .build/m8-cli-${{ matrix.name }}
           if-no-files-found: warn

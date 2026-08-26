@@ -36,6 +36,48 @@ The initial roadmap is tracked in GitHub issues M0 through M8. Early milestones 
 M8's target product is a TUN-backed inbound server TCP front end, described in
 [`docs/m8-server-ingress-design.md`](docs/m8-server-ingress-design.md).
 
+## Server-ingress command
+
+Build and validate the hosted kernel, then install the command and its private
+Python modules under `/usr/local`:
+
+```bash
+bash ./scripts/validate-tcpcc-bootstrap.sh
+sudo make install
+```
+
+`VMLINUX=/path/to/vmlinux` and `PREFIX=/another/prefix` may be supplied to
+`make install`. From an uninstalled source checkout, use `sudo ./tcpcc` and
+either the default `.build/tcpcc-bootstrap-out/vmlinux` or `--kernel PATH`.
+
+Before startup, the operator must provide TUN, forwarding, and the requested
+host congestion-control prerequisite. tcpcc reports all missing prerequisites
+but does not change global sysctls:
+
+```bash
+sysctl net.ipv4.ip_forward
+sysctl net.ipv4.tcp_congestion_control
+sysctl net.ipv4.tcp_available_congestion_control
+```
+
+The stable server-facing command is:
+
+```bash
+sudo tcpcc \
+  --listen 203.0.113.10:443 \
+  --backend 127.0.0.1:443 \
+  --cc bbr
+```
+
+The public connection terminates in the hosted Linux stack using BBR; the
+ordinary loopback connection to the application is a separate stream bridge.
+`nft-lib` is the default packet-steering implementation. `nft-exec` and the
+`iptables-nft`/`iptables-legacy` compatibility paths are selected explicitly
+with `--firewall-backend` and `--iptables-variant`; an error never triggers a
+silent fallback. Readiness and shutdown are emitted as newline-delimited
+`tcpcc.runtime.v1` JSON on stdout. SIGINT and SIGTERM remove the owned firewall
+resource, stop the hosted kernel, and finally close the nonpersistent TUN.
+
 ## Fetch the pinned Linux source
 
 ```bash

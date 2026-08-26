@@ -18,6 +18,54 @@ accepted socket must inherit the requested algorithm. A separate ordinary host
 TCP connection carries the stream to the local backend; its congestion-control
 choice is outside tcpcc's public-side contract.
 
+### M8.4 command contract
+
+The repository launcher is `./tcpcc`. `sudo make install` installs the launcher
+as `PREFIX/bin/tcpcc`, its private modules under `PREFIX/lib/tcpcc`, and the
+validated hosted image as `PREFIX/libexec/tcpcc/vmlinux`. The default prefix is
+`/usr/local`; `VMLINUX` can select another already-built hosted image. An
+uninstalled checkout can instead pass `--kernel` or set `TCPCC_KERNEL`.
+
+The three product arguments are mandatory and strictly parsed before any host
+mutation. Addresses are literal IPv4, ports are 1-65535, and the current
+backend boundary deliberately accepts only `127.0.0.1`:
+
+```text
+--listen IPv4:PORT
+--backend 127.0.0.1:PORT
+--cc ALGORITHM
+```
+
+The default internal point-to-point endpoints are `198.18.0.1` on the host and
+`198.18.0.2/32` in the hosted stack. Advanced deployments can set
+`--tun-host-address`, `--tun-guest-address`, and `--tun-name`; those values are
+also validated before lifecycle acquisition. The hosted stack installs a
+device default route through `tcpcc0`, so return traffic for a public client
+outside this internal prefix still reaches the host TUN and conntrack reverse
+translation.
+
+`--firewall-backend` selects exactly one of `nft-lib`, `nft-exec`, or
+`iptables`; the default is `nft-lib`. The iptables transport additionally
+accepts `--iptables-variant=iptables`, `iptables-nft`, or `iptables-legacy` and
+uses the matching restore/save frontends. Selection is explicit and there is
+no automatic fallback after compatibility, startup, or runtime failure.
+
+The CLI launches the project-owned `ARCH=tcpcc` executable with only the owned
+TUN fd inherited. It attaches L3, creates a hosted listener, applies and reads
+back the requested `TCP_CONGESTION`, then uses nonblocking accept while at most
+eight asynchronous bridge sessions run. Every accepted child is read back to
+verify congestion-control inheritance before ownership transfers to the
+bridge.
+
+Stdout is newline-delimited JSON with schema `tcpcc.runtime.v1`. The `ready`
+record includes the exact public/backend endpoints, requested CC, TUN name,
+hosted ifindex/PID, and owned firewall resource. Connection records expose the
+verified accepted CC and terminal byte counts. Human diagnostics and hosted
+kernel logs use stderr. SIGINT/SIGTERM first close the hosted listener, cancel
+and reap bridge sessions, request a clean hosted exit, then remove DNAT and
+finally close the nonpersistent TUN fd. Startup and runtime failures are
+nonzero and still attempt every owned cleanup boundary.
+
 ## Data path
 
 ```text

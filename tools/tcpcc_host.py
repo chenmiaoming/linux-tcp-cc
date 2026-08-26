@@ -295,13 +295,19 @@ def _tun_device(inspector: HostInspector) -> CheckResult:
     )
 
 
-def _tool(inspector: HostInspector, name: str, remediation: str) -> CheckResult:
+def _tool(
+    inspector: HostInspector,
+    name: str,
+    remediation: str,
+    *,
+    check_name: str | None = None,
+) -> CheckResult:
     try:
         resolved = inspector.resolver(name)
     except OSError:
         resolved = None
     return _check(
-        f"tool.{name}",
+        f"tool.{check_name or name}",
         resolved is not None,
         "required",
         resolved or "missing",
@@ -381,6 +387,10 @@ def collect_preflight(
     inspector: HostInspector | None = None,
     *,
     firewall_backend: str = "nft-exec",
+    nft_path: str = "nft",
+    iptables_path: str = "iptables",
+    iptables_restore_path: str = "iptables-restore",
+    iptables_save_path: str = "iptables-save",
 ) -> PreflightReport:
     """Collect every prerequisite without mutating the inspected host."""
 
@@ -406,8 +416,9 @@ def collect_preflight(
         firewall_checks = (
             _tool(
                 inspector,
-                "nft",
-                "install nftables and expose the nft executable on PATH",
+                nft_path,
+                f"install nftables and expose {nft_path} on PATH",
+                check_name="nft",
             ),
         )
     elif firewall_backend == "nft-lib":
@@ -422,10 +433,15 @@ def collect_preflight(
         firewall_checks = tuple(
             _tool(
                 inspector,
-                tool,
-                f"install iptables and expose the {tool} executable on PATH",
+                command,
+                f"install iptables and expose {command} on PATH",
+                check_name=check_name,
             )
-            for tool in ("iptables", "iptables-restore", "iptables-save")
+            for command, check_name in (
+                (iptables_path, "iptables"),
+                (iptables_restore_path, "iptables-restore"),
+                (iptables_save_path, "iptables-save"),
+            )
         )
     else:
         raise ValueError(
@@ -2125,6 +2141,10 @@ def acquire_host_network(
             cc,
             host_inspector,
             firewall_backend=config.firewall_backend,
+            nft_path=nft_path,
+            iptables_path=iptables_path,
+            iptables_restore_path=iptables_restore_path,
+            iptables_save_path=iptables_save_path,
         )
     if (
         ownership_collector is None
