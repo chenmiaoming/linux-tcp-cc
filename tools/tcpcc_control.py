@@ -37,6 +37,7 @@ OP_BRIDGE_CANCEL = 18
 OP_ACCEPT_NONBLOCK = 19
 OP_SHUTDOWN = 20
 OP_BRIDGE_JOIN_RESULT = 21
+OP_HELLO = 22
 
 OP_NAMES = {
     OP_SOCKET: "socket",
@@ -60,6 +61,7 @@ OP_NAMES = {
     OP_ACCEPT_NONBLOCK: "accept-nonblock",
     OP_SHUTDOWN: "shutdown",
     OP_BRIDGE_JOIN_RESULT: "bridge-join-result",
+    OP_HELLO: "hello",
 }
 
 REQUEST = struct.Struct("<IHHiIII256s")

@@ -3,6 +3,7 @@
 #define _ASM_TCPCC_BRIDGE_H
 
 #include <linux/types.h>
+#include <asm/tcpcc_control_abi.h>
 
 /* Eight sessions x two 16 KiB directions: 256 KiB of fixed data storage. */
 #define TCPCC_BRIDGE_SESSION_LIMIT       8U
@@ -20,21 +21,6 @@
 #define TCPCC_BRIDGE_HANDLE_GENERATION_MASK 0x07ffffffU
 
 struct socket;
-
-struct tcpcc_bridge_result {
-	u64 token;
-	u64 public_to_backend_bytes;
-	u64 backend_to_public_bytes;
-	u32 buffer_limit;
-	u32 total_buffer_limit;
-	u32 terminal_events;
-	u32 host_send_eagain;
-	u32 host_partial_writes;
-	u32 host_recv_eagain;
-	u32 session_limit;
-	s32 status;
-	u32 reserved[2];
-};
 
 int tcpcc_bridge_start(struct socket *public_sock, __be32 backend_address,
 		       __be16 backend_port, int *handle);

@@ -15,17 +15,16 @@
 #include <linux/sockptr.h>
 #include <linux/string.h>
 #include <linux/uio.h>
+#include <linux/utsname.h>
 #include <net/net_namespace.h>
 #include <net/tcp.h>
 #include <asm/bridge.h>
 #include <asm/host.h>
 #include <asm/l3net.h>
+#include <asm/tcpcc_control_abi.h>
 
 #define TCPCC_CONTROL_IRQ          2
-#define TCPCC_CONTROL_MAGIC        0x32434354U /* "TCC2" on x86-64 */
-#define TCPCC_CONTROL_VERSION      1
 #define TCPCC_CONTROL_MAX_SOCKETS  16
-#define TCPCC_CONTROL_MAX_PAYLOAD  256
 #define TCPCC_CONTROL_HOST_BACKEND_BYTES 192
 #define TCPCC_CONTROL_HOST_BACKEND_TIMEOUT_MS 3000
 #define TCPCC_CONTROL_HOST_BACKEND_SLOT 1U
@@ -43,84 +42,6 @@
  * raises a virtual IRQ; all socket and device-control work runs in a Linux
  * kthread and may sleep normally.
  */
-enum tcpcc_control_op {
-	TCPCC_CONTROL_SOCKET = 1,
-	TCPCC_CONTROL_BIND,
-	TCPCC_CONTROL_LISTEN,
-	TCPCC_CONTROL_CONNECT,
-	TCPCC_CONTROL_ACCEPT,
-	TCPCC_CONTROL_WRITE,
-	TCPCC_CONTROL_READ,
-	TCPCC_CONTROL_CLOSE,
-	TCPCC_CONTROL_SET_CC,
-	TCPCC_CONTROL_GET_CC,
-	TCPCC_CONTROL_FINISH,
-	TCPCC_CONTROL_L3_ATTACH,
-	TCPCC_CONTROL_L3_STATS,
-	TCPCC_CONTROL_TCP_INFO,
-	TCPCC_CONTROL_HOST_BACKEND_PROBE,
-	TCPCC_CONTROL_BRIDGE_START,
-	TCPCC_CONTROL_BRIDGE_JOIN,
-	TCPCC_CONTROL_BRIDGE_CANCEL,
-	TCPCC_CONTROL_ACCEPT_NONBLOCK,
-	TCPCC_CONTROL_SHUTDOWN,
-	TCPCC_CONTROL_BRIDGE_JOIN_RESULT,
-};
-
-struct tcpcc_control_request {
-	u32 magic;
-	u16 version;
-	u16 op;
-	s32 handle;
-	u32 arg0;
-	u32 arg1;
-	u32 length;
-	u8 data[TCPCC_CONTROL_MAX_PAYLOAD];
-};
-
-struct tcpcc_control_response {
-	u32 magic;
-	u16 version;
-	u16 op;
-	s32 status;
-	s32 handle;
-	u32 length;
-	u8 data[TCPCC_CONTROL_MAX_PAYLOAD];
-};
-
-/*
- * Stable project-side subset of Linux struct tcp_info. Keep this independent
- * of the UAPI struct's future growth so the version-1 control record remains
- * fixed at 64 bytes for the x86-64 hosted test ABI.
- */
-struct tcpcc_control_tcp_info {
-	u8 state;
-	u8 ca_state;
-	u16 reserved;
-	u32 rto_us;
-	u32 rtt_us;
-	u32 rttvar_us;
-	u32 snd_cwnd;
-	u32 snd_ssthresh;
-	u32 unacked;
-	u32 lost;
-	u32 retrans;
-	u32 total_retrans;
-	u64 pacing_rate;
-	u64 max_pacing_rate;
-	u64 delivery_rate;
-};
-
-struct tcpcc_control_host_backend_result {
-	u64 token;
-	s32 connect_status;
-	u32 connect_events;
-	u32 terminal_events;
-	u32 tx_bytes;
-	u32 rx_bytes;
-	u32 reserved;
-};
-
 static struct socket *tcpcc_control_sockets[TCPCC_CONTROL_MAX_SOCKETS];
 static struct completion tcpcc_control_request_ready;
 static struct completion tcpcc_control_finished;
@@ -882,6 +803,29 @@ static int tcpcc_control_l3_stats(struct tcpcc_control_response *response)
 	return 0;
 }
 
+static int tcpcc_control_hello(const struct tcpcc_control_request *request,
+			       struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_hello hello = {
+		.control_version = TCPCC_CONTROL_VERSION,
+		.feature_bits = TCPCC_CONTROL_FEATURE_BRIDGE_RESULT,
+		.session_limit = TCPCC_BRIDGE_SESSION_LIMIT,
+		.bridge_buffer_limit = TCPCC_BRIDGE_BUFFER_LIMIT,
+		.bridge_total_buffer_limit = TCPCC_BRIDGE_TOTAL_BUFFER_LIMIT,
+	};
+
+	BUILD_BUG_ON(sizeof(hello) != 88);
+	BUILD_BUG_ON(sizeof(hello) > TCPCC_CONTROL_MAX_PAYLOAD);
+	if (request->handle || request->arg0 || request->arg1 || request->length)
+		return -EINVAL;
+
+	strscpy(hello.linux_release, init_uts_ns.name.release,
+		sizeof(hello.linux_release));
+	memcpy(response->data, &hello, sizeof(hello));
+	response->length = sizeof(hello);
+	return 0;
+}
+
 static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 				 struct tcpcc_control_response *response)
 {
@@ -928,6 +872,8 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_shutdown(request);
 	case TCPCC_CONTROL_BRIDGE_JOIN_RESULT:
 		return tcpcc_control_bridge_join_result(request, response);
+	case TCPCC_CONTROL_HELLO:
+		return tcpcc_control_hello(request, response);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -1001,6 +947,12 @@ static int __init tcpcc_control_selftest(void)
 {
 	struct tcpcc_l3_stats l3_stats = { };
 	int ret;
+
+	BUILD_BUG_ON(sizeof(struct tcpcc_control_request) != 280);
+	BUILD_BUG_ON(sizeof(struct tcpcc_control_response) != 276);
+	BUILD_BUG_ON(sizeof(struct tcpcc_control_tcp_info) != 64);
+	BUILD_BUG_ON(sizeof(struct tcpcc_control_host_backend_result) != 32);
+	BUILD_BUG_ON(sizeof(struct tcpcc_bridge_result) != 64);
 
 	init_completion(&tcpcc_control_request_ready);
 	init_completion(&tcpcc_control_finished);
