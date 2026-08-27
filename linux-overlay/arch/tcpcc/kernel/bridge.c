@@ -12,6 +12,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uio.h>
+#include <linux/wait.h>
 #include <net/sock.h>
 #include <asm/bridge.h>
 #include <asm/host.h>
@@ -71,7 +72,8 @@ struct tcpcc_bridge_manager {
 	bool dispatcher_stopping;
 	int dispatcher_status;
 	unsigned int active_sessions;
-	struct completion dispatcher_work;
+	wait_queue_head_t dispatcher_wait;
+	atomic_t dispatcher_pending;
 	struct task_struct *dispatcher_task;
 	void (*completion_notify)(void *);
 	void *completion_notify_data;
@@ -107,13 +109,15 @@ static void tcpcc_bridge_manager_init(void)
 		spin_lock_init(&tcpcc_bridge_manager.sessions[index].lock);
 		tcpcc_bridge_manager.sessions[index].host_fd = -1;
 	}
-	init_completion(&tcpcc_bridge_manager.dispatcher_work);
+	init_waitqueue_head(&tcpcc_bridge_manager.dispatcher_wait);
+	atomic_set(&tcpcc_bridge_manager.dispatcher_pending, 0);
 	tcpcc_bridge_manager.initialized = true;
 }
 
 static void tcpcc_bridge_dispatcher_wake(void *unused)
 {
-	complete(&tcpcc_bridge_manager.dispatcher_work);
+	atomic_set(&tcpcc_bridge_manager.dispatcher_pending, 1);
+	wake_up(&tcpcc_bridge_manager.dispatcher_wait);
 }
 
 static void tcpcc_bridge_mark_public_ready(
@@ -684,7 +688,11 @@ static int tcpcc_bridge_dispatcher_thread(void *unused)
 	for (;;) {
 		unsigned int index;
 
-		wait_for_completion(&tcpcc_bridge_manager.dispatcher_work);
+		wait_event(tcpcc_bridge_manager.dispatcher_wait,
+			   atomic_xchg(&tcpcc_bridge_manager.dispatcher_pending,
+				       0) ||
+			   kthread_should_stop() ||
+			   READ_ONCE(tcpcc_bridge_manager.dispatcher_stopping));
 		if (kthread_should_stop() ||
 		    READ_ONCE(tcpcc_bridge_manager.dispatcher_stopping))
 			break;
@@ -717,7 +725,7 @@ static int tcpcc_bridge_start_dispatcher(void)
 
 	tcpcc_bridge_manager.dispatcher_stopping = false;
 	tcpcc_bridge_manager.dispatcher_status = 0;
-	reinit_completion(&tcpcc_bridge_manager.dispatcher_work);
+	atomic_set(&tcpcc_bridge_manager.dispatcher_pending, 0);
 	status = tcpcc_host_runtime_event_set_notifier(
 		tcpcc_bridge_dispatcher_wake, &tcpcc_bridge_manager);
 	if (status)
