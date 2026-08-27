@@ -24,6 +24,7 @@ from tcpcc_cli import (  # noqa: E402
     BRIDGE_BUFFER_LIMIT,
     BRIDGE_SESSION_LIMIT,
     BRIDGE_TOTAL_BUFFER_LIMIT,
+    DEFAULT_MAX_CONNECTIONS,
     ELF_HEADER,
     ELF_PROGRAM_HEADER,
     EM_X86_64,
@@ -305,7 +306,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(config.cc, "bbr")
         self.assertEqual(config.kernel, self.kernel.resolve())
         self.assertEqual(config.firewall_backend, "nft-lib")
-        self.assertEqual(config.max_connections, BRIDGE_SESSION_LIMIT)
+        self.assertEqual(config.max_connections, DEFAULT_MAX_CONNECTIONS)
         self.assertEqual(config.shutdown_grace_period, 5.0)
 
     def test_runtime_limits_are_explicit_and_bounded(self) -> None:
@@ -322,7 +323,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(config.shutdown_grace_period, 1.25)
 
         for arguments, message in (
-            (("--max-connections", "9"), "max connections"),
+            (("--max-connections", "4096"), "max connections"),
             (("--shutdown-grace-period", "-1"), "grace period"),
         ):
             with self.subTest(arguments=arguments):

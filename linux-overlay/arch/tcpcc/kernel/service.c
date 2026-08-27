@@ -6,15 +6,22 @@
 #include <linux/in.h>
 #include <linux/jiffies.h>
 #include <linux/kthread.h>
+#include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/net.h>
 #include <linux/printk.h>
 #include <linux/sched/task.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
 #include <asm/bridge.h>
 #include <asm/service.h>
+
+struct tcpcc_service_bridge {
+	struct list_head node;
+	int handle;
+};
 
 struct tcpcc_service_manager {
 	bool allocated;
@@ -29,7 +36,7 @@ struct tcpcc_service_manager {
 	struct completion stopped;
 	struct tcpcc_control_service_config config;
 	struct tcpcc_control_service_stats stats;
-	int bridge_handles[TCPCC_BRIDGE_SESSION_LIMIT];
+	struct list_head bridges;
 };
 
 static DEFINE_MUTEX(tcpcc_service_lock);
@@ -113,60 +120,41 @@ static void tcpcc_service_detach_accepted_callback(struct socket *public_sock)
 	write_unlock_bh(&sk->sk_callback_lock);
 }
 
-static int tcpcc_service_find_free_handle_slot(void)
-{
-	unsigned int index;
-
-	for (index = 0; index < TCPCC_BRIDGE_SESSION_LIMIT; index++) {
-		if (!tcpcc_service.bridge_handles[index])
-			return (int)index;
-	}
-	return -ENOSPC;
-}
-
 static bool tcpcc_service_reap(void)
 {
+	struct tcpcc_service_bridge *bridge;
+	struct tcpcc_service_bridge *next;
 	bool progress = false;
-	unsigned int index;
 
-	for (index = 0; index < TCPCC_BRIDGE_SESSION_LIMIT; index++) {
+	list_for_each_entry_safe(bridge, next, &tcpcc_service.bridges, node) {
 		struct tcpcc_bridge_result result;
-		int handle;
 		int ret;
 
-		mutex_lock(&tcpcc_service_lock);
-		handle = tcpcc_service.bridge_handles[index];
-		mutex_unlock(&tcpcc_service_lock);
-		if (!handle)
-			continue;
-
-		ret = tcpcc_bridge_try_join_result(handle, &result);
+		ret = tcpcc_bridge_try_join_result(bridge->handle, &result);
 		if (ret == -EAGAIN)
 			continue;
 
 		mutex_lock(&tcpcc_service_lock);
-		if (tcpcc_service.bridge_handles[index] == handle) {
-			tcpcc_service.bridge_handles[index] = 0;
-			if (tcpcc_service.stats.active_connections)
-				tcpcc_service.stats.active_connections--;
-			tcpcc_service.stats.completed_connections++;
-			if (ret) {
+		list_del(&bridge->node);
+		if (tcpcc_service.stats.active_connections)
+			tcpcc_service.stats.active_connections--;
+		tcpcc_service.stats.completed_connections++;
+		if (ret) {
+			tcpcc_service.stats.terminal_failures++;
+			tcpcc_service.stats.last_error = ret;
+		} else {
+			tcpcc_service.stats.public_to_backend_bytes +=
+				result.public_to_backend_bytes;
+			tcpcc_service.stats.backend_to_public_bytes +=
+				result.backend_to_public_bytes;
+			if (result.status) {
 				tcpcc_service.stats.terminal_failures++;
-				tcpcc_service.stats.last_error = ret;
-			} else {
-				tcpcc_service.stats.public_to_backend_bytes +=
-					result.public_to_backend_bytes;
-				tcpcc_service.stats.backend_to_public_bytes +=
-					result.backend_to_public_bytes;
-				if (result.status) {
-					tcpcc_service.stats.terminal_failures++;
-					tcpcc_service.stats.last_error =
-						result.status;
-				}
+				tcpcc_service.stats.last_error = result.status;
 			}
-			progress = true;
 		}
 		mutex_unlock(&tcpcc_service_lock);
+		kfree(bridge);
+		progress = true;
 	}
 	return progress;
 }
@@ -193,10 +181,10 @@ static bool tcpcc_service_accept_batch(void)
 	bool progress = false;
 
 	while (accepted < tcpcc_service.config.accept_batch) {
+		struct tcpcc_service_bridge *bridge;
 		struct socket *public_sock;
 		bool cancel = false;
 		int bridge_handle;
-		int slot;
 		int ret;
 
 		mutex_lock(&tcpcc_service_lock);
@@ -223,11 +211,24 @@ static bool tcpcc_service_accept_batch(void)
 		accepted++;
 		progress = true;
 		tcpcc_service_detach_accepted_callback(public_sock);
+		bridge = kzalloc(sizeof(*bridge), GFP_KERNEL);
+		if (!bridge) {
+			kernel_sock_shutdown(public_sock, SHUT_RDWR);
+			sock_release(public_sock);
+			mutex_lock(&tcpcc_service_lock);
+			tcpcc_service.stats.rejected_connections++;
+			tcpcc_service.stats.bridge_start_failures++;
+			tcpcc_service.stats.last_error = -ENOMEM;
+			mutex_unlock(&tcpcc_service_lock);
+			continue;
+		}
+		INIT_LIST_HEAD(&bridge->node);
 
 		ret = tcpcc_bridge_start(
 			public_sock, htonl(tcpcc_service.config.backend_ipv4),
 			htons(tcpcc_service.config.backend_port), &bridge_handle);
 		if (ret) {
+			kfree(bridge);
 			kernel_sock_shutdown(public_sock, SHUT_RDWR);
 			sock_release(public_sock);
 			mutex_lock(&tcpcc_service_lock);
@@ -239,22 +240,15 @@ static bool tcpcc_service_accept_batch(void)
 		}
 
 		mutex_lock(&tcpcc_service_lock);
-		slot = tcpcc_service_find_free_handle_slot();
-		if (slot >= 0) {
-			tcpcc_service.bridge_handles[slot] = bridge_handle;
-			tcpcc_service.stats.accepted_connections++;
-			tcpcc_service.stats.active_connections++;
-			if (tcpcc_service.stats.active_connections >
-			    tcpcc_service.stats.peak_connections)
-				tcpcc_service.stats.peak_connections =
-					tcpcc_service.stats.active_connections;
-			cancel = tcpcc_service.stopping;
-		} else {
-			tcpcc_service.stats.rejected_connections++;
-			tcpcc_service.stats.bridge_start_failures++;
-			tcpcc_service.stats.last_error = slot;
-			cancel = true;
-		}
+		bridge->handle = bridge_handle;
+		list_add_tail(&bridge->node, &tcpcc_service.bridges);
+		tcpcc_service.stats.accepted_connections++;
+		tcpcc_service.stats.active_connections++;
+		if (tcpcc_service.stats.active_connections >
+		    tcpcc_service.stats.peak_connections)
+			tcpcc_service.stats.peak_connections =
+				tcpcc_service.stats.active_connections;
+		cancel = tcpcc_service.stopping;
 		mutex_unlock(&tcpcc_service_lock);
 		if (cancel)
 			tcpcc_bridge_cancel_session(bridge_handle);
@@ -301,8 +295,7 @@ static void tcpcc_service_reset_start(
 			struct socket *listener)
 {
 	memset(&tcpcc_service.stats, 0, sizeof(tcpcc_service.stats));
-	memset(tcpcc_service.bridge_handles, 0,
-	       sizeof(tcpcc_service.bridge_handles));
+	INIT_LIST_HEAD(&tcpcc_service.bridges);
 	init_completion(&tcpcc_service.work_ready);
 	init_completion(&tcpcc_service.drained);
 	init_completion(&tcpcc_service.stopped);
@@ -423,16 +416,12 @@ int tcpcc_service_drain(int handle, unsigned long timeout,
 
 static void tcpcc_service_cancel_bridges(void)
 {
-	int handles[TCPCC_BRIDGE_SESSION_LIMIT];
-	unsigned int index;
+	struct tcpcc_service_bridge *bridge;
 
 	mutex_lock(&tcpcc_service_lock);
-	memcpy(handles, tcpcc_service.bridge_handles, sizeof(handles));
+	list_for_each_entry(bridge, &tcpcc_service.bridges, node)
+		tcpcc_bridge_cancel_session(bridge->handle);
 	mutex_unlock(&tcpcc_service_lock);
-	for (index = 0; index < TCPCC_BRIDGE_SESSION_LIMIT; index++) {
-		if (handles[index])
-			tcpcc_bridge_cancel_session(handles[index]);
-	}
 }
 
 int tcpcc_service_stop(int handle, unsigned long timeout,

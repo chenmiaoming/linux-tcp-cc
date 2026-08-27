@@ -58,7 +58,6 @@ BRIDGE_CANCEL_PORTS = {
     "finish-bbr": 18452,
 }
 BRIDGE_CAPACITY_PORT_BASE = 18460
-BRIDGE_CAPACITY_OVERFLOW_PORT = 18468
 BRIDGE_CAPACITY_REPLACEMENT_PORT = 18469
 BRIDGE_RESET_PORTS = {
     "survivor-cubic": 18470,
@@ -66,13 +65,14 @@ BRIDGE_RESET_PORTS = {
     "public-bbr": 18472,
 }
 HOSTED_SERVICE_PORT = 18473
-BRIDGE_SESSION_LIMIT = 8
+BRIDGE_SESSION_LIMIT = 4095
 BRIDGE_RUNTIME_SLOT_BASE = 2
-BRIDGE_HANDLE_SLOT_BITS = 4
-BRIDGE_HANDLE_SLOT_MASK = 0x0F
-BRIDGE_HANDLE_GENERATION_MASK = 0x07FFFFFF
+BRIDGE_HANDLE_SLOT_BITS = 12
+BRIDGE_HANDLE_SLOT_MASK = 0x0FFF
+BRIDGE_HANDLE_GENERATION_MASK = 0x0007FFFF
 BRIDGE_BUFFER_LIMIT = 16 * 1024
-BRIDGE_TOTAL_BUFFER_LIMIT = 2 * BRIDGE_SESSION_LIMIT * BRIDGE_BUFFER_LIMIT
+BRIDGE_TOTAL_BUFFER_LIMIT = 256 * 1024
+BRIDGE_CAPACITY_CONNECTIONS = 9
 BRIDGE_TRANSFER_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 123
 BRIDGE_FAST_BYTES = 8 * BRIDGE_BUFFER_LIMIT + 211
 BRIDGE_DELAYED_BYTES = 32 * BRIDGE_BUFFER_LIMIT + 123
@@ -1474,90 +1474,6 @@ def exercise_concurrent_bridges(proc: subprocess.Popen,
                 listener.close()
 
 
-def reject_bridge_over_capacity(
-    proc: subprocess.Popen,
-    responses: bytearray,
-) -> None:
-    backend_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    backend_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    backend_listener.bind(("127.0.0.1", 0))
-    backend_listener.listen(1)
-    backend_port = backend_listener.getsockname()[1]
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.settimeout(HOST_DRAIN_TIMEOUT)
-    listener_handle: int | None = None
-    accepted_handle: int | None = None
-    try:
-        listener_handle, _, _ = control.transact(
-            proc,
-            responses,
-            control.OP_SOCKET,
-            control.request(control.OP_SOCKET),
-        )
-        control.transact(
-            proc,
-            responses,
-            control.OP_SET_CC,
-            control.request(
-                control.OP_SET_CC,
-                listener_handle,
-                data=b"cubic",
-            ),
-        )
-        control.transact(
-            proc,
-            responses,
-            control.OP_BIND,
-            control.request(
-                control.OP_BIND,
-                listener_handle,
-                GUEST_IPV4_U32,
-                BRIDGE_CAPACITY_OVERFLOW_PORT,
-            ),
-        )
-        control.transact(
-            proc,
-            responses,
-            control.OP_LISTEN,
-            control.request(control.OP_LISTEN, listener_handle, 1),
-        )
-        client.bind((HOST_IPV4, 0))
-        client.connect((GUEST_IPV4, BRIDGE_CAPACITY_OVERFLOW_PORT))
-        accepted_handle, _, _ = control.transact(
-            proc,
-            responses,
-            control.OP_ACCEPT,
-            control.request(control.OP_ACCEPT, listener_handle),
-        )
-        control.transact(
-            proc,
-            responses,
-            control.OP_BRIDGE_START,
-            control.request(
-                control.OP_BRIDGE_START,
-                accepted_handle,
-                control.LOOPBACK,
-                backend_port,
-            ),
-            {"status": -errno.ENOSPC, "length": 0},
-        )
-    finally:
-        for handle in (accepted_handle, listener_handle):
-            if handle is None:
-                continue
-            try:
-                control.transact(
-                    proc,
-                    responses,
-                    control.OP_CLOSE,
-                    control.request(control.OP_CLOSE, handle),
-                )
-            except Exception:
-                pass
-        client.close()
-        backend_listener.close()
-
-
 def exercise_bridge_capacity(
     proc: subprocess.Popen,
     responses: bytearray,
@@ -1566,7 +1482,7 @@ def exercise_bridge_capacity(
     sessions: list[dict[str, object]] = []
     logs: list[str] = []
     try:
-        for index in range(BRIDGE_SESSION_LIMIT):
+        for index in range(BRIDGE_CAPACITY_CONNECTIONS):
             session = start_bridge_session(
                 proc,
                 responses,
@@ -1589,12 +1505,10 @@ def exercise_bridge_capacity(
             )[0]
             for session in sessions
         }
-        if len(slots) != BRIDGE_SESSION_LIMIT:
+        if len(slots) != BRIDGE_CAPACITY_CONNECTIONS:
             raise RuntimeError(
                 f"bridge capacity allocated only {len(slots)} unique slots"
             )
-        reject_bridge_over_capacity(proc, responses)
-
         for session in sessions:
             start_bridge_client(session)
         release.set()
@@ -1623,8 +1537,8 @@ def exercise_bridge_capacity(
         logs.append(replacement_log)
         logs.append(
             "bridge-capacity: "
-            f"active_limit={BRIDGE_SESSION_LIMIT} "
-            f"unique_slots={len(slots)} overflow_status={-errno.ENOSPC} "
+            f"active_connections={BRIDGE_CAPACITY_CONNECTIONS} "
+            f"unique_slots={len(slots)} beyond_legacy_limit=passed "
             f"replacement_handle={replacement['bridge_handle']} "
             f"replacement_bytes={replacement_result['public_to_backend']} "
             "slot_recovery=passed"

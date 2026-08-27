@@ -48,6 +48,7 @@ enum tcpcc_control_op {
 /* Capabilities returned by TCPCC_CONTROL_HELLO. */
 #define TCPCC_CONTROL_FEATURE_BRIDGE_RESULT (1U << 0)
 #define TCPCC_CONTROL_FEATURE_HOSTED_SERVICE (1U << 1)
+#define TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS (1U << 2)
 
 struct tcpcc_control_request {
 	__u32 magic;
