@@ -149,6 +149,28 @@ The existing generation-tagged eight-slot table and fixed buffers remain in
 this gate. That deliberately keeps capacity allocation out of the data-plane
 rewrite: existing reset isolation, half-close, backpressure, long-stream,
 concurrent cancellation, lossless parity, and high-BDP CI checks can first
-prove that the event state machine preserves M8 behavior. M9.4 will replace
-the table and eager buffers with dynamic flows before adding connection-scale
-pressure tests.
+prove that the event state machine preserves M8 behavior.
+
+## M9.4 dynamic flows and bounded buffers
+
+M9.4 replaces both remaining fixed-capacity structures. Bridge slots are
+allocated as the historical connection peak grows and retain their generation
+after a flow is reaped, while active flow objects and hosted-service tracking
+nodes exist only for live connections. The twelve-bit slot field provides an
+encoding ceiling of 4095 simultaneous flows; it is not the supported default.
+The CLI default remains eight until capacity CI establishes a conservative
+value.
+
+The dispatcher consumes a deduplicated ready-flow queue instead of scanning
+the encoding range or every idle connection. Each direction obtains its
+16-KiB payload buffer only after source readiness and releases it after the
+edge has been drained to `EAGAIN`, EOF, or a terminal condition. All flows
+share a 256-KiB aggregate buffer budget. A flow that cannot reserve a buffer
+stops reading its source and is requeued when another direction releases
+budget, allowing TCP flow control to provide bounded backpressure.
+
+The first M9.4 CI gate holds nine flows concurrently, proving that eight is no
+longer a bridge limit while preserving generation reuse, reset isolation,
+half-close, backpressure, and signal-drain coverage. Larger idle/active/slow-
+peer discovery belongs to M9.6 and selects the supported default from measured
+CPU and memory behavior rather than from the 4095-handle encoding ceiling.

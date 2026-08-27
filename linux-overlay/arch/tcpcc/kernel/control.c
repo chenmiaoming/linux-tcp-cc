@@ -821,7 +821,8 @@ static int tcpcc_control_hello(const struct tcpcc_control_request *request,
 	struct tcpcc_control_hello hello = {
 		.control_version = TCPCC_CONTROL_VERSION,
 		.feature_bits = TCPCC_CONTROL_FEATURE_BRIDGE_RESULT |
-				TCPCC_CONTROL_FEATURE_HOSTED_SERVICE,
+				TCPCC_CONTROL_FEATURE_HOSTED_SERVICE |
+				TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS,
 		.session_limit = TCPCC_BRIDGE_SESSION_LIMIT,
 		.bridge_buffer_limit = TCPCC_BRIDGE_BUFFER_LIMIT,
 		.bridge_total_buffer_limit = TCPCC_BRIDGE_TOTAL_BUFFER_LIMIT,

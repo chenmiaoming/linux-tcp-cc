@@ -58,12 +58,12 @@ DEFAULT_TUN_PREFIX = 32
 DEFAULT_BACKLOG = 128
 DEFAULT_POLL_INTERVAL = 0.01
 DEFAULT_KERNEL_SHUTDOWN_TIMEOUT = 10.0
-BRIDGE_SESSION_LIMIT = 8
-DEFAULT_MAX_CONNECTIONS = BRIDGE_SESSION_LIMIT
+BRIDGE_SESSION_LIMIT = 4095
+DEFAULT_MAX_CONNECTIONS = 8
 DEFAULT_SHUTDOWN_GRACE_PERIOD = 5.0
 MAX_SHUTDOWN_GRACE_PERIOD = 300.0
 BRIDGE_BUFFER_LIMIT = 16 * 1024
-BRIDGE_TOTAL_BUFFER_LIMIT = 2 * BRIDGE_SESSION_LIMIT * BRIDGE_BUFFER_LIMIT
+BRIDGE_TOTAL_BUFFER_LIMIT = 256 * 1024
 BRIDGE_JOIN_POLL_MS = 1
 BRIDGE_DRAIN_JOIN_SLICE_MS = 50
 BRIDGE_SHUTDOWN_JOIN_MS = 5000
@@ -471,7 +471,8 @@ def build_parser(*, environ: dict[str, str] | None = None) -> argparse.ArgumentP
         metavar="N",
         help=(
             "maximum simultaneous bridged connections "
-            f"(default and hosted limit: {BRIDGE_SESSION_LIMIT})"
+            f"(default: {DEFAULT_MAX_CONNECTIONS}; hosted encoding limit: "
+            f"{BRIDGE_SESSION_LIMIT})"
         ),
     )
     parser.add_argument(

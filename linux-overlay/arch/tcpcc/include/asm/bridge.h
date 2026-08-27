@@ -5,20 +5,24 @@
 #include <linux/types.h>
 #include <asm/tcpcc_control_abi.h>
 
-/* Eight sessions x two 16 KiB directions: 256 KiB of fixed data storage. */
-#define TCPCC_BRIDGE_SESSION_LIMIT       8U
+/*
+ * Handles reserve twelve low bits for a dynamically allocated slot.  This is
+ * an encoding ceiling, not the supported/default admission limit; capacity is
+ * selected by the service configuration and validated in CI.
+ */
+#define TCPCC_BRIDGE_SESSION_LIMIT       4095U
+/* Lazy direction buffers share this aggregate dispatcher-owned budget. */
 #define TCPCC_BRIDGE_BUFFER_LIMIT        (16U * 1024U)
-#define TCPCC_BRIDGE_TOTAL_BUFFER_LIMIT  \
-	(TCPCC_BRIDGE_SESSION_LIMIT * 2U * TCPCC_BRIDGE_BUFFER_LIMIT)
+#define TCPCC_BRIDGE_TOTAL_BUFFER_LIMIT  (256U * 1024U)
 /* Linux doubles SO_SNDBUF/SO_RCVBUF requests; request 32 KiB for 64 KiB. */
 #define TCPCC_BRIDGE_HOST_SOCKET_BUFFER_REQUEST (32U * 1024U)
 #define TCPCC_BRIDGE_HOST_SOCKET_BUFFER_LIMIT   (64U * 1024U)
 #define TCPCC_BRIDGE_RUNTIME_SLOT_BASE   2U
 
-/* Positive s32 handle: [30:4] generation, [3:0] one-based session slot. */
-#define TCPCC_BRIDGE_HANDLE_SLOT_BITS    4U
-#define TCPCC_BRIDGE_HANDLE_SLOT_MASK    0x0fU
-#define TCPCC_BRIDGE_HANDLE_GENERATION_MASK 0x07ffffffU
+/* Positive s32 handle: [30:12] generation, [11:0] one-based flow slot. */
+#define TCPCC_BRIDGE_HANDLE_SLOT_BITS    12U
+#define TCPCC_BRIDGE_HANDLE_SLOT_MASK    0x0fffU
+#define TCPCC_BRIDGE_HANDLE_GENERATION_MASK 0x0007ffffU
 
 struct socket;
 

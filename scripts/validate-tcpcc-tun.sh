@@ -67,8 +67,9 @@ grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit toke
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation token)' \
   "$BOOT_LOG" >/dev/null
-grep -F 'tcpcc: M9.3 single bridge dispatcher started' \
+grep -F 'tcpcc: M9.4 dynamic bridge dispatcher started' \
   "$BOOT_LOG" >/dev/null
+grep -F '/262144 bytes, current 0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2.5 session ' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2.6 session ' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.5 session ' "$BOOT_LOG" >/dev/null
@@ -93,7 +94,7 @@ grep -F 'bridge-bbr: guest=192.0.2.2:18445 host=192.0.2.1:' \
 grep -F 'backend=127.0.0.1:' "$TCP_LOG" >/dev/null
 grep -F 'public_to_backend=65659 backend_to_public=65659' \
   "$TCP_LOG" >/dev/null
-grep -F 'buffer_limit=16384 total_buffer_limit=262144 session_limit=8' \
+grep -F 'buffer_limit=16384 total_buffer_limit=262144 session_limit=4095' \
   "$TCP_LOG" >/dev/null
 grep -F 'bridge-fast-cubic: guest=192.0.2.2:18446 host=192.0.2.1:' \
   "$TCP_LOG" >/dev/null
@@ -112,12 +113,12 @@ grep -F 'data_plane_control_bytes=0 token=0x' \
 grep -F 'bridge-concurrency: fast_handle=' "$TCP_LOG" >/dev/null
 grep -F 'stale_handle_status=-2 release_barrier=passed delayed_send_eagain=' \
   "$TCP_LOG" >/dev/null
-grep -F 'bridge-capacity: active_limit=8 unique_slots=8 overflow_status=-28 ' \
+grep -F 'bridge-capacity: active_connections=9 unique_slots=9 beyond_legacy_limit=passed ' \
   "$TCP_LOG" >/dev/null
 grep -F 'slot_recovery=passed' "$TCP_LOG" >/dev/null
 grep -F 'bridge-reset-isolation: backend_status=-' "$TCP_LOG" >/dev/null
 grep -F 'survivor_isolation=passed' "$TCP_LOG" >/dev/null
-grep -F 'total_buffer_limit=262144 session_limit=8' \
+grep -F 'total_buffer_limit=262144 session_limit=4095' \
   "$TCP_LOG" >/dev/null
 grep -F 'bridge-cancel-victim-bbr: guest=192.0.2.2:18449' \
   "$TCP_LOG" >/dev/null
