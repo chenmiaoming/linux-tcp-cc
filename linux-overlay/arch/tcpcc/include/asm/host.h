@@ -78,6 +78,10 @@ int tcpcc_host_event_wait(struct tcpcc_host_event *event);
 int tcpcc_host_runtime_event_wait(struct tcpcc_host_event *event);
 int tcpcc_host_runtime_event_wait_timeout(struct tcpcc_host_event *event,
 					  unsigned long timeout);
+int tcpcc_host_runtime_event_poll(struct tcpcc_host_event *event);
+int tcpcc_host_runtime_event_set_notifier(void (*notify)(void *), void *data);
+void tcpcc_host_runtime_event_clear_notifier(void (*notify)(void *),
+					     void *data);
 
 /*
  * Linux idle entry point. M3.4 waits on the host event multiplexer and routes

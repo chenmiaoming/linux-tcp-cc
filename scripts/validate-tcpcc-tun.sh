@@ -67,6 +67,8 @@ grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit toke
   "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2 runtime event IRQ passed (bounded queue and generation token)' \
   "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M9.3 single bridge dispatcher started' \
+  "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2.5 session ' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2.6 session ' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.5 session ' "$BOOT_LOG" >/dev/null
