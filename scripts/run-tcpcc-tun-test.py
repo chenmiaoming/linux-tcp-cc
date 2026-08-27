@@ -65,6 +65,7 @@ BRIDGE_RESET_PORTS = {
     "backend-bbr": 18471,
     "public-bbr": 18472,
 }
+HOSTED_SERVICE_PORT = 18473
 BRIDGE_SESSION_LIMIT = 8
 BRIDGE_RUNTIME_SLOT_BASE = 2
 BRIDGE_HANDLE_SLOT_BITS = 4
@@ -85,6 +86,10 @@ BRIDGE_RESET_SURVIVOR_BYTES = 4 * BRIDGE_BUFFER_LIMIT + 233
 BRIDGE_PUBLIC_RESET_BYTES = 2 * BRIDGE_BUFFER_LIMIT + 239
 BRIDGE_JOIN_TIMEOUT_MS = 5000
 OP_BRIDGE_JOIN_RESULT = 21
+OP_SERVICE_START = 23
+OP_SERVICE_DRAIN = 24
+OP_SERVICE_STATS = 25
+OP_SERVICE_STOP = 26
 
 # Appended version-1 control ABI operation. Keep the unpack layout synchronized
 # with struct tcpcc_control_tcp_info in arch/tcpcc/kernel/control.c.
@@ -93,6 +98,10 @@ TCP_INFO = struct.Struct("<BBHIIIIIIIIIQQQ")
 TCP_ESTABLISHED = 1
 # Keep synchronized with struct tcpcc_bridge_result in asm/bridge.h.
 BRIDGE_RESULT = struct.Struct("<QQQIIIIIIIiII")
+SERVICE_CONFIG = struct.Struct("<IHHII")
+SERVICE_STATS = struct.Struct("<QQQQQIIIIIIIIiIII")
+SERVICE_STOPPED = 0
+SERVICE_DRAINING = 2
 
 
 def attach_tun_queue(name: str) -> int:
@@ -1886,6 +1895,195 @@ def exercise_cancelled_bridges(proc: subprocess.Popen,
                 listener.close()
 
 
+def decode_service_stats(raw: bytes, expected_state: int) -> tuple[int, ...]:
+    if len(raw) != SERVICE_STATS.size:
+        raise RuntimeError(
+            f"hosted service stats are {len(raw)} bytes, "
+            f"expected {SERVICE_STATS.size}"
+        )
+    values = SERVICE_STATS.unpack(raw)
+    if values[12] != expected_state:
+        raise RuntimeError(
+            f"hosted service state is {values[12]}, expected {expected_state}"
+        )
+    if values[13] > 0 or any(values[-3:]):
+        raise RuntimeError(
+            "hosted service stats contain invalid error/reserved fields: "
+            f"last_error={values[13]} reserved={values[-3:]}"
+        )
+    return values
+
+
+def exercise_hosted_service(proc: subprocess.Popen,
+                            responses: bytearray) -> str:
+    payload = control.make_payload(
+        b"tcpcc-m9.2-hosted-service:",
+        BRIDGE_TRANSFER_BYTES,
+    )
+    backend_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    backend_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    backend_listener.settimeout(HOST_DRAIN_TIMEOUT)
+    backend_listener.bind(("127.0.0.1", 0))
+    backend_listener.listen(1)
+    backend_port = backend_listener.getsockname()[1]
+    backend_result: dict[str, object] = {}
+    backend_ready = threading.Event()
+    backend_thread = threading.Thread(
+        target=bridge_backend_worker,
+        args=(backend_listener, payload, backend_result, backend_ready),
+        daemon=True,
+    )
+    backend_thread.start()
+
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.settimeout(HOST_DRAIN_TIMEOUT)
+    listener_handle: int | None = None
+    service_handle: int | None = None
+    try:
+        listener_handle, _, _ = control.transact(
+            proc,
+            responses,
+            control.OP_SOCKET,
+            control.request(control.OP_SOCKET),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_SET_CC,
+            control.request(control.OP_SET_CC, listener_handle, data=b"bbr"),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_BIND,
+            control.request(
+                control.OP_BIND,
+                listener_handle,
+                GUEST_IPV4_U32,
+                HOSTED_SERVICE_PORT,
+            ),
+        )
+        control.transact(
+            proc,
+            responses,
+            control.OP_LISTEN,
+            control.request(control.OP_LISTEN, listener_handle, 8),
+        )
+        config = SERVICE_CONFIG.pack(control.LOOPBACK, backend_port, 0, 2, 4)
+        service_handle, _, _ = control.transact(
+            proc,
+            responses,
+            OP_SERVICE_START,
+            control.request(
+                OP_SERVICE_START,
+                listener_handle,
+                data=config,
+            ),
+            {"handle": 1, "length": 0},
+        )
+        listener_handle = None
+
+        client.bind((HOST_IPV4, 0))
+        client.connect((GUEST_IPV4, HOSTED_SERVICE_PORT))
+        if not backend_ready.wait(control.CONTROL_TIMEOUT):
+            raise TimeoutError("hosted service backend accept did not become ready")
+        if "error" in backend_result:
+            raise RuntimeError("hosted service backend accept failed") from backend_result[
+                "error"
+            ]
+        client.sendall(payload)
+        client.shutdown(socket.SHUT_WR)
+        echoed = recv_exact(client, len(payload))
+        if echoed != payload or client.recv(1):
+            raise RuntimeError("hosted service payload or EOF mismatch")
+
+        backend_thread.join(HOST_DRAIN_TIMEOUT)
+        if backend_thread.is_alive():
+            raise TimeoutError("hosted service backend did not finish")
+        if "error" in backend_result:
+            raise RuntimeError("hosted service backend failed") from backend_result[
+                "error"
+            ]
+
+        _, _, raw_stats = control.transact(
+            proc,
+            responses,
+            OP_SERVICE_DRAIN,
+            control.request(OP_SERVICE_DRAIN, service_handle, 5000),
+            {"length": SERVICE_STATS.size},
+        )
+        drain_stats = decode_service_stats(raw_stats, SERVICE_DRAINING)
+        _, _, raw_stats = control.transact(
+            proc,
+            responses,
+            OP_SERVICE_STATS,
+            control.request(OP_SERVICE_STATS, service_handle),
+            {"length": SERVICE_STATS.size},
+        )
+        observed_stats = decode_service_stats(raw_stats, SERVICE_DRAINING)
+        if observed_stats != drain_stats:
+            raise RuntimeError("hosted service stats changed after completed drain")
+
+        _, _, raw_stats = control.transact(
+            proc,
+            responses,
+            OP_SERVICE_STOP,
+            control.request(OP_SERVICE_STOP, service_handle, 5000),
+            {"length": SERVICE_STATS.size},
+        )
+        stop_stats = decode_service_stats(raw_stats, SERVICE_STOPPED)
+        service_handle = None
+
+        (accepted, completed, rejected, public_to_backend,
+         backend_to_public, active, peak, maximum, accept_batch,
+         _accept_eagain, bridge_failures, terminal_failures,
+         _state, last_error, *_reserved) = stop_stats
+        if (
+            accepted != 1
+            or completed != 1
+            or rejected
+            or public_to_backend != len(payload)
+            or backend_to_public != len(payload)
+            or active
+            or peak != 1
+            or maximum != 2
+            or accept_batch != 4
+            or bridge_failures
+            or terminal_failures
+            or last_error
+        ):
+            raise RuntimeError(f"unexpected hosted service stats {stop_stats}")
+        return (
+            "hosted-service-bbr: event_accept=passed event_reap=passed "
+            f"accepted={accepted} completed={completed} active={active} "
+            f"peak={peak} public_to_backend={public_to_backend} "
+            f"backend_to_public={backend_to_public} state={SERVICE_STOPPED}"
+        )
+    finally:
+        client.close()
+        if service_handle is not None:
+            try:
+                control.transact(
+                    proc,
+                    responses,
+                    OP_SERVICE_STOP,
+                    control.request(OP_SERVICE_STOP, service_handle, 5000),
+                )
+            except Exception:
+                pass
+        if listener_handle is not None:
+            try:
+                control.transact(
+                    proc,
+                    responses,
+                    control.OP_CLOSE,
+                    control.request(control.OP_CLOSE, listener_handle),
+                )
+            except Exception:
+                pass
+        backend_listener.close()
+
+
 def validate_global_cancelled_bridge(session: dict[str, object],
                                      responses: bytearray) -> str:
     label = str(session["label"])
@@ -2005,6 +2203,7 @@ def main() -> int:
             tcp_log.extend(exercise_bridge_capacity(proc, responses))
             tcp_log.extend(exercise_reset_isolation(proc, responses))
             tcp_log.extend(exercise_cancelled_bridges(proc, responses))
+            tcp_log.append(exercise_hosted_service(proc, responses))
 
         # Temporarily let the host emit one 1501-byte IPv4 packet. The hosted
         # tcpcc0 MTU remains 1500, so M5.1 ingress validation must drop it.

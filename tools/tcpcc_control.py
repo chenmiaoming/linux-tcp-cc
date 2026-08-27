@@ -38,6 +38,10 @@ OP_ACCEPT_NONBLOCK = 19
 OP_SHUTDOWN = 20
 OP_BRIDGE_JOIN_RESULT = 21
 OP_HELLO = 22
+OP_SERVICE_START = 23
+OP_SERVICE_DRAIN = 24
+OP_SERVICE_STATS = 25
+OP_SERVICE_STOP = 26
 
 OP_NAMES = {
     OP_SOCKET: "socket",
@@ -62,11 +66,17 @@ OP_NAMES = {
     OP_SHUTDOWN: "shutdown",
     OP_BRIDGE_JOIN_RESULT: "bridge-join-result",
     OP_HELLO: "hello",
+    OP_SERVICE_START: "service-start",
+    OP_SERVICE_DRAIN: "service-drain",
+    OP_SERVICE_STATS: "service-stats",
+    OP_SERVICE_STOP: "service-stop",
 }
 
 REQUEST = struct.Struct("<IHHiIII256s")
 RESPONSE = struct.Struct("<IHHiiI256s")
 BRIDGE_RESULT = struct.Struct("<QQQIIIIIIIiII")
+SERVICE_CONFIG = struct.Struct("<IHHII")
+SERVICE_STATS = struct.Struct("<QQQQQIIIIIIIIiIII")
 
 
 class ControlError(RuntimeError):
@@ -115,6 +125,24 @@ class BridgeResult:
     host_recv_eagain: int
     session_limit: int
     status: int
+
+
+@dataclass(frozen=True)
+class ServiceStats:
+    accepted_connections: int
+    completed_connections: int
+    rejected_connections: int
+    public_to_backend_bytes: int
+    backend_to_public_bytes: int
+    active_connections: int
+    peak_connections: int
+    max_connections: int
+    accept_batch: int
+    accept_eagain: int
+    bridge_start_failures: int
+    terminal_failures: int
+    state: int
+    last_error: int
 
 
 def _bounded_integer(
@@ -248,6 +276,47 @@ def decode_bridge_result(
         session_limit,
         status,
     )
+
+
+def encode_service_config(
+    backend_ipv4: int,
+    backend_port: int,
+    max_connections: int,
+    accept_batch: int,
+) -> bytes:
+    """Encode the fixed hosted-service configuration payload."""
+
+    _bounded_integer(backend_ipv4, "backend IPv4", 0, 0xFFFFFFFF)
+    _bounded_integer(backend_port, "backend port", 1, 0xFFFF)
+    _bounded_integer(max_connections, "max connections", 1, 0xFFFFFFFF)
+    _bounded_integer(accept_batch, "accept batch", 1, 0xFFFFFFFF)
+    return SERVICE_CONFIG.pack(
+        backend_ipv4,
+        backend_port,
+        0,
+        max_connections,
+        accept_batch,
+    )
+
+
+def decode_service_stats(data: bytes) -> ServiceStats:
+    """Decode one aggregate hosted-service snapshot."""
+
+    if not isinstance(data, bytes) or len(data) != SERVICE_STATS.size:
+        length = len(data) if isinstance(data, bytes) else "non-bytes"
+        raise ControlProtocolError(
+            f"service stats have size {length}, expected {SERVICE_STATS.size}"
+        )
+    values = SERVICE_STATS.unpack(data)
+    if any(values[-3:]):
+        raise ControlProtocolError(
+            f"service stats reserved fields are {values[-3:]}"
+        )
+    if values[13] > 0:
+        raise ControlProtocolError(
+            f"service stats contain positive last error {values[13]}"
+        )
+    return ServiceStats(*values[:14])
 
 
 def read_exact_fd(

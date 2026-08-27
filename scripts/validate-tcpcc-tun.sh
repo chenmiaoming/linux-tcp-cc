@@ -130,6 +130,12 @@ grep -F 'public_to_backend=65733 backend_to_public=65733' \
   "$TCP_LOG" >/dev/null
 grep -F 'bridge-cancellation: victim_handle=' "$TCP_LOG" >/dev/null
 grep -F 'stale_status=-2 survivor_release=passed' "$TCP_LOG" >/dev/null
+grep -F 'hosted-service-bbr: event_accept=passed event_reap=passed accepted=1 completed=1 active=0 peak=1' \
+  "$TCP_LOG" >/dev/null
+grep -F 'tcpcc: M9.2 hosted service 1 started (max 2, accept batch 4)' \
+  "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M9.2 hosted service 1 stopped (1 accepted, 1 completed)' \
+  "$BOOT_LOG" >/dev/null
 grep -F 'bridge-finish-cancel-bbr: guest=192.0.2.2:18452' \
   "$TCP_LOG" >/dev/null
 grep -F 'global_teardown=passed data_plane_control_bytes=0' \

@@ -10,8 +10,10 @@ on:
       - 'docs/m9-native-event-runtime.md'
       - 'native/**'
       - 'linux-overlay/arch/tcpcc/include/asm/bridge.h'
+      - 'linux-overlay/arch/tcpcc/include/asm/service.h'
       - 'linux-overlay/arch/tcpcc/include/asm/tcpcc_control_abi.h'
       - 'linux-overlay/arch/tcpcc/kernel/control.c'
+      - 'linux-overlay/arch/tcpcc/kernel/service.c'
       - 'tools/tcpcc_control.py'
   push:
     branches:

@@ -39,10 +39,15 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_SHUTDOWN,
 	TCPCC_CONTROL_BRIDGE_JOIN_RESULT,
 	TCPCC_CONTROL_HELLO,
+	TCPCC_CONTROL_SERVICE_START,
+	TCPCC_CONTROL_SERVICE_DRAIN,
+	TCPCC_CONTROL_SERVICE_STATS,
+	TCPCC_CONTROL_SERVICE_STOP,
 };
 
 /* Capabilities returned by TCPCC_CONTROL_HELLO. */
 #define TCPCC_CONTROL_FEATURE_BRIDGE_RESULT (1U << 0)
+#define TCPCC_CONTROL_FEATURE_HOSTED_SERVICE (1U << 1)
 
 struct tcpcc_control_request {
 	__u32 magic;
@@ -128,6 +133,42 @@ struct tcpcc_control_hello {
 	__u32 bridge_total_buffer_limit;
 	__u32 reserved;
 	char linux_release[TCPCC_CONTROL_RELEASE_LENGTH];
+};
+
+/* Payload for SERVICE_START; the listener is supplied in request.handle. */
+struct tcpcc_control_service_config {
+	__u32 backend_ipv4;
+	__u16 backend_port;
+	__u16 reserved;
+	__u32 max_connections;
+	__u32 accept_batch;
+};
+
+enum tcpcc_control_service_state {
+	TCPCC_CONTROL_SERVICE_STOPPED = 0,
+	TCPCC_CONTROL_SERVICE_RUNNING,
+	TCPCC_CONTROL_SERVICE_DRAINING,
+	TCPCC_CONTROL_SERVICE_STOPPING,
+	TCPCC_CONTROL_SERVICE_FAILED,
+};
+
+/* Fixed 88-byte aggregate snapshot; no per-flow hot-path reporting. */
+struct tcpcc_control_service_stats {
+	__u64 accepted_connections;
+	__u64 completed_connections;
+	__u64 rejected_connections;
+	__u64 public_to_backend_bytes;
+	__u64 backend_to_public_bytes;
+	__u32 active_connections;
+	__u32 peak_connections;
+	__u32 max_connections;
+	__u32 accept_batch;
+	__u32 accept_eagain;
+	__u32 bridge_start_failures;
+	__u32 terminal_failures;
+	__u32 state;
+	__s32 last_error;
+	__u32 reserved[3];
 };
 
 #endif /* _ASM_TCPCC_CONTROL_ABI_H */

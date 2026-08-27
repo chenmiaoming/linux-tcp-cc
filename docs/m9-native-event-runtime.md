@@ -109,3 +109,25 @@ The first pressure gate finds capacity; it does not encode an arbitrary large
 pass number. A later gate pins a conservative supported default below the
 observed CI limit and verifies deterministic `EMFILE`, memory-budget, and
 backlog behavior rather than allowing OOM or scheduler collapse.
+
+## M9.2 hosted service ABI
+
+M9.2 moves connection admission and terminal aggregation behind one hosted
+service handle. `SERVICE_START` transfers an already configured listener to
+the hosted service together with the loopback backend, admission ceiling, and
+bounded accept batch. A listener socket callback wakes the service owner when
+the accept queue changes; bridge completion wakes the same owner, which reaps
+terminal results without a host-side polling interval.
+
+`SERVICE_STATS` returns a fixed 88-byte aggregate snapshot. It includes
+accepted, completed, rejected, active, and peak connections, byte totals,
+accept `EAGAIN`, bridge-start and terminal failure counts, state, and the last
+error. It deliberately carries no per-flow event stream. `SERVICE_DRAIN`
+closes admission and waits for active flows, while `SERVICE_STOP` cancels any
+remaining flows, releases the listener, and returns the terminal aggregate.
+
+The M9.2 implementation still delegates payload forwarding to the M8 bridge,
+including its eight-session ceiling and per-flow kthreads. This is an explicit
+compatibility gate: the external service ABI and event-driven accept/reap
+ownership are validated first, then M9.3 can replace the bridge internals with
+one dispatcher without another supervisor/API migration.

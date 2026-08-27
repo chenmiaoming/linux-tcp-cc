@@ -21,12 +21,14 @@
 #include <asm/bridge.h>
 #include <asm/host.h>
 #include <asm/l3net.h>
+#include <asm/service.h>
 #include <asm/tcpcc_control_abi.h>
 
 #define TCPCC_CONTROL_IRQ          2
 #define TCPCC_CONTROL_MAX_SOCKETS  16
 #define TCPCC_CONTROL_HOST_BACKEND_BYTES 192
 #define TCPCC_CONTROL_HOST_BACKEND_TIMEOUT_MS 3000
+#define TCPCC_CONTROL_SERVICE_TIMEOUT_MAX_MS 300000U
 #define TCPCC_CONTROL_HOST_BACKEND_SLOT 1U
 #define TCPCC_CONTROL_HOST_BACKEND_GENERATION 0x4d3823U
 #define TCPCC_CONTROL_HOST_BACKEND_TOKEN \
@@ -678,6 +680,8 @@ static int tcpcc_control_bridge_start(
 
 	if (!public_sock)
 		return -EBADF;
+	if (tcpcc_service_active())
+		return -EBUSY;
 	if (request->length || request->arg0 != INADDR_LOOPBACK ||
 	    !request->arg1 || request->arg1 > 0xffffU)
 		return -EINVAL;
@@ -771,8 +775,16 @@ static int tcpcc_control_bridge_cancel(
 
 static int tcpcc_control_shutdown(const struct tcpcc_control_request *request)
 {
+	int ret;
+
 	if (request->handle || request->arg0 || request->arg1 || request->length)
 		return -EINVAL;
+	if (tcpcc_service_active()) {
+		ret = tcpcc_service_stop(TCPCC_SERVICE_HANDLE,
+				msecs_to_jiffies(30000), NULL);
+		if (ret)
+			return ret;
+	}
 	return 0;
 }
 
@@ -808,7 +820,8 @@ static int tcpcc_control_hello(const struct tcpcc_control_request *request,
 {
 	struct tcpcc_control_hello hello = {
 		.control_version = TCPCC_CONTROL_VERSION,
-		.feature_bits = TCPCC_CONTROL_FEATURE_BRIDGE_RESULT,
+		.feature_bits = TCPCC_CONTROL_FEATURE_BRIDGE_RESULT |
+				TCPCC_CONTROL_FEATURE_HOSTED_SERVICE,
 		.session_limit = TCPCC_BRIDGE_SESSION_LIMIT,
 		.bridge_buffer_limit = TCPCC_BRIDGE_BUFFER_LIMIT,
 		.bridge_total_buffer_limit = TCPCC_BRIDGE_TOTAL_BUFFER_LIMIT,
@@ -823,6 +836,93 @@ static int tcpcc_control_hello(const struct tcpcc_control_request *request,
 		sizeof(hello.linux_release));
 	memcpy(response->data, &hello, sizeof(hello));
 	response->length = sizeof(hello);
+	return 0;
+}
+
+static void tcpcc_control_service_stats_response(
+				struct tcpcc_control_response *response,
+				const struct tcpcc_control_service_stats *stats)
+{
+	BUILD_BUG_ON(sizeof(*stats) != 88);
+	BUILD_BUG_ON(sizeof(*stats) > TCPCC_CONTROL_MAX_PAYLOAD);
+	memcpy(response->data, stats, sizeof(*stats));
+	response->length = sizeof(*stats);
+}
+
+static int tcpcc_control_service_start(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_service_config config;
+	struct socket *listener = tcpcc_control_lookup(request->handle);
+	int service_handle;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(config) != 16);
+	if (!listener)
+		return -EBADF;
+	if (request->arg0 || request->arg1 || request->length != sizeof(config))
+		return -EINVAL;
+	memcpy(&config, request->data, sizeof(config));
+	ret = tcpcc_service_start(listener, &config, &service_handle);
+	if (ret)
+		return ret;
+
+	/* tcpcc_service_start() owns the listener after success. */
+	tcpcc_control_sockets[request->handle - 1] = NULL;
+	response->handle = service_handle;
+	return 0;
+}
+
+static int tcpcc_control_service_stats(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_service_stats stats;
+	int ret;
+
+	if (request->arg0 || request->arg1 || request->length)
+		return -EINVAL;
+	ret = tcpcc_service_get_stats(request->handle, &stats);
+	if (ret)
+		return ret;
+	tcpcc_control_service_stats_response(response, &stats);
+	return 0;
+}
+
+static int tcpcc_control_service_drain(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_service_stats stats;
+	int ret;
+
+	if (request->arg1 || request->length || !request->arg0 ||
+	    request->arg0 > TCPCC_CONTROL_SERVICE_TIMEOUT_MAX_MS)
+		return -EINVAL;
+	ret = tcpcc_service_drain(request->handle,
+				  msecs_to_jiffies(request->arg0), &stats);
+	if (ret)
+		return ret;
+	tcpcc_control_service_stats_response(response, &stats);
+	return 0;
+}
+
+static int tcpcc_control_service_stop(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_service_stats stats;
+	int ret;
+
+	if (request->arg1 || request->length || !request->arg0 ||
+	    request->arg0 > TCPCC_CONTROL_SERVICE_TIMEOUT_MAX_MS)
+		return -EINVAL;
+	ret = tcpcc_service_stop(request->handle,
+				 msecs_to_jiffies(request->arg0), &stats);
+	if (ret)
+		return ret;
+	tcpcc_control_service_stats_response(response, &stats);
 	return 0;
 }
 
@@ -874,6 +974,14 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_bridge_join_result(request, response);
 	case TCPCC_CONTROL_HELLO:
 		return tcpcc_control_hello(request, response);
+	case TCPCC_CONTROL_SERVICE_START:
+		return tcpcc_control_service_start(request, response);
+	case TCPCC_CONTROL_SERVICE_DRAIN:
+		return tcpcc_control_service_drain(request, response);
+	case TCPCC_CONTROL_SERVICE_STATS:
+		return tcpcc_control_service_stats(request, response);
+	case TCPCC_CONTROL_SERVICE_STOP:
+		return tcpcc_control_service_stop(request, response);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -953,6 +1061,9 @@ static int __init tcpcc_control_selftest(void)
 	BUILD_BUG_ON(sizeof(struct tcpcc_control_tcp_info) != 64);
 	BUILD_BUG_ON(sizeof(struct tcpcc_control_host_backend_result) != 32);
 	BUILD_BUG_ON(sizeof(struct tcpcc_bridge_result) != 64);
+	BUILD_BUG_ON(sizeof(struct tcpcc_control_hello) != 88);
+	BUILD_BUG_ON(sizeof(struct tcpcc_control_service_config) != 16);
+	BUILD_BUG_ON(sizeof(struct tcpcc_control_service_stats) != 88);
 
 	init_completion(&tcpcc_control_request_ready);
 	init_completion(&tcpcc_control_finished);
@@ -996,6 +1107,7 @@ static int __init tcpcc_control_selftest(void)
 	if (!tcpcc_control_result && ret)
 		tcpcc_control_result = ret;
 	tcpcc_control_task = NULL;
+	tcpcc_service_cancel();
 	tcpcc_bridge_cancel();
 	tcpcc_control_release_all();
 
