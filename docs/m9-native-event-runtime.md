@@ -97,11 +97,14 @@ The migration is deliberately split into mergeable gates:
    CI-only contract tests.
 2. Hosted service operations (`SERVICE_START`, `SERVICE_DRAIN`, aggregate
    `SERVICE_STATS`) so the supervisor no longer polls accept/join per flow.
-3. One hosted dispatcher and dynamic flow storage; remove the eight-session
-   limit and the two-kthreads-per-session implementation together.
-4. Native preflight, TUN, firewall, signal, and rollback parity; switch the
+3. One hosted dispatcher; remove the two-kthreads-per-session implementation
+   while retaining the eight-slot compatibility table for a focused parity
+   gate.
+4. Dynamic flow storage and buffer accounting; remove the eight-session
+   limit, then add CI pressure gates.
+5. Native preflight, TUN, firewall, signal, and rollback parity; switch the
    installed `tcpcc` entry point from Python to C.
-5. CI pressure gates for idle connections, active throughput, slow peers,
+6. CI pressure gates for idle connections, active throughput, slow peers,
    reset storms, and graceful drain. Published results include CPU, RSS,
    accepted/active/rejected counts, event-loop lag, and buffer high-water mark.
 
@@ -131,3 +134,21 @@ including its eight-session ceiling and per-flow kthreads. This is an explicit
 compatibility gate: the external service ABI and event-driven accept/reap
 ownership are validated first, then M9.3 can replace the bridge internals with
 one dispatcher without another supervisor/API migration.
+
+## M9.3 single bridge dispatcher
+
+M9.3 removes both forwarding kthreads from every bridge session. One hosted
+dispatcher now owns all public-to-backend and backend-to-public state. Linux
+socket callbacks mark public readiness, while the host runtime IRQ publishes
+backend epoll readiness through a nonblocking queue and wakes the same
+dispatcher. All reads and writes are nonblocking, retain partial-buffer state,
+and use a bounded per-direction budget so one busy connection cannot monopolize
+the single vCPU.
+
+The existing generation-tagged eight-slot table and fixed buffers remain in
+this gate. That deliberately keeps capacity allocation out of the data-plane
+rewrite: existing reset isolation, half-close, backpressure, long-stream,
+concurrent cancellation, lossless parity, and high-BDP CI checks can first
+prove that the event state machine preserves M8 behavior. M9.4 will replace
+the table and eager buffers with dynamic flows before adding connection-scale
+pressure tests.

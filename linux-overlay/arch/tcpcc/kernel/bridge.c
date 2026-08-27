@@ -7,15 +7,17 @@
 #include <linux/kthread.h>
 #include <linux/mutex.h>
 #include <linux/net.h>
+#include <linux/printk.h>
 #include <linux/sched/task.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uio.h>
+#include <net/sock.h>
 #include <asm/bridge.h>
 #include <asm/host.h>
 
 #define TCPCC_BRIDGE_CONNECT_TIMEOUT_MS 3000
-#define TCPCC_BRIDGE_EVENT_POLL_MS 100
+#define TCPCC_BRIDGE_DIRECTION_BUDGET  32U
 
 struct tcpcc_bridge_session {
 	spinlock_t lock;
@@ -31,26 +33,34 @@ struct tcpcc_bridge_session {
 	bool connecting;
 	bool running;
 	bool stopping;
+	bool finished_notified;
+	bool public_callbacks_installed;
+	bool public_readable;
+	bool public_writable;
+	bool host_readable;
+	bool host_writable;
+	bool public_to_backend_done;
+	bool backend_to_public_done;
 	int status;
 	u32 connect_events;
-	u32 read_events;
-	u32 write_events;
 	u32 terminal_events;
 	u32 host_send_eagain;
 	u32 host_partial_writes;
 	u32 host_recv_eagain;
 	u64 public_to_backend_bytes;
 	u64 backend_to_public_bytes;
-	atomic_t directions_done;
+	size_t public_to_backend_offset;
+	size_t public_to_backend_length;
+	size_t backend_to_public_offset;
+	size_t backend_to_public_length;
 	atomic_t event_refs;
-	struct completion start;
 	struct completion finished;
 	struct completion connect_ready;
-	struct completion host_readable;
-	struct completion host_writable;
 	struct completion event_idle;
-	struct task_struct *public_to_backend_task;
-	struct task_struct *backend_to_public_task;
+	void (*saved_data_ready)(struct sock *sk);
+	void (*saved_write_space)(struct sock *sk);
+	void (*saved_state_change)(struct sock *sk);
+	void (*saved_error_report)(struct sock *sk);
 	u8 public_to_backend_buffer[TCPCC_BRIDGE_BUFFER_LIMIT];
 	u8 backend_to_public_buffer[TCPCC_BRIDGE_BUFFER_LIMIT];
 };
@@ -61,7 +71,7 @@ struct tcpcc_bridge_manager {
 	bool dispatcher_stopping;
 	int dispatcher_status;
 	unsigned int active_sessions;
-	struct completion dispatcher_start;
+	struct completion dispatcher_work;
 	struct task_struct *dispatcher_task;
 	void (*completion_notify)(void *);
 	void *completion_notify_data;
@@ -97,8 +107,148 @@ static void tcpcc_bridge_manager_init(void)
 		spin_lock_init(&tcpcc_bridge_manager.sessions[index].lock);
 		tcpcc_bridge_manager.sessions[index].host_fd = -1;
 	}
-	init_completion(&tcpcc_bridge_manager.dispatcher_start);
+	init_completion(&tcpcc_bridge_manager.dispatcher_work);
 	tcpcc_bridge_manager.initialized = true;
+}
+
+static void tcpcc_bridge_dispatcher_wake(void *unused)
+{
+	complete(&tcpcc_bridge_manager.dispatcher_work);
+}
+
+static void tcpcc_bridge_mark_public_ready(
+				struct tcpcc_bridge_session *session,
+				bool readable, bool writable)
+{
+	unsigned long flags;
+	bool allocated;
+
+	spin_lock_irqsave(&session->lock, flags);
+	allocated = session->allocated;
+	if (allocated) {
+		if (readable)
+			session->public_readable = true;
+		if (writable)
+			session->public_writable = true;
+	}
+	spin_unlock_irqrestore(&session->lock, flags);
+	if (allocated)
+		tcpcc_bridge_dispatcher_wake(NULL);
+}
+
+static void tcpcc_bridge_public_data_ready(struct sock *sk)
+{
+	struct tcpcc_bridge_session *session;
+	void (*saved_data_ready)(struct sock *sk) = NULL;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	session = sk->sk_user_data;
+	if (session && session->public_sock &&
+	    session->public_sock->sk == sk) {
+		saved_data_ready = session->saved_data_ready;
+		tcpcc_bridge_mark_public_ready(session, true, false);
+	}
+	if (saved_data_ready)
+		saved_data_ready(sk);
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+
+static void tcpcc_bridge_public_write_space(struct sock *sk)
+{
+	struct tcpcc_bridge_session *session;
+	void (*saved_write_space)(struct sock *sk) = NULL;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	session = sk->sk_user_data;
+	if (session && session->public_sock &&
+	    session->public_sock->sk == sk) {
+		saved_write_space = session->saved_write_space;
+		tcpcc_bridge_mark_public_ready(session, false, true);
+	}
+	if (saved_write_space)
+		saved_write_space(sk);
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+
+static void tcpcc_bridge_public_state_change(struct sock *sk)
+{
+	struct tcpcc_bridge_session *session;
+	void (*saved_state_change)(struct sock *sk) = NULL;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	session = sk->sk_user_data;
+	if (session && session->public_sock &&
+	    session->public_sock->sk == sk) {
+		saved_state_change = session->saved_state_change;
+		tcpcc_bridge_mark_public_ready(session, true, true);
+	}
+	if (saved_state_change)
+		saved_state_change(sk);
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+
+static void tcpcc_bridge_public_error_report(struct sock *sk)
+{
+	struct tcpcc_bridge_session *session;
+	void (*saved_error_report)(struct sock *sk) = NULL;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	session = sk->sk_user_data;
+	if (session && session->public_sock &&
+	    session->public_sock->sk == sk) {
+		saved_error_report = session->saved_error_report;
+		tcpcc_bridge_mark_public_ready(session, true, true);
+	}
+	if (saved_error_report)
+		saved_error_report(sk);
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+
+static int tcpcc_bridge_install_public_callbacks(
+				struct tcpcc_bridge_session *session)
+{
+	struct sock *sk = session->public_sock->sk;
+	int ret = 0;
+
+	write_lock_bh(&sk->sk_callback_lock);
+	if (sk->sk_user_data) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+	session->saved_data_ready = sk->sk_data_ready;
+	session->saved_write_space = sk->sk_write_space;
+	session->saved_state_change = sk->sk_state_change;
+	session->saved_error_report = sk->sk_error_report;
+	sk->sk_user_data = session;
+	WRITE_ONCE(sk->sk_data_ready, tcpcc_bridge_public_data_ready);
+	WRITE_ONCE(sk->sk_write_space, tcpcc_bridge_public_write_space);
+	WRITE_ONCE(sk->sk_state_change, tcpcc_bridge_public_state_change);
+	WRITE_ONCE(sk->sk_error_report, tcpcc_bridge_public_error_report);
+	session->public_callbacks_installed = true;
+unlock:
+	write_unlock_bh(&sk->sk_callback_lock);
+	return ret;
+}
+
+static void tcpcc_bridge_restore_public_callbacks(
+				struct tcpcc_bridge_session *session)
+{
+	struct socket *public_sock = session->public_sock;
+	struct sock *sk;
+
+	if (!public_sock || !session->public_callbacks_installed)
+		return;
+	sk = public_sock->sk;
+	write_lock_bh(&sk->sk_callback_lock);
+	if (sk->sk_user_data == session) {
+		sk->sk_user_data = NULL;
+		WRITE_ONCE(sk->sk_data_ready, session->saved_data_ready);
+		WRITE_ONCE(sk->sk_write_space, session->saved_write_space);
+		WRITE_ONCE(sk->sk_state_change, session->saved_state_change);
+		WRITE_ONCE(sk->sk_error_report, session->saved_error_report);
+	}
+	session->public_callbacks_installed = false;
+	write_unlock_bh(&sk->sk_callback_lock);
 }
 
 static void tcpcc_bridge_session_stop(struct tcpcc_bridge_session *session,
@@ -121,8 +271,7 @@ static void tcpcc_bridge_session_stop(struct tcpcc_bridge_session *session,
 	spin_unlock_irqrestore(&session->lock, flags);
 
 	complete_all(&session->connect_ready);
-	complete_all(&session->host_readable);
-	complete_all(&session->host_writable);
+	tcpcc_bridge_dispatcher_wake(NULL);
 	if (!first || !abort_sockets)
 		return;
 
@@ -132,18 +281,24 @@ static void tcpcc_bridge_session_stop(struct tcpcc_bridge_session *session,
 		kernel_sock_shutdown(session->public_sock, SHUT_RDWR);
 }
 
-static void tcpcc_bridge_direction_done(struct tcpcc_bridge_session *session,
-					int status)
+static void tcpcc_bridge_session_finish(struct tcpcc_bridge_session *session)
 {
 	void (*notify)(void *);
 	void *notify_data;
+	unsigned long flags;
+	bool finished = false;
 
-	if (status)
-		tcpcc_bridge_session_stop(session, status, true);
-	if (atomic_inc_return(&session->directions_done) != 2)
+	spin_lock_irqsave(&session->lock, flags);
+	if (session->allocated && !session->finished_notified) {
+		session->running = false;
+		session->stopping = true;
+		session->finished_notified = true;
+		finished = true;
+	}
+	spin_unlock_irqrestore(&session->lock, flags);
+	if (!finished)
 		return;
 
-	tcpcc_bridge_session_stop(session, 0, false);
 	complete(&session->finished);
 	notify = smp_load_acquire(&tcpcc_bridge_manager.completion_notify);
 	if (notify) {
@@ -153,179 +308,259 @@ static void tcpcc_bridge_direction_done(struct tcpcc_bridge_session *session,
 	}
 }
 
-static int tcpcc_bridge_wait_host(struct tcpcc_bridge_session *session,
-				  struct completion *ready, u32 *pending,
-				  u32 wanted)
+static bool tcpcc_bridge_take_readable(
+				struct tcpcc_bridge_session *session,
+				bool public_side)
 {
-	for (;;) {
-		unsigned long flags;
-		u32 events;
-		int status;
-		bool stopping;
+	unsigned long flags;
+	bool ready;
 
-		wait_for_completion(ready);
-		spin_lock_irqsave(&session->lock, flags);
-		events = *pending;
-		*pending = 0;
-		status = session->status;
-		stopping = session->stopping;
-		spin_unlock_irqrestore(&session->lock, flags);
-
-		if (status)
-			return status;
-		if (stopping)
-			return -ECANCELED;
-		if (events & (wanted | TCPCC_HOST_EVENT_HANGUP))
-			return 0;
-	}
+	spin_lock_irqsave(&session->lock, flags);
+	ready = public_side ? session->public_readable :
+			      session->host_readable;
+	if (public_side)
+		session->public_readable = false;
+	else
+		session->host_readable = false;
+	spin_unlock_irqrestore(&session->lock, flags);
+	return ready;
 }
 
-static int tcpcc_bridge_public_to_backend_thread(void *arg)
+static bool tcpcc_bridge_take_writable(
+				struct tcpcc_bridge_session *session,
+				bool public_side)
 {
-	struct tcpcc_bridge_session *session = arg;
-	int status = 0;
+	unsigned long flags;
+	bool ready;
 
-	wait_for_completion(&session->start);
-	if (!READ_ONCE(session->running))
-		return 0;
+	spin_lock_irqsave(&session->lock, flags);
+	ready = public_side ? session->public_writable :
+			      session->host_writable;
+	if (public_side)
+		session->public_writable = false;
+	else
+		session->host_writable = false;
+	spin_unlock_irqrestore(&session->lock, flags);
+	return ready;
+}
 
-	while (!READ_ONCE(session->stopping)) {
-		struct msghdr msg = { };
-		struct kvec vec = {
-			.iov_base = session->public_to_backend_buffer,
-			.iov_len = TCPCC_BRIDGE_BUFFER_LIMIT,
-		};
-		size_t offset = 0;
-		int received;
+static void tcpcc_bridge_set_readable(
+				struct tcpcc_bridge_session *session,
+				bool public_side)
+{
+	unsigned long flags;
 
-		received = kernel_recvmsg(session->public_sock, &msg, &vec, 1,
-					  TCPCC_BRIDGE_BUFFER_LIMIT, 0);
-		if (READ_ONCE(session->stopping))
-			break;
-		if (received < 0) {
-			status = received;
-			break;
-		}
-		if (!received) {
-			status = tcpcc_host_shutdown(session->host_fd,
-						     TCPCC_HOST_SHUT_WR);
-			break;
-		}
+	spin_lock_irqsave(&session->lock, flags);
+	if (public_side)
+		session->public_readable = true;
+	else
+		session->host_readable = true;
+	spin_unlock_irqrestore(&session->lock, flags);
+}
 
-		while (offset < (size_t)received) {
-			size_t remaining = (size_t)received - offset;
+static void tcpcc_bridge_set_writable(
+				struct tcpcc_bridge_session *session,
+				bool public_side)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&session->lock, flags);
+	if (public_side)
+		session->public_writable = true;
+	else
+		session->host_writable = true;
+	spin_unlock_irqrestore(&session->lock, flags);
+}
+
+static int tcpcc_bridge_pump_public_to_backend(
+				struct tcpcc_bridge_session *session)
+{
+	unsigned int operations = 0;
+
+	while (operations < TCPCC_BRIDGE_DIRECTION_BUDGET &&
+	       !session->public_to_backend_done) {
+		if (session->public_to_backend_offset <
+		    session->public_to_backend_length) {
+			size_t remaining = session->public_to_backend_length -
+					   session->public_to_backend_offset;
 			ssize_t sent;
 
+			if (!tcpcc_bridge_take_writable(session, false))
+				break;
 			sent = tcpcc_host_send_fd(
 				session->host_fd,
-				session->public_to_backend_buffer + offset,
+				session->public_to_backend_buffer +
+					session->public_to_backend_offset,
 				remaining);
+			operations++;
 			if (sent == -EAGAIN) {
 				session->host_send_eagain++;
-				status = tcpcc_bridge_wait_host(
-					session, &session->host_writable,
-					&session->write_events,
-					TCPCC_HOST_EVENT_WRITABLE);
-				if (status)
-					break;
-				continue;
-			}
-			if (sent < 0) {
-				status = (int)sent;
 				break;
 			}
-			if (!sent) {
-				status = -EIO;
-				break;
-			}
+			if (sent < 0)
+				return (int)sent;
+			if (!sent)
+				return -EIO;
 			if ((size_t)sent < remaining)
 				session->host_partial_writes++;
-			offset += sent;
+			tcpcc_bridge_set_writable(session, false);
+			session->public_to_backend_offset += sent;
 			session->public_to_backend_bytes += sent;
+			if (session->public_to_backend_offset ==
+			    session->public_to_backend_length) {
+				session->public_to_backend_offset = 0;
+				session->public_to_backend_length = 0;
+			}
+			continue;
 		}
-		if (status)
+
+		if (!tcpcc_bridge_take_readable(session, true))
 			break;
+		{
+			struct msghdr msg = { };
+			struct kvec vec = {
+				.iov_base = session->public_to_backend_buffer,
+				.iov_len = TCPCC_BRIDGE_BUFFER_LIMIT,
+			};
+			int received;
+
+			received = kernel_recvmsg(
+				session->public_sock, &msg, &vec, 1,
+				TCPCC_BRIDGE_BUFFER_LIMIT, MSG_DONTWAIT);
+			operations++;
+			if (received == -EAGAIN) {
+				break;
+			}
+			if (received < 0)
+				return received;
+			if (!received) {
+				int ret = tcpcc_host_shutdown(
+					session->host_fd, TCPCC_HOST_SHUT_WR);
+
+				if (ret)
+					return ret;
+				session->public_to_backend_done = true;
+				break;
+			}
+			tcpcc_bridge_set_readable(session, true);
+			session->public_to_backend_length = received;
+		}
 	}
 
-	tcpcc_bridge_direction_done(session, status);
-	return status;
-}
-
-static int tcpcc_bridge_send_public(struct tcpcc_bridge_session *session,
-				    const u8 *buffer, size_t length)
-{
-	size_t offset = 0;
-
-	while (offset < length) {
-		struct msghdr msg = { .msg_flags = MSG_NOSIGNAL };
-		struct kvec vec = {
-			.iov_base = (void *)(buffer + offset),
-			.iov_len = length - offset,
-		};
-		int sent;
-
-		sent = kernel_sendmsg(session->public_sock, &msg, &vec, 1,
-				      length - offset);
-		if (sent < 0)
-			return sent;
-		if (!sent)
-			return -EIO;
-		offset += sent;
-		session->backend_to_public_bytes += sent;
-	}
-
+	if (operations == TCPCC_BRIDGE_DIRECTION_BUDGET)
+		tcpcc_bridge_dispatcher_wake(NULL);
 	return 0;
 }
 
-static int tcpcc_bridge_backend_to_public_thread(void *arg)
+static int tcpcc_bridge_pump_backend_to_public(
+				struct tcpcc_bridge_session *session)
 {
-	struct tcpcc_bridge_session *session = arg;
-	bool host_ready = false;
-	int status = 0;
+	unsigned int operations = 0;
 
-	wait_for_completion(&session->start);
-	if (!READ_ONCE(session->running))
-		return 0;
+	while (operations < TCPCC_BRIDGE_DIRECTION_BUDGET &&
+	       !session->backend_to_public_done) {
+		if (session->backend_to_public_offset <
+		    session->backend_to_public_length) {
+			struct msghdr msg = {
+				.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL,
+			};
+			struct kvec vec = {
+				.iov_base = session->backend_to_public_buffer +
+					session->backend_to_public_offset,
+				.iov_len = session->backend_to_public_length -
+					session->backend_to_public_offset,
+			};
+			int sent;
 
-	while (!READ_ONCE(session->stopping)) {
-		ssize_t received;
-
-		if (!host_ready) {
-			status = tcpcc_bridge_wait_host(
-				session, &session->host_readable,
-				&session->read_events,
-				TCPCC_HOST_EVENT_READABLE);
-			if (status)
+			if (!tcpcc_bridge_take_writable(session, true))
 				break;
-			host_ready = true;
-		}
-
-		received = tcpcc_host_recv_fd(
-			session->host_fd, session->backend_to_public_buffer,
-			TCPCC_BRIDGE_BUFFER_LIMIT);
-		if (received == -EAGAIN) {
-			session->host_recv_eagain++;
-			host_ready = false;
+			sent = kernel_sendmsg(session->public_sock, &msg, &vec, 1,
+					      vec.iov_len);
+			operations++;
+			if (sent == -EAGAIN) {
+				break;
+			}
+			if (sent < 0)
+				return sent;
+			if (!sent)
+				return -EIO;
+			tcpcc_bridge_set_writable(session, true);
+			session->backend_to_public_offset += sent;
+			session->backend_to_public_bytes += sent;
+			if (session->backend_to_public_offset ==
+			    session->backend_to_public_length) {
+				session->backend_to_public_offset = 0;
+				session->backend_to_public_length = 0;
+			}
 			continue;
 		}
-		if (received < 0) {
-			status = (int)received;
-			break;
-		}
-		if (!received) {
-			status = kernel_sock_shutdown(session->public_sock, SHUT_WR);
-			break;
-		}
 
-		status = tcpcc_bridge_send_public(
-			session, session->backend_to_public_buffer, received);
-		if (status)
+		if (!tcpcc_bridge_take_readable(session, false))
 			break;
-		/* Keep draining until EAGAIN so edge-triggered readiness is safe. */
+		{
+			ssize_t received;
+
+			received = tcpcc_host_recv_fd(
+				session->host_fd,
+				session->backend_to_public_buffer,
+				TCPCC_BRIDGE_BUFFER_LIMIT);
+			operations++;
+			if (received == -EAGAIN) {
+				session->host_recv_eagain++;
+				break;
+			}
+			if (received < 0)
+				return (int)received;
+			if (!received) {
+				int ret = kernel_sock_shutdown(
+					session->public_sock, SHUT_WR);
+
+				if (ret)
+					return ret;
+				session->backend_to_public_done = true;
+				break;
+			}
+			tcpcc_bridge_set_readable(session, false);
+			session->backend_to_public_length = received;
+		}
 	}
 
-	tcpcc_bridge_direction_done(session, status);
-	return status;
+	if (operations == TCPCC_BRIDGE_DIRECTION_BUDGET)
+		tcpcc_bridge_dispatcher_wake(NULL);
+	return 0;
+}
+
+static void tcpcc_bridge_pump_session(struct tcpcc_bridge_session *session)
+{
+	unsigned long flags;
+	bool allocated;
+	bool running;
+	bool stopping;
+	int status;
+
+	spin_lock_irqsave(&session->lock, flags);
+	allocated = session->allocated;
+	running = session->running;
+	stopping = session->stopping;
+	spin_unlock_irqrestore(&session->lock, flags);
+	if (!allocated || (!running && !stopping))
+		return;
+	if (stopping) {
+		tcpcc_bridge_session_finish(session);
+		return;
+	}
+
+	status = tcpcc_bridge_pump_public_to_backend(session);
+	if (!status)
+		status = tcpcc_bridge_pump_backend_to_public(session);
+	if (status) {
+		tcpcc_bridge_session_stop(session, status, true);
+		tcpcc_bridge_session_finish(session);
+		return;
+	}
+	if (session->public_to_backend_done &&
+	    session->backend_to_public_done)
+		tcpcc_bridge_session_finish(session);
 }
 
 static void tcpcc_bridge_event_put(struct tcpcc_bridge_session *session)
@@ -341,8 +576,6 @@ static void tcpcc_bridge_dispatch_event(const struct tcpcc_host_event *event)
 	unsigned int index;
 	u32 runtime_slot;
 	bool connecting;
-	bool wake_read;
-	bool wake_write;
 	bool error;
 	int host_fd;
 
@@ -377,14 +610,12 @@ static void tcpcc_bridge_dispatch_event(const struct tcpcc_host_event *event)
 	}
 
 	error = event->events & TCPCC_HOST_EVENT_ERROR;
-	wake_read = event->events & (TCPCC_HOST_EVENT_READABLE |
-				       TCPCC_HOST_EVENT_HANGUP);
-	wake_write = event->events & (TCPCC_HOST_EVENT_WRITABLE |
-					TCPCC_HOST_EVENT_HANGUP);
-	if (wake_read)
-		session->read_events |= event->events;
-	if (wake_write)
-		session->write_events |= event->events;
+	if (event->events & (TCPCC_HOST_EVENT_READABLE |
+			     TCPCC_HOST_EVENT_HANGUP))
+		session->host_readable = true;
+	if (event->events & (TCPCC_HOST_EVENT_WRITABLE |
+			     TCPCC_HOST_EVENT_HANGUP))
+		session->host_writable = true;
 	session->terminal_events |= event->events &
 		(TCPCC_HOST_EVENT_HANGUP | TCPCC_HOST_EVENT_ERROR);
 	host_fd = session->host_fd;
@@ -394,13 +625,8 @@ static void tcpcc_bridge_dispatch_event(const struct tcpcc_host_event *event)
 		int status = tcpcc_host_socket_error(host_fd);
 
 		tcpcc_bridge_session_stop(session, status ? status : -EIO, true);
-	} else {
-		if (wake_read)
-			complete(&session->host_readable);
-		if (wake_write)
-			complete(&session->host_writable);
 	}
-
+	tcpcc_bridge_dispatcher_wake(NULL);
 	tcpcc_bridge_event_put(session);
 }
 
@@ -427,13 +653,27 @@ static void tcpcc_bridge_abort_all(int status)
 
 		if (!allocated)
 			continue;
-		if (connecting) {
+		if (connecting)
 			complete_all(&session->connect_ready);
-			complete_all(&session->host_readable);
-			complete_all(&session->host_writable);
-		} else {
+		else {
 			tcpcc_bridge_session_stop(session, status, true);
+			tcpcc_bridge_session_finish(session);
 		}
+	}
+}
+
+static int tcpcc_bridge_drain_host_events(void)
+{
+	for (;;) {
+		struct tcpcc_host_event event;
+		int ret;
+
+		ret = tcpcc_host_runtime_event_poll(&event);
+		if (ret == -EAGAIN)
+			return 0;
+		if (ret)
+			return ret;
+		tcpcc_bridge_dispatch_event(&event);
 	}
 }
 
@@ -441,23 +681,24 @@ static int tcpcc_bridge_dispatcher_thread(void *unused)
 {
 	int status = 0;
 
-	wait_for_completion(&tcpcc_bridge_manager.dispatcher_start);
-	while (!kthread_should_stop() &&
-	       !READ_ONCE(tcpcc_bridge_manager.dispatcher_stopping)) {
-		struct tcpcc_host_event event;
-		int ret;
+	for (;;) {
+		unsigned int index;
 
-		ret = tcpcc_host_runtime_event_wait_timeout(
-			&event, msecs_to_jiffies(TCPCC_BRIDGE_EVENT_POLL_MS));
-		if (ret == -ETIMEDOUT)
-			continue;
-		if (ret) {
-			status = ret;
-			WRITE_ONCE(tcpcc_bridge_manager.dispatcher_status, ret);
-			tcpcc_bridge_abort_all(ret);
+		wait_for_completion(&tcpcc_bridge_manager.dispatcher_work);
+		if (kthread_should_stop() ||
+		    READ_ONCE(tcpcc_bridge_manager.dispatcher_stopping))
+			break;
+
+		status = tcpcc_bridge_drain_host_events();
+		if (status) {
+			WRITE_ONCE(tcpcc_bridge_manager.dispatcher_status,
+				   status);
+			tcpcc_bridge_abort_all(status);
 			break;
 		}
-		tcpcc_bridge_dispatch_event(&event);
+		for (index = 0; index < TCPCC_BRIDGE_SESSION_LIMIT; index++)
+			tcpcc_bridge_pump_session(
+				&tcpcc_bridge_manager.sessions[index]);
 	}
 
 	WRITE_ONCE(tcpcc_bridge_manager.dispatcher_running, false);
@@ -476,16 +717,26 @@ static int tcpcc_bridge_start_dispatcher(void)
 
 	tcpcc_bridge_manager.dispatcher_stopping = false;
 	tcpcc_bridge_manager.dispatcher_status = 0;
-	reinit_completion(&tcpcc_bridge_manager.dispatcher_start);
+	reinit_completion(&tcpcc_bridge_manager.dispatcher_work);
+	status = tcpcc_host_runtime_event_set_notifier(
+		tcpcc_bridge_dispatcher_wake, &tcpcc_bridge_manager);
+	if (status)
+		return status;
+
 	task = kthread_run(tcpcc_bridge_dispatcher_thread, NULL,
-			   "tcpcc-m8.2-disp");
-	if (IS_ERR(task))
-		return PTR_ERR(task);
+			   "tcpcc-m9-disp");
+	if (IS_ERR(task)) {
+		status = PTR_ERR(task);
+		tcpcc_host_runtime_event_clear_notifier(
+			tcpcc_bridge_dispatcher_wake, &tcpcc_bridge_manager);
+		return status;
+	}
 
 	get_task_struct(task);
 	tcpcc_bridge_manager.dispatcher_task = task;
 	WRITE_ONCE(tcpcc_bridge_manager.dispatcher_running, true);
-	complete_all(&tcpcc_bridge_manager.dispatcher_start);
+	tcpcc_bridge_dispatcher_wake(NULL);
+	pr_notice("tcpcc: M9.3 single bridge dispatcher started\n");
 	return 0;
 }
 
@@ -533,17 +784,16 @@ static void tcpcc_bridge_prepare_session(
 	u32 generation = tcpcc_bridge_next_generation(session->generation);
 	unsigned int index = session - tcpcc_bridge_manager.sessions;
 
-	atomic_set(&session->directions_done, 0);
 	atomic_set(&session->event_refs, 0);
-	init_completion(&session->start);
 	init_completion(&session->finished);
 	init_completion(&session->connect_ready);
-	init_completion(&session->host_readable);
-	init_completion(&session->host_writable);
 	init_completion(&session->event_idle);
-	session->public_to_backend_task = NULL;
-	session->backend_to_public_task = NULL;
 	session->registered = false;
+	session->public_callbacks_installed = false;
+	session->saved_data_ready = NULL;
+	session->saved_write_space = NULL;
+	session->saved_state_change = NULL;
+	session->saved_error_report = NULL;
 
 	spin_lock_irqsave(&session->lock, flags);
 	session->public_sock = public_sock;
@@ -555,14 +805,23 @@ static void tcpcc_bridge_prepare_session(
 		TCPCC_BRIDGE_RUNTIME_SLOT_BASE + index, generation);
 	session->status = 0;
 	session->connect_events = 0;
-	session->read_events = 0;
-	session->write_events = 0;
 	session->terminal_events = 0;
 	session->host_send_eagain = 0;
 	session->host_partial_writes = 0;
 	session->host_recv_eagain = 0;
 	session->public_to_backend_bytes = 0;
 	session->backend_to_public_bytes = 0;
+	session->public_to_backend_offset = 0;
+	session->public_to_backend_length = 0;
+	session->backend_to_public_offset = 0;
+	session->backend_to_public_length = 0;
+	session->public_readable = false;
+	session->public_writable = false;
+	session->host_readable = false;
+	session->host_writable = false;
+	session->public_to_backend_done = false;
+	session->backend_to_public_done = false;
+	session->finished_notified = false;
 	session->connecting = true;
 	session->running = false;
 	session->stopping = false;
@@ -614,28 +873,6 @@ static int tcpcc_bridge_connect(struct tcpcc_bridge_session *session,
 	return 0;
 }
 
-static void tcpcc_bridge_stop_task(struct task_struct **task)
-{
-	if (!*task)
-		return;
-	kthread_stop_put(*task);
-	*task = NULL;
-}
-
-static void tcpcc_bridge_stop_setup_tasks(
-				struct tcpcc_bridge_session *session)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&session->lock, flags);
-	session->running = false;
-	session->stopping = true;
-	spin_unlock_irqrestore(&session->lock, flags);
-	complete_all(&session->start);
-	tcpcc_bridge_stop_task(&session->public_to_backend_task);
-	tcpcc_bridge_stop_task(&session->backend_to_public_task);
-}
-
 static int tcpcc_bridge_disable_events(
 				struct tcpcc_bridge_session *session)
 {
@@ -675,6 +912,7 @@ static void tcpcc_bridge_release_failed_start(
 	session->public_sock = NULL;
 	session->connecting = false;
 	session->running = false;
+	session->stopping = false;
 	session->accept_events = false;
 	session->allocated = false;
 	spin_unlock_irqrestore(&session->lock, flags);
@@ -722,43 +960,30 @@ int tcpcc_bridge_start(struct socket *public_sock, __be32 backend_address,
 	ret = tcpcc_bridge_connect(session, backend_address, backend_port);
 	if (ret)
 		goto fail;
-
-	session->public_to_backend_task = kthread_run(
-		tcpcc_bridge_public_to_backend_thread, session,
-		"tcpcc-p2b/%u", session->index);
-	if (IS_ERR(session->public_to_backend_task)) {
-		ret = PTR_ERR(session->public_to_backend_task);
-		session->public_to_backend_task = NULL;
+	ret = tcpcc_bridge_install_public_callbacks(session);
+	if (ret)
 		goto fail;
-	}
-	get_task_struct(session->public_to_backend_task);
-	session->backend_to_public_task = kthread_run(
-		tcpcc_bridge_backend_to_public_thread, session,
-		"tcpcc-b2p/%u", session->index);
-	if (IS_ERR(session->backend_to_public_task)) {
-		ret = PTR_ERR(session->backend_to_public_task);
-		session->backend_to_public_task = NULL;
-		goto fail;
-	}
-	get_task_struct(session->backend_to_public_task);
-
-	spin_lock_irqsave(&session->lock, flags);
-	session->connecting = false;
-	spin_unlock_irqrestore(&session->lock, flags);
 	ret = tcpcc_host_event_mod_mask(
 		session->host_fd, session->token,
 		TCPCC_HOST_EVENT_READABLE | TCPCC_HOST_EVENT_WRITABLE, true);
 	if (ret)
 		goto fail;
 
-	WRITE_ONCE(session->running, true);
+	spin_lock_irqsave(&session->lock, flags);
+	session->connecting = false;
+	session->public_readable = true;
+	session->public_writable = true;
+	session->host_readable = true;
+	session->host_writable = true;
+	session->running = true;
+	spin_unlock_irqrestore(&session->lock, flags);
 	*handle = session->handle;
-	complete_all(&session->start);
+	tcpcc_bridge_dispatcher_wake(NULL);
 	mutex_unlock(&tcpcc_bridge_control_lock);
 	return 0;
 
 fail:
-	tcpcc_bridge_stop_setup_tasks(session);
+	tcpcc_bridge_restore_public_callbacks(session);
 	cleanup_ret = tcpcc_bridge_disable_events(session);
 	if (!ret && cleanup_ret)
 		ret = cleanup_ret;
@@ -781,8 +1006,7 @@ static int tcpcc_bridge_reap(struct tcpcc_bridge_session *session,
 	int status;
 
 	cleanup_status = tcpcc_bridge_disable_events(session);
-	tcpcc_bridge_stop_task(&session->public_to_backend_task);
-	tcpcc_bridge_stop_task(&session->backend_to_public_task);
+	tcpcc_bridge_restore_public_callbacks(session);
 	close_status = tcpcc_bridge_close_host(session);
 	if (!cleanup_status && close_status)
 		cleanup_status = close_status;
@@ -969,9 +1193,12 @@ void tcpcc_bridge_cancel(void)
 
 	if (tcpcc_bridge_manager.dispatcher_task) {
 		WRITE_ONCE(tcpcc_bridge_manager.dispatcher_stopping, true);
+		tcpcc_bridge_dispatcher_wake(NULL);
 		kthread_stop_put(tcpcc_bridge_manager.dispatcher_task);
 		tcpcc_bridge_manager.dispatcher_task = NULL;
 		WRITE_ONCE(tcpcc_bridge_manager.dispatcher_running, false);
+		tcpcc_host_runtime_event_clear_notifier(
+			tcpcc_bridge_dispatcher_wake, &tcpcc_bridge_manager);
 	}
 unlock:
 	mutex_unlock(&tcpcc_bridge_control_lock);

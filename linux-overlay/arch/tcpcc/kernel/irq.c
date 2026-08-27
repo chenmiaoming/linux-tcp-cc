@@ -42,6 +42,8 @@ static unsigned int tcpcc_runtime_queue_tail;
 static unsigned int tcpcc_runtime_queue_count;
 static DEFINE_SPINLOCK(tcpcc_runtime_queue_lock);
 static DECLARE_COMPLETION(tcpcc_runtime_event_ready);
+static void (*tcpcc_runtime_event_notify)(void *);
+static void *tcpcc_runtime_event_notify_data;
 
 extern void tcpcc_timer_dispatch(void);
 
@@ -90,6 +92,9 @@ static void tcpcc_dispatch_host_irq(unsigned int irq)
 
 static irqreturn_t tcpcc_runtime_irq_handler(int irq, void *dev_id)
 {
+	void (*notify)(void *);
+	void *notify_data;
+
 	if (!in_hardirq())
 		panic("tcpcc: M8.2 runtime event ran outside hardirq context");
 	if (!tcpcc_runtime_pending_valid)
@@ -105,9 +110,13 @@ static irqreturn_t tcpcc_runtime_irq_handler(int irq, void *dev_id)
 				   TCPCC_HOST_RUNTIME_QUEUE_LIMIT;
 	tcpcc_runtime_queue_count++;
 	tcpcc_runtime_pending_valid = false;
+	notify = tcpcc_runtime_event_notify;
+	notify_data = tcpcc_runtime_event_notify_data;
 	spin_unlock(&tcpcc_runtime_queue_lock);
 
 	complete(&tcpcc_runtime_event_ready);
+	if (notify)
+		notify(notify_data);
 	return IRQ_HANDLED;
 }
 
@@ -159,6 +168,59 @@ int tcpcc_host_runtime_event_wait_timeout(struct tcpcc_host_event *event,
 					  unsigned long timeout)
 {
 	return tcpcc_runtime_event_dequeue(event, timeout);
+}
+
+int tcpcc_host_runtime_event_poll(struct tcpcc_host_event *event)
+{
+	unsigned long flags;
+
+	if (!try_wait_for_completion(&tcpcc_runtime_event_ready))
+		return -EAGAIN;
+
+	spin_lock_irqsave(&tcpcc_runtime_queue_lock, flags);
+	if (!tcpcc_runtime_queue_count) {
+		spin_unlock_irqrestore(&tcpcc_runtime_queue_lock, flags);
+		return -EIO;
+	}
+	*event = tcpcc_runtime_queue[tcpcc_runtime_queue_head];
+	tcpcc_runtime_queue_head = (tcpcc_runtime_queue_head + 1) %
+				   TCPCC_HOST_RUNTIME_QUEUE_LIMIT;
+	tcpcc_runtime_queue_count--;
+	spin_unlock_irqrestore(&tcpcc_runtime_queue_lock, flags);
+	return 0;
+}
+
+int tcpcc_host_runtime_event_set_notifier(void (*notify)(void *), void *data)
+{
+	unsigned long flags;
+	int ret = 0;
+
+	if (!notify)
+		return -EINVAL;
+	spin_lock_irqsave(&tcpcc_runtime_queue_lock, flags);
+	if (tcpcc_runtime_event_notify) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+	WRITE_ONCE(tcpcc_runtime_event_notify_data, data);
+	smp_store_release(&tcpcc_runtime_event_notify, notify);
+unlock:
+	spin_unlock_irqrestore(&tcpcc_runtime_queue_lock, flags);
+	return ret;
+}
+
+void tcpcc_host_runtime_event_clear_notifier(void (*notify)(void *),
+					     void *data)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&tcpcc_runtime_queue_lock, flags);
+	if (tcpcc_runtime_event_notify == notify &&
+	    tcpcc_runtime_event_notify_data == data) {
+		smp_store_release(&tcpcc_runtime_event_notify, NULL);
+		WRITE_ONCE(tcpcc_runtime_event_notify_data, NULL);
+	}
+	spin_unlock_irqrestore(&tcpcc_runtime_queue_lock, flags);
 }
 
 void tcpcc_host_idle_wait(void)
