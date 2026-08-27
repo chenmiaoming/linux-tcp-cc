@@ -94,6 +94,25 @@ static void tcpcc_service_restore_listener_callback(void)
 	write_unlock_bh(&sk->sk_callback_lock);
 }
 
+static void tcpcc_service_detach_accepted_callback(struct socket *public_sock)
+{
+	struct sock *sk = public_sock->sk;
+
+	/*
+	 * The accepted child can inherit the listener's sk_user_data and callback.
+	 * It is no longer an admission source; restore the original data callback
+	 * before the bridge installs its per-socket readiness wrapper.
+	 */
+	write_lock_bh(&sk->sk_callback_lock);
+	if (sk->sk_user_data == &tcpcc_service) {
+		sk->sk_user_data = NULL;
+		if (sk->sk_data_ready == tcpcc_service_listener_data_ready)
+			WRITE_ONCE(sk->sk_data_ready,
+				   tcpcc_service.saved_data_ready);
+	}
+	write_unlock_bh(&sk->sk_callback_lock);
+}
+
 static int tcpcc_service_find_free_handle_slot(void)
 {
 	unsigned int index;
@@ -203,6 +222,7 @@ static bool tcpcc_service_accept_batch(void)
 		}
 		accepted++;
 		progress = true;
+		tcpcc_service_detach_accepted_callback(public_sock);
 
 		ret = tcpcc_bridge_start(
 			public_sock, htonl(tcpcc_service.config.backend_ipv4),
