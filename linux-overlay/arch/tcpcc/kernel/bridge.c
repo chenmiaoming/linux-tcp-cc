@@ -979,6 +979,10 @@ static struct tcpcc_bridge_slot *tcpcc_bridge_allocate_slot(void)
 	unsigned long flags;
 	int id;
 
+	/*
+	 * Reuse the most recently released slot so stale-handle detection is
+	 * exercised immediately while preserving the slot's generation.
+	 */
 	if (!list_empty(&tcpcc_bridge_manager.free_slots)) {
 		slot = list_first_entry(&tcpcc_bridge_manager.free_slots,
 					struct tcpcc_bridge_slot, free_node);
@@ -1045,8 +1049,7 @@ static struct tcpcc_bridge_session *tcpcc_bridge_allocate_session(
 		return ERR_CAST(slot);
 	session = kzalloc(sizeof(*session), GFP_KERNEL);
 	if (!session) {
-		list_add_tail(&slot->free_node,
-			      &tcpcc_bridge_manager.free_slots);
+		list_add(&slot->free_node, &tcpcc_bridge_manager.free_slots);
 		return ERR_PTR(-ENOMEM);
 	}
 	generation = tcpcc_bridge_next_generation(slot->generation);
@@ -1192,7 +1195,7 @@ static void tcpcc_bridge_release_failed_start(
 		slot->session = NULL;
 	spin_unlock_irqrestore(&tcpcc_bridge_manager.registry_lock, flags);
 	list_del_init(&session->active_node);
-	list_add_tail(&slot->free_node, &tcpcc_bridge_manager.free_slots);
+	list_add(&slot->free_node, &tcpcc_bridge_manager.free_slots);
 
 	spin_lock_irqsave(&session->lock, flags);
 	session->public_sock = NULL;
@@ -1338,7 +1341,7 @@ static int tcpcc_bridge_reap(struct tcpcc_bridge_session *session,
 		slot->session = NULL;
 	spin_unlock_irqrestore(&tcpcc_bridge_manager.registry_lock, flags);
 	list_del_init(&session->active_node);
-	list_add_tail(&slot->free_node, &tcpcc_bridge_manager.free_slots);
+	list_add(&slot->free_node, &tcpcc_bridge_manager.free_slots);
 	tcpcc_bridge_manager.active_sessions--;
 
 	spin_lock_irqsave(&tcpcc_bridge_manager.ready_lock, flags);
