@@ -107,6 +107,9 @@ tcpcc_child_exec(const char *kernel_path, int tun_fd,
 	    dup2(tun_fd, TCPCC_HOSTED_TUN_FD) < 0 ||
 	    dup2(exec_status[1], TCPCC_EXEC_STATUS_FD) < 0)
 		tcpcc_child_report_exec_error(exec_status[1], errno);
+	/* dup2(oldfd, oldfd) preserves FD_CLOEXEC when the TUN is already fd 3. */
+	if (fcntl(TCPCC_HOSTED_TUN_FD, F_SETFD, 0) < 0)
+		tcpcc_child_report_exec_error(TCPCC_EXEC_STATUS_FD, errno);
 	if (fcntl(TCPCC_EXEC_STATUS_FD, F_SETFD, FD_CLOEXEC) < 0)
 		tcpcc_child_report_exec_error(TCPCC_EXEC_STATUS_FD, errno);
 
