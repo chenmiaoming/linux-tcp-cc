@@ -1,0 +1,40 @@
+name: M9 native runtime
+
+on:
+  pull_request:
+    branches:
+      - 6.18.y
+    paths:
+      - '.github/workflows/m9-native-runtime.yml'
+      - 'Makefile'
+      - 'docs/m9-native-event-runtime.md'
+      - 'native/**'
+      - 'linux-overlay/arch/tcpcc/include/asm/bridge.h'
+      - 'linux-overlay/arch/tcpcc/include/asm/tcpcc_control_abi.h'
+      - 'linux-overlay/arch/tcpcc/kernel/control.c'
+      - 'tools/tcpcc_control.py'
+  push:
+    branches:
+      - 6.18.y
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Build the native host boundary
+        run: make native-build
+
+      - name: Exercise control ABI and exec boundaries
+        run: make native-check

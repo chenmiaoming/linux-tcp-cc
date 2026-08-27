@@ -38,6 +38,13 @@ M8's target product is a TUN-backed inbound server TCP front end, described in
 Its native CUBIC/BBR versus tcpcc BBR high-BDP iperf gate is documented in
 [`docs/m8-high-bdp-iperf.md`](docs/m8-high-bdp-iperf.md).
 
+M9 is migrating the installed runtime from Python to a native C supervisor and
+a single-owner, event-driven hosted bridge. The process boundary, capacity
+model, and staged CI gates are described in
+[`docs/m9-native-event-runtime.md`](docs/m9-native-event-runtime.md). The
+existing Python command remains the supported entry point until those parity
+gates pass.
+
 ## Server-ingress command
 
 Build and validate the hosted kernel, then install the command and its private
