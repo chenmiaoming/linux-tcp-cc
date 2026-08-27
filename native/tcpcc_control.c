@@ -24,6 +24,10 @@ _Static_assert(sizeof(struct tcpcc_bridge_result) == 64,
 	       "tcpcc bridge-result ABI drift");
 _Static_assert(sizeof(struct tcpcc_control_hello) == 88,
 	       "tcpcc hello ABI drift");
+_Static_assert(sizeof(struct tcpcc_control_service_config) == 16,
+	       "tcpcc service-config ABI drift");
+_Static_assert(sizeof(struct tcpcc_control_service_stats) == 88,
+	       "tcpcc service-stats ABI drift");
 
 #if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error "the tcpcc version-1 control ABI requires a little-endian host"

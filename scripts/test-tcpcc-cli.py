@@ -57,6 +57,8 @@ from tcpcc_control import (  # noqa: E402
     OP_SOCKET,
     REQUEST,
     RESPONSE,
+    SERVICE_CONFIG,
+    SERVICE_STATS,
     VERSION,
     ControlClient,
     ControlOperationError,
@@ -64,7 +66,9 @@ from tcpcc_control import (  # noqa: E402
     ControlResponse,
     decode_bridge_result,
     decode_response,
+    decode_service_stats,
     encode_request,
+    encode_service_config,
 )
 from tcpcc_host import (  # noqa: E402
     CheckResult,
@@ -224,6 +228,50 @@ class ControlCodecTests(unittest.TestCase):
         result = decode_bridge_result(data, allow_terminal_error=True)
         self.assertEqual(result.status, -errno.ECONNRESET)
         self.assertEqual(result.host_send_eagain, 4)
+
+    def test_hosted_service_config_and_stats_have_fixed_layouts(self) -> None:
+        config = encode_service_config(0x7F000001, 8443, 8, 4)
+        self.assertEqual(len(config), 16)
+        self.assertEqual(
+            SERVICE_CONFIG.unpack(config),
+            (0x7F000001, 8443, 0, 8, 4),
+        )
+
+        raw = SERVICE_STATS.pack(
+            11,
+            10,
+            1,
+            1234,
+            5678,
+            1,
+            3,
+            8,
+            4,
+            7,
+            1,
+            2,
+            2,
+            -errno.ECONNRESET,
+            0,
+            0,
+            0,
+        )
+        stats = decode_service_stats(raw)
+        self.assertEqual(stats.accepted_connections, 11)
+        self.assertEqual(stats.completed_connections, 10)
+        self.assertEqual(stats.public_to_backend_bytes, 1234)
+        self.assertEqual(stats.state, 2)
+        self.assertEqual(stats.last_error, -errno.ECONNRESET)
+
+    def test_hosted_service_stats_reject_reserved_and_positive_error(self) -> None:
+        values = [0] * 17
+        values[-1] = 1
+        with self.assertRaisesRegex(ControlProtocolError, "reserved"):
+            decode_service_stats(SERVICE_STATS.pack(*values))
+        values[-1] = 0
+        values[13] = 1
+        with self.assertRaisesRegex(ControlProtocolError, "positive"):
+            decode_service_stats(SERVICE_STATS.pack(*values))
 
 
 class ParserTests(unittest.TestCase):

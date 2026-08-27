@@ -29,6 +29,10 @@ int tcpcc_bridge_join(int handle, unsigned long timeout,
 		      struct tcpcc_bridge_result *result);
 int tcpcc_bridge_join_result(int handle, unsigned long timeout,
 			     struct tcpcc_bridge_result *result);
+int tcpcc_bridge_try_join_result(int handle,
+				 struct tcpcc_bridge_result *result);
+int tcpcc_bridge_set_completion_notifier(void (*notify)(void *), void *data);
+void tcpcc_bridge_clear_completion_notifier(void (*notify)(void *), void *data);
 bool tcpcc_bridge_active(void);
 void tcpcc_bridge_cancel(void);
 

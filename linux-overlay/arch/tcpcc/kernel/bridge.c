@@ -63,6 +63,8 @@ struct tcpcc_bridge_manager {
 	unsigned int active_sessions;
 	struct completion dispatcher_start;
 	struct task_struct *dispatcher_task;
+	void (*completion_notify)(void *);
+	void *completion_notify_data;
 	struct tcpcc_bridge_session sessions[TCPCC_BRIDGE_SESSION_LIMIT];
 };
 
@@ -133,6 +135,9 @@ static void tcpcc_bridge_session_stop(struct tcpcc_bridge_session *session,
 static void tcpcc_bridge_direction_done(struct tcpcc_bridge_session *session,
 					int status)
 {
+	void (*notify)(void *);
+	void *notify_data;
+
 	if (status)
 		tcpcc_bridge_session_stop(session, status, true);
 	if (atomic_inc_return(&session->directions_done) != 2)
@@ -140,6 +145,12 @@ static void tcpcc_bridge_direction_done(struct tcpcc_bridge_session *session,
 
 	tcpcc_bridge_session_stop(session, 0, false);
 	complete(&session->finished);
+	notify = smp_load_acquire(&tcpcc_bridge_manager.completion_notify);
+	if (notify) {
+		notify_data = READ_ONCE(
+			tcpcc_bridge_manager.completion_notify_data);
+		notify(notify_data);
+	}
 }
 
 static int tcpcc_bridge_wait_host(struct tcpcc_bridge_session *session,
@@ -847,6 +858,60 @@ int tcpcc_bridge_join_result(int handle, unsigned long timeout,
 			     struct tcpcc_bridge_result *result)
 {
 	return tcpcc_bridge_join_common(handle, timeout, result, false);
+}
+
+int tcpcc_bridge_try_join_result(int handle,
+				 struct tcpcc_bridge_result *result)
+{
+	struct tcpcc_bridge_session *session;
+	int ret = 0;
+
+	mutex_lock(&tcpcc_bridge_control_lock);
+	session = tcpcc_bridge_find_handle(handle);
+	if (!session) {
+		ret = -ENOENT;
+		goto unlock;
+	}
+	if (!try_wait_for_completion(&session->finished)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
+	tcpcc_bridge_reap(session, result);
+unlock:
+	mutex_unlock(&tcpcc_bridge_control_lock);
+	return ret;
+}
+
+int tcpcc_bridge_set_completion_notifier(void (*notify)(void *), void *data)
+{
+	int ret = 0;
+
+	if (!notify)
+		return -EINVAL;
+	mutex_lock(&tcpcc_bridge_control_lock);
+	tcpcc_bridge_manager_init();
+	if (tcpcc_bridge_manager.active_sessions ||
+	    tcpcc_bridge_manager.completion_notify) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+	WRITE_ONCE(tcpcc_bridge_manager.completion_notify_data, data);
+	smp_store_release(&tcpcc_bridge_manager.completion_notify, notify);
+unlock:
+	mutex_unlock(&tcpcc_bridge_control_lock);
+	return ret;
+}
+
+void tcpcc_bridge_clear_completion_notifier(void (*notify)(void *), void *data)
+{
+	mutex_lock(&tcpcc_bridge_control_lock);
+	if (tcpcc_bridge_manager.completion_notify == notify &&
+	    tcpcc_bridge_manager.completion_notify_data == data &&
+	    !tcpcc_bridge_manager.active_sessions) {
+		smp_store_release(&tcpcc_bridge_manager.completion_notify, NULL);
+		WRITE_ONCE(tcpcc_bridge_manager.completion_notify_data, NULL);
+	}
+	mutex_unlock(&tcpcc_bridge_control_lock);
 }
 
 int tcpcc_bridge_cancel_session(int handle)
