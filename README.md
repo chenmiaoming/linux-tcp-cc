@@ -78,24 +78,24 @@ sudo tcpcc \
   --cc bbr
 ```
 
-The compatibility CLI currently defaults to eight simultaneous connections
-and a five-second graceful-shutdown window:
+The CLI defaults to 4095 simultaneous connections and a five-second
+graceful-shutdown window. Operators can still set a lower admission ceiling:
 
 ```bash
 sudo tcpcc \
   --listen 203.0.113.10:443 \
   --backend 127.0.0.1:443 \
   --cc bbr \
-  --max-connections 8 \
+  --max-connections 2048 \
   --shutdown-grace-period 5
 ```
 
-Eight is no longer a hosted bridge limit. The dynamic bridge accepts an
-explicit `--max-connections` up to the current 4095 handle-encoding ceiling,
-allocates 16-KiB direction buffers only while data is ready, and shares a
-256-KiB aggregate payload-buffer budget. M9 capacity CI is replacing the
-temporary default of eight with a measured resource-aware `auto` admission
-policy; 4095 is not itself a supported-capacity claim.
+The dynamic bridge accepts `--max-connections` from 1 through the current 4095
+handle-encoding ceiling, allocates 16-KiB direction buffers only while data is
+ready, and shares a 256-KiB aggregate payload-buffer budget. M9 capacity CI
+holds 4095 simultaneous connections on one listener with zero admission or
+bridge-start failures, so 4095 is also the current measured default. The handle
+layout remains a ceiling to remove, not a final proxy-scale capacity target.
 
 The public connection terminates in the hosted Linux stack using BBR; the
 ordinary loopback connection to the application is a separate stream bridge.
