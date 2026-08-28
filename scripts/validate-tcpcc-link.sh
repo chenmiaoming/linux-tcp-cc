@@ -32,6 +32,7 @@ fi
 test -s "$OUT/vmlinux"
 readelf -h "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.elf-header"
 size -A "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.sections"
+cp "$OUT/.config" "$ROOT/.build/tcpcc-vmlinux.config"
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
 

@@ -61,7 +61,7 @@ jobs:
           path: |
             .build/tcpcc-vmlinux.link.log
             .build/tcpcc-link-out/arch/tcpcc/kernel/vmlinux.lds
-            .build/tcpcc-link-out/.config
+            .build/tcpcc-vmlinux.config
             .build/tcpcc-vmlinux.sections
           if-no-files-found: warn
 
@@ -78,7 +78,7 @@ jobs:
             .build/tcpcc-link.env
             .build/tcpcc-vmlinux.elf-header
             .build/tcpcc-vmlinux.sections
-            .build/tcpcc-link-out/.config
+            .build/tcpcc-vmlinux.config
             .build/prepared.env
             .build/patches.sha256
             .build/overlay.sha256
