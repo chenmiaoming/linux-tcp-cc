@@ -70,7 +70,7 @@ idle connection cost grow unnecessarily.
 M9 replaces it with dynamically allocated, generation-tagged flow objects and
 three independent limits:
 
-- `max_connections`: admission ceiling, configurable at runtime;
+- `max_connections`: optional admission ceiling (`0` means unlimited);
 - `max_buffer_bytes`: aggregate payload-buffer budget;
 - a small per-direction buffer cap allocated only when a flow carries data.
 
@@ -156,10 +156,10 @@ prove that the event state machine preserves M8 behavior.
 M9.4 replaces both remaining fixed-capacity structures. Bridge slots are
 allocated as the historical connection peak grows and retain their generation
 after a flow is reaped, while active flow objects and hosted-service tracking
-nodes exist only for live connections. The twelve-bit slot field provides an
-encoding ceiling of 4095 simultaneous flows; that number was not treated as a
-supported default until the M9.6 capacity gate subsequently exercised all
-4095 slots.
+nodes exist only for live connections. M9.6 first exercised every slot in the
+twelve-bit layout, then widened the positive `s32` handle to a twenty-bit slot
+and eleven-bit generation. This raises the encoding boundary from 4095 to
+1048575 while retaining stale-handle protection.
 
 The dispatcher consumes a deduplicated ready-flow queue instead of scanning
 the encoding range or every idle connection. Each direction obtains its
@@ -173,14 +173,14 @@ The first M9.4 CI gate holds nine flows concurrently, proving that eight is no
 longer a bridge limit while preserving generation reuse, reset isolation,
 half-close, backpressure, and signal-drain coverage. Larger idle/active/slow-
 peer discovery belongs to M9.6 and selects the supported default from measured
-CPU and memory behavior rather than from the 4095-handle encoding ceiling.
+CPU and memory behavior rather than from a handle-encoding ceiling.
 
 ## M9.6 capacity discovery and admission policy
 
-The CLI defaults to the CI-validated current capacity of 4095 connections and
-retains an explicit operator override comparable to a proxy `maxconn` setting.
-This removes the historical eight-flow admission gate without claiming that a
-handle encoding is the final production capacity.
+The CLI defaults to `max_connections=0`, which disables policy admission
+limiting. A positive operator override remains available, comparable to a
+proxy `maxconn` setting. This removes the historical eight-flow admission gate
+without confusing a tested capacity or handle encoding with a product default.
 
 The first discovery job drives the hosted `SERVICE_START` path directly so the
 test harness does not create one polling loop or thread per flow. It grows one
@@ -192,7 +192,14 @@ or bridge-start failures; at that stage the hosted process used 27,280 KiB RSS,
 held 4,101 host file descriptors, and consumed zero CPU ticks during the
 250-millisecond idle sample.
 
-The 4095 value is also the current twelve-bit bridge-handle encoding ceiling.
-Because discovery reached it without admission or idle-resource failure, the
-next capacity gate widens that opaque identifier and measures higher stages.
-An ABI bit allocation must not become the product's final concurrency claim.
+Because discovery reached the old 4095 encoding ceiling without admission or
+idle-resource failure, the next gate expands the handle boundary to 1048575 and
+runs 8192 and 16384 stages with 512 MiB of hosted RAM. Because the CI driver
+creates both the public clients and local backend sockets on one host, that job
+uses the full 1024-65535 ephemeral-port range and records it in the report; this
+prevents the load generator from consuming two default-range ports per flow and
+masquerading as a bridge limit. The vmlinux launcher now
+passes `--memory-mib=N`; 128 MiB remains the low-resource default and safety
+minimum, but no project-defined maximum remains. Capacity stages use explicit
+targets and do not select a default connection limit. An ABI bit allocation
+must not become the product's final concurrency claim.

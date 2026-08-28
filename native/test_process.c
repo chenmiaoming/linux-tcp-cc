@@ -29,7 +29,8 @@ int main(int argc, char **argv)
 	tun_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
 	if (tun_fd < 3)
 		fail("fake TUN fd creation failed");
-	if (tcpcc_hosted_process_start(&process, argv[1], tun_fd, &error) != 0)
+	if (tcpcc_hosted_process_start(&process, argv[1], 512, tun_fd,
+				       &error) != 0)
 		fail(error.message);
 	close(tun_fd);
 

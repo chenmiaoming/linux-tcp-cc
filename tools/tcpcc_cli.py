@@ -58,8 +58,10 @@ DEFAULT_TUN_PREFIX = 32
 DEFAULT_BACKLOG = 128
 DEFAULT_POLL_INTERVAL = 0.01
 DEFAULT_KERNEL_SHUTDOWN_TIMEOUT = 10.0
-BRIDGE_SESSION_LIMIT = 4095
-DEFAULT_MAX_CONNECTIONS = BRIDGE_SESSION_LIMIT
+DEFAULT_MEMORY_MIB = 128
+MINIMUM_MEMORY_MIB = 128
+BRIDGE_SESSION_LIMIT = 1048575
+DEFAULT_MAX_CONNECTIONS = 0
 DEFAULT_SHUTDOWN_GRACE_PERIOD = 5.0
 MAX_SHUTDOWN_GRACE_PERIOD = 300.0
 BRIDGE_BUFFER_LIMIT = 16 * 1024
@@ -160,6 +162,7 @@ class ServiceConfig:
     backend: Endpoint
     cc: str
     kernel: Path
+    memory_mib: int = DEFAULT_MEMORY_MIB
     firewall_backend: str = "nft-lib"
     iptables_variant: str = "iptables"
     tun_name: str | None = None
@@ -179,6 +182,14 @@ class ServiceConfig:
             raise ValueError(
                 "backend must use 127.0.0.1; the current hosted bridge "
                 "intentionally reaches only a local application"
+            )
+        if (
+            isinstance(self.memory_mib, bool)
+            or not isinstance(self.memory_mib, int)
+            or self.memory_mib < MINIMUM_MEMORY_MIB
+        ):
+            raise ValueError(
+                f"hosted memory must be at least {MINIMUM_MEMORY_MIB} MiB"
             )
         if not isinstance(self.cc, str) or CC_NAME.fullmatch(self.cc) is None:
             raise ValueError(
@@ -203,10 +214,10 @@ class ServiceConfig:
         if (
             isinstance(self.max_connections, bool)
             or not isinstance(self.max_connections, int)
-            or not 1 <= self.max_connections <= BRIDGE_SESSION_LIMIT
+            or not 0 <= self.max_connections <= BRIDGE_SESSION_LIMIT
         ):
             raise ValueError(
-                "max connections must be from 1 through "
+                "max connections must be 0 (unlimited) or from 1 through "
                 f"{BRIDGE_SESSION_LIMIT}"
             )
         if (
@@ -427,6 +438,17 @@ def build_parser(*, environ: dict[str, str] | None = None) -> argparse.ArgumentP
         help="ARCH=tcpcc vmlinux executable (or set TCPCC_KERNEL)",
     )
     parser.add_argument(
+        "--memory-mib",
+        type=int,
+        default=DEFAULT_MEMORY_MIB,
+        metavar="MIB",
+        help=(
+            "host-backed RAM available to vmlinux "
+            f"(default: {DEFAULT_MEMORY_MIB} MiB; minimum: "
+            f"{MINIMUM_MEMORY_MIB} MiB)"
+        ),
+    )
+    parser.add_argument(
         "--firewall-backend",
         choices=sorted(FIREWALL_BACKENDS),
         default="nft-lib",
@@ -470,8 +492,8 @@ def build_parser(*, environ: dict[str, str] | None = None) -> argparse.ArgumentP
         default=DEFAULT_MAX_CONNECTIONS,
         metavar="N",
         help=(
-            "maximum simultaneous bridged connections "
-            f"(default: {DEFAULT_MAX_CONNECTIONS}; hosted encoding limit: "
+            "optional simultaneous-connection admission limit; 0 disables "
+            f"the policy limit (default: 0; hosted encoding limit: "
             f"{BRIDGE_SESSION_LIMIT})"
         ),
     )
@@ -503,6 +525,7 @@ def config_from_namespace(namespace: argparse.Namespace) -> ServiceConfig:
         backend=namespace.backend,
         cc=namespace.cc,
         kernel=kernel,
+        memory_mib=namespace.memory_mib,
         firewall_backend=namespace.firewall_backend,
         iptables_variant=namespace.iptables_variant,
         tun_name=namespace.tun_name,
@@ -582,7 +605,10 @@ class HostedKernelRuntime:
         if isinstance(tun_fd, bool) or not isinstance(tun_fd, int) or tun_fd < 3:
             raise ValueError("TUN fd must be an inherited descriptor of at least 3")
         self.process = self.process_factory(
-            [str(self.config.kernel)],
+            [
+                str(self.config.kernel),
+                f"--memory-mib={self.config.memory_mib}",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,
@@ -728,7 +754,10 @@ class HostedKernelRuntime:
     def _accept_available(self) -> None:
         if self.listener_handle is None:
             raise RuntimeError("hosted listener is unavailable")
-        while len(self.active_bridges) < self.config.max_connections:
+        while (
+            not self.config.max_connections
+            or len(self.active_bridges) < self.config.max_connections
+        ):
             try:
                 accepted = self._channel().transact(
                     OP_ACCEPT_NONBLOCK,
@@ -1004,6 +1033,7 @@ def run_service(
                         hosted_address=config.tun_guest_address,
                         hosted_ifindex=runtime.ifindex,
                         hosted_pid=runtime.pid,
+                        hosted_memory_mib=config.memory_mib,
                         max_connections=config.max_connections,
                         shutdown_grace_period=config.shutdown_grace_period,
                     )

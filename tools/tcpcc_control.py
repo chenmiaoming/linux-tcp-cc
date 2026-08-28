@@ -288,7 +288,7 @@ def encode_service_config(
 
     _bounded_integer(backend_ipv4, "backend IPv4", 0, 0xFFFFFFFF)
     _bounded_integer(backend_port, "backend port", 1, 0xFFFF)
-    _bounded_integer(max_connections, "max connections", 1, 0xFFFFFFFF)
+    _bounded_integer(max_connections, "max connections", 0, 0xFFFFFFFF)
     _bounded_integer(accept_batch, "accept batch", 1, 0xFFFFFFFF)
     return SERVICE_CONFIG.pack(
         backend_ipv4,
