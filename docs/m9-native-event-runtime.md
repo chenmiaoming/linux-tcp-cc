@@ -174,3 +174,25 @@ longer a bridge limit while preserving generation reuse, reset isolation,
 half-close, backpressure, and signal-drain coverage. Larger idle/active/slow-
 peer discovery belongs to M9.6 and selects the supported default from measured
 CPU and memory behavior rather than from the 4095-handle encoding ceiling.
+
+## M9.6 capacity discovery and admission policy
+
+The Python compatibility CLI still defaults to eight connections, but that is
+only the pre-discovery admission setting; it is not the intended production
+capacity. M9.6 replaces it with a resource-aware `auto` policy. The policy must
+be based on repeatable hosted-memory and file-descriptor measurements and must
+retain an explicit operator override comparable to a proxy `maxconn` setting.
+
+The first discovery job drives the hosted `SERVICE_START` path directly so the
+test harness does not create one polling loop or thread per flow. It grows one
+listener and backend through 64, 256, 1024, 2048, and 4095 simultaneous
+connections, exercises bidirectional data on 64 flows, and records aggregate
+service counters, process RSS, virtual memory, host fd count, CPU ticks, and
+bridge-buffer high-water. Sixty-four is the initial regression floor; higher
+stage failure is reported as capacity data until CI establishes a conservative
+supported default.
+
+The 4095 value is only the current twelve-bit bridge-handle encoding ceiling.
+If the discovery reaches that ceiling without resource or latency failure, the
+handle becomes a wider opaque identifier before a default is selected. An ABI
+bit allocation must not become the product's concurrency claim.

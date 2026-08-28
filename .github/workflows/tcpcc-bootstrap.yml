@@ -21,6 +21,7 @@ on:
       - 'scripts/run-tcpcc-runtime-test.py'
       - 'scripts/run-tcpcc-m6-diagnostic.py'
       - 'scripts/run-tcpcc-tun-test.py'
+      - 'scripts/run-tcpcc-capacity-discovery.py'
       - 'scripts/run-tcpcc-high-bdp-iperf.py'
       - 'scripts/test-tcpcc-cli.py'
       - 'scripts/test-tcpcc-cli-integration.py'
@@ -70,6 +71,7 @@ jobs:
           python3 -m py_compile scripts/run-tcpcc-runtime-test.py
           python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
           python3 -m py_compile scripts/run-tcpcc-tun-test.py
+          python3 -m py_compile scripts/run-tcpcc-capacity-discovery.py
           python3 -m py_compile scripts/run-tcpcc-high-bdp-iperf.py
           python3 -m py_compile scripts/test-tcpcc-cli.py
           python3 -m py_compile scripts/test-tcpcc-cli-integration.py
@@ -232,6 +234,52 @@ jobs:
         with:
           name: tcpcc-m85-cli-${{ matrix.name }}
           path: .build/m85-cli-${{ matrix.name }}
+          if-no-files-found: warn
+
+  capacity-discovery:
+    name: M9 connection capacity discovery
+    needs: start-kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Download hosted kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: tcpcc-m85-vmlinux
+          path: .build/tcpcc-bootstrap-out
+
+      - name: Install capacity probe dependencies
+        run: |
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends iproute2 procps
+
+      - name: Load TUN and prepare the hosted image
+        run: |
+          sudo -n modprobe tun || true
+          test -c /dev/net/tun
+          chmod u+x .build/tcpcc-bootstrap-out/vmlinux
+
+      - name: Discover idle and active connection capacity
+        run: |
+          sudo -n python3 scripts/run-tcpcc-capacity-discovery.py \
+            --integration \
+            --kernel .build/tcpcc-bootstrap-out/vmlinux \
+            --levels 64,256,1024,2048,4095 \
+            --minimum 64 \
+            --active-connections 64 \
+            --output .build/m9-capacity/report.json \
+            --boot-log .build/m9-capacity/vmlinux.log
+
+      - name: Upload capacity report and hosted log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-m9-capacity
+          path: .build/m9-capacity
           if-no-files-found: warn
 
   high-bdp-iperf:
