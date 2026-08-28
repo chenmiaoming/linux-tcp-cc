@@ -32,6 +32,8 @@ fi
 test -s "$OUT/vmlinux"
 readelf -h "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.elf-header"
 size -A "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.sections"
+nm --print-size --size-sort --radix=d "$OUT/vmlinux" \
+  > "$ROOT/.build/tcpcc-vmlinux.symbols"
 cp "$OUT/.config" "$ROOT/.build/tcpcc-vmlinux.config"
 
 vmlinux_size=$(stat -c '%s' "$OUT/vmlinux")

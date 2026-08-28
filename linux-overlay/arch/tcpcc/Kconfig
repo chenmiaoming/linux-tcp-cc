@@ -3,9 +3,11 @@
 config TCPCC
 	def_bool y
 	depends on !SMP && !COREDUMP && !COMPAT
+	select ARCH_CONFIGURES_CPU_MITIGATIONS
 	select FLATMEM
 	select GENERIC_CLOCKEVENTS
-	select GENERIC_CPU_DEVICES
+	select NO_DMA
+	select NO_IOMEM
 	select NO_PREEMPT
 	select THREAD_INFO_IN_TASK
 	select UACCESS_MEMCPY
