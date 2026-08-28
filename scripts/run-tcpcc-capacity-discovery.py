@@ -50,6 +50,7 @@ PUBLIC_PORT = 18500
 BRIDGE_SESSION_LIMIT = 65535
 DEFAULT_MEMORY_MIB = 512
 ACCEPT_BATCH = 64
+LISTEN_BACKLOG = 4096
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
 IFF_NO_PI = 0x1000
@@ -433,7 +434,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         backend_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         backend_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         backend_listener.bind(("127.0.0.1", 0))
-        backend_listener.listen(BRIDGE_SESSION_LIMIT)
+        backend_listener.listen(LISTEN_BACKLOG)
         backend_port = backend_listener.getsockname()[1]
 
         listener = control.transact(OP_SOCKET).handle
@@ -447,7 +448,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             int(ipaddress.IPv4Address(GUEST_IPV4)),
             PUBLIC_PORT,
         )
-        control.transact(OP_LISTEN, listener, BRIDGE_SESSION_LIMIT)
+        control.transact(OP_LISTEN, listener, LISTEN_BACKLOG)
         service_handle = control.transact(
             OP_SERVICE_START,
             listener,
