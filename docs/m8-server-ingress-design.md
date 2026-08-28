@@ -36,11 +36,12 @@ backend boundary deliberately accepts only `127.0.0.1`:
 --cc ALGORITHM
 ```
 
-`--max-connections` controls admission from 1 through the hosted bridge limit
-of 8 and defaults to 8. `--shutdown-grace-period` controls how long signal
-shutdown waits for active streams to finish before canceling them; it defaults
-to 5 seconds and accepts 0 through 300 seconds. Zero requests immediate
-cancellation after listener closure.
+The original M8 gate limited `--max-connections` to 8. M9.4 replaced that fixed
+table with dynamic flows, and M9.6 raised both the current default and maximum
+to the CI-validated handle ceiling of 4095. `--shutdown-grace-period` controls
+how long signal shutdown waits for active streams to finish before canceling
+them; it defaults to 5 seconds and accepts 0 through 300 seconds. Zero requests
+immediate cancellation after listener closure.
 
 The default internal point-to-point endpoints are `198.18.0.1` on the host and
 `198.18.0.2/32` in the hosted stack. Advanced deployments can set

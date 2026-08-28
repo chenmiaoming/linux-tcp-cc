@@ -157,9 +157,9 @@ M9.4 replaces both remaining fixed-capacity structures. Bridge slots are
 allocated as the historical connection peak grows and retain their generation
 after a flow is reaped, while active flow objects and hosted-service tracking
 nodes exist only for live connections. The twelve-bit slot field provides an
-encoding ceiling of 4095 simultaneous flows; it is not the supported default.
-The CLI default remains eight until capacity CI establishes a conservative
-value.
+encoding ceiling of 4095 simultaneous flows; that number was not treated as a
+supported default until the M9.6 capacity gate subsequently exercised all
+4095 slots.
 
 The dispatcher consumes a deduplicated ready-flow queue instead of scanning
 the encoding range or every idle connection. Each direction obtains its
@@ -177,22 +177,22 @@ CPU and memory behavior rather than from the 4095-handle encoding ceiling.
 
 ## M9.6 capacity discovery and admission policy
 
-The Python compatibility CLI still defaults to eight connections, but that is
-only the pre-discovery admission setting; it is not the intended production
-capacity. M9.6 replaces it with a resource-aware `auto` policy. The policy must
-be based on repeatable hosted-memory and file-descriptor measurements and must
-retain an explicit operator override comparable to a proxy `maxconn` setting.
+The CLI defaults to the CI-validated current capacity of 4095 connections and
+retains an explicit operator override comparable to a proxy `maxconn` setting.
+This removes the historical eight-flow admission gate without claiming that a
+handle encoding is the final production capacity.
 
 The first discovery job drives the hosted `SERVICE_START` path directly so the
 test harness does not create one polling loop or thread per flow. It grows one
 listener and backend through 64, 256, 1024, 2048, and 4095 simultaneous
 connections, exercises bidirectional data on 64 flows, and records aggregate
 service counters, process RSS, virtual memory, host fd count, CPU ticks, and
-bridge-buffer high-water. Sixty-four is the initial regression floor; higher
-stage failure is reported as capacity data until CI establishes a conservative
-supported default.
+bridge-buffer high-water. It reached 4095 active connections with zero rejects
+or bridge-start failures; at that stage the hosted process used 27,280 KiB RSS,
+held 4,101 host file descriptors, and consumed zero CPU ticks during the
+250-millisecond idle sample.
 
-The 4095 value is only the current twelve-bit bridge-handle encoding ceiling.
-If the discovery reaches that ceiling without resource or latency failure, the
-handle becomes a wider opaque identifier before a default is selected. An ABI
-bit allocation must not become the product's concurrency claim.
+The 4095 value is also the current twelve-bit bridge-handle encoding ceiling.
+Because discovery reached it without admission or idle-resource failure, the
+next capacity gate widens that opaque identifier and measures higher stages.
+An ABI bit allocation must not become the product's final concurrency claim.
