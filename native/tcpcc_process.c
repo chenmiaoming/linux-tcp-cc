@@ -88,11 +88,16 @@ static void tcpcc_child_close_from(int first_fd, rlim_t descriptor_limit)
 
 static __attribute__((noreturn)) void
 tcpcc_child_exec(const char *kernel_path, int tun_fd,
+			 const char *memory_argument,
 			 const int requests[2], const int responses[2],
 			 const int exec_status[2], pid_t expected_parent,
 			 rlim_t descriptor_limit)
 {
-	char *const arguments[] = { (char *)kernel_path, NULL };
+	char *const arguments[] = {
+		(char *)kernel_path,
+		(char *)memory_argument,
+		NULL,
+	};
 	int code;
 
 	if (setsid() < 0)
@@ -158,9 +163,11 @@ static void tcpcc_reap_failed_child(pid_t pid)
 }
 
 int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
-			       const char *kernel_path, int tun_fd,
+			       const char *kernel_path,
+			       unsigned long memory_mib, int tun_fd,
 			       struct tcpcc_control_error *error)
 {
+	char memory_argument[64];
 	int requests[2] = { -1, -1 };
 	int responses[2] = { -1, -1 };
 	int exec_status[2] = { -1, -1 };
@@ -170,9 +177,15 @@ int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 	int exec_error = 0;
 	int exec_result;
 
-	if (!process || !kernel_path || !kernel_path[0] || tun_fd < 3)
+	if (!process || !kernel_path || !kernel_path[0] ||
+	    memory_mib < TCPCC_HOSTED_MINIMUM_MEMORY_MIB || tun_fd < 3)
 		return tcpcc_process_fail(error, EINVAL,
 			"hosted process arguments are invalid");
+	if (snprintf(memory_argument, sizeof(memory_argument),
+		     "--memory-mib=%lu", memory_mib) >=
+	    (int)sizeof(memory_argument))
+		return tcpcc_process_fail(error, EOVERFLOW,
+			"hosted memory argument is too large");
 	*process = (struct tcpcc_hosted_process) {
 		.pid = -1,
 		.pid_fd = -1,
@@ -211,7 +224,8 @@ int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 			"fork for hosted kernel failed: %s", strerror(code));
 	}
 	if (!child)
-		tcpcc_child_exec(kernel_path, tun_fd, requests, responses,
+		tcpcc_child_exec(kernel_path, tun_fd, memory_argument,
+				 requests, responses,
 				 exec_status, expected_parent,
 				 descriptor_limit.rlim_cur);
 

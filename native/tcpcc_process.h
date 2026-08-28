@@ -7,6 +7,8 @@
 #include "tcpcc_control.h"
 
 #define TCPCC_HOSTED_TUN_FD 3
+#define TCPCC_HOSTED_DEFAULT_MEMORY_MIB 128UL
+#define TCPCC_HOSTED_MINIMUM_MEMORY_MIB 128UL
 
 struct tcpcc_hosted_process {
 	pid_t pid;
@@ -16,7 +18,8 @@ struct tcpcc_hosted_process {
 };
 
 int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
-			       const char *kernel_path, int tun_fd,
+			       const char *kernel_path,
+			       unsigned long memory_mib, int tun_fd,
 			       struct tcpcc_control_error *error);
 
 int tcpcc_hosted_process_signal(const struct tcpcc_hosted_process *process,

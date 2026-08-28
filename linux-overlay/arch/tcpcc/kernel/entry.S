@@ -7,6 +7,7 @@ tcpcc_host_start:
 	/* Linux/x86-64 process entry provides a valid userspace stack. */
 	cld
 	xorq %rbp, %rbp
+	movq %rsp, tcpcc_host_initial_stack(%rip)
 	andq $-16, %rsp
 	call start_kernel
 

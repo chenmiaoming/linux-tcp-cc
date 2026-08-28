@@ -79,23 +79,26 @@ sudo tcpcc \
 ```
 
 The CLI defaults to 4095 simultaneous connections and a five-second
-graceful-shutdown window. Operators can still set a lower admission ceiling:
+graceful-shutdown window. Hosted RAM defaults to 128 MiB but is no longer a
+compile-time ceiling. Operators can tune both resources explicitly:
 
 ```bash
 sudo tcpcc \
   --listen 203.0.113.10:443 \
   --backend 127.0.0.1:443 \
   --cc bbr \
-  --max-connections 2048 \
+  --memory-mib 512 \
+  --max-connections 16384 \
   --shutdown-grace-period 5
 ```
 
-The dynamic bridge accepts `--max-connections` from 1 through the current 4095
-handle-encoding ceiling, allocates 16-KiB direction buffers only while data is
-ready, and shares a 256-KiB aggregate payload-buffer budget. M9 capacity CI
-holds 4095 simultaneous connections on one listener with zero admission or
-bridge-start failures, so 4095 is also the current measured default. The handle
-layout remains a ceiling to remove, not a final proxy-scale capacity target.
+The dynamic bridge accepts `--max-connections` from 1 through the current
+65535 handle-encoding ceiling, allocates 16-KiB direction buffers only while
+data is ready, and shares a 256-KiB aggregate payload-buffer budget. M9 capacity
+CI holds 4095 simultaneous connections on one listener with zero admission or
+bridge-start failures, so 4095 remains the measured default while the expanded
+8192/16384 stages run. `--memory-mib` has a 128-MiB safety minimum but no
+project-defined upper ceiling; an oversized request fails at the host `mmap`.
 
 The public connection terminates in the hosted Linux stack using BBR; the
 ordinary loopback connection to the application is a separate stream bridge.

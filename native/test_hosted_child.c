@@ -42,7 +42,7 @@ static int write_exact(int fd, const void *buffer, size_t length)
 	return 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
 	struct tcpcc_control_request request;
 	struct tcpcc_control_response response = {
@@ -53,6 +53,8 @@ int main(void)
 		.control_version = TCPCC_CONTROL_VERSION,
 	};
 
+	if (argc != 2 || strcmp(argv[1], "--memory-mib=512"))
+		return 80;
 	if (fcntl(TCPCC_HOSTED_TUN_FD, F_GETFD) < 0)
 		return 81;
 	errno = 0;

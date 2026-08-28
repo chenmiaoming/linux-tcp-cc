@@ -156,10 +156,10 @@ prove that the event state machine preserves M8 behavior.
 M9.4 replaces both remaining fixed-capacity structures. Bridge slots are
 allocated as the historical connection peak grows and retain their generation
 after a flow is reaped, while active flow objects and hosted-service tracking
-nodes exist only for live connections. The twelve-bit slot field provides an
-encoding ceiling of 4095 simultaneous flows; that number was not treated as a
-supported default until the M9.6 capacity gate subsequently exercised all
-4095 slots.
+nodes exist only for live connections. M9.6 first exercised every slot in the
+twelve-bit layout, then widened the positive `s32` handle to a sixteen-bit slot
+and fifteen-bit generation. This raises the encoding ceiling from 4095 to
+65535 while retaining stale-handle protection.
 
 The dispatcher consumes a deduplicated ready-flow queue instead of scanning
 the encoding range or every idle connection. Each direction obtains its
@@ -173,7 +173,7 @@ The first M9.4 CI gate holds nine flows concurrently, proving that eight is no
 longer a bridge limit while preserving generation reuse, reset isolation,
 half-close, backpressure, and signal-drain coverage. Larger idle/active/slow-
 peer discovery belongs to M9.6 and selects the supported default from measured
-CPU and memory behavior rather than from the 4095-handle encoding ceiling.
+CPU and memory behavior rather than from a handle-encoding ceiling.
 
 ## M9.6 capacity discovery and admission policy
 
@@ -192,7 +192,10 @@ or bridge-start failures; at that stage the hosted process used 27,280 KiB RSS,
 held 4,101 host file descriptors, and consumed zero CPU ticks during the
 250-millisecond idle sample.
 
-The 4095 value is also the current twelve-bit bridge-handle encoding ceiling.
-Because discovery reached it without admission or idle-resource failure, the
-next capacity gate widens that opaque identifier and measures higher stages.
-An ABI bit allocation must not become the product's final concurrency claim.
+Because discovery reached the old 4095 encoding ceiling without admission or
+idle-resource failure, the next gate expands the handle ceiling to 65535 and
+runs 8192 and 16384 stages with 512 MiB of hosted RAM. The vmlinux launcher now
+passes `--memory-mib=N`; 128 MiB remains the low-resource default and safety
+minimum, but no project-defined maximum remains. The default connection limit
+stays 4095 until the expanded stages pass CI. An ABI bit allocation must not
+become the product's final concurrency claim.

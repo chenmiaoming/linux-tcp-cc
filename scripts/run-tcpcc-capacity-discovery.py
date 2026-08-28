@@ -47,7 +47,8 @@ HOST_IPV4 = "192.0.2.1"
 GUEST_IPV4 = "192.0.2.2"
 GUEST_PREFIX = 32
 PUBLIC_PORT = 18500
-BRIDGE_ENCODING_LIMIT = 4095
+BRIDGE_SESSION_LIMIT = 65535
+DEFAULT_MEMORY_MIB = 512
 ACCEPT_BATCH = 64
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
@@ -59,6 +60,7 @@ PAYLOAD_BYTES = 256
 BUFFER_HIGH_WATER = re.compile(
     r"M9\.4 bridge buffer high-water ([0-9]+)/262144 bytes, current ([0-9]+)"
 )
+HOST_MEMORY = re.compile(r"tcpcc: M3\.1 host RAM ([0-9]+) MiB at")
 
 
 def ensure_driver_fd_capacity(connections: int) -> tuple[int, int]:
@@ -91,12 +93,12 @@ def parse_levels(value: str) -> tuple[int, ...]:
         raise argparse.ArgumentTypeError("levels must be comma-separated integers") from error
     if (
         not levels
-        or any(level < 1 or level > BRIDGE_ENCODING_LIMIT for level in levels)
+        or any(level < 1 or level > BRIDGE_SESSION_LIMIT for level in levels)
         or tuple(sorted(set(levels))) != levels
     ):
         raise argparse.ArgumentTypeError(
             f"levels must be unique increasing values from 1 through "
-            f"{BRIDGE_ENCODING_LIMIT}"
+            f"{BRIDGE_SESSION_LIMIT}"
         )
     return levels
 
@@ -107,12 +109,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kernel", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--boot-log", required=True, type=Path)
+    parser.add_argument("--memory-mib", type=int, default=DEFAULT_MEMORY_MIB)
     parser.add_argument(
         "--levels",
         type=parse_levels,
-        default=parse_levels("64,256,1024,2048,4095"),
+        default=parse_levels("64,256,1024,2048,4095,8192,16384"),
     )
-    parser.add_argument("--minimum", type=int, default=64)
+    parser.add_argument("--minimum", type=int, default=8192)
     parser.add_argument("--active-connections", type=int, default=64)
     return parser.parse_args()
 
@@ -230,6 +233,31 @@ def accept_backends(process: subprocess.Popen[bytes], listener: socket.socket,
         raise CapacityReached(
             f"backend accepted {len(connections)}/{target} connections"
         )
+
+
+def drain_available_backends(
+    process: subprocess.Popen[bytes],
+    listener: socket.socket,
+    connections: list[socket.socket],
+    target: int,
+) -> None:
+    """Keep the host accept queue from becoming the measured capacity."""
+    listener.setblocking(False)
+    while len(connections) < target:
+        if process.poll() is not None:
+            raise CapacityReached(
+                f"hosted kernel exited with {process.returncode} while "
+                "draining backend connections"
+            )
+        try:
+            connection, peer = listener.accept()
+        except BlockingIOError:
+            break
+        if peer[0] != "127.0.0.1":
+            connection.close()
+            raise CapacityReached(f"backend accepted unexpected peer {peer[0]}")
+        connection.settimeout(TIMEOUT)
+        connections.append(connection)
 
 
 def read_exact(connection: socket.socket, length: int) -> bytes:
@@ -379,7 +407,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
     try:
         child_tun_fd = tun_fd
         process = subprocess.Popen(
-            [str(kernel)],
+            [str(kernel), f"--memory-mib={args.memory_mib}"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=boot_stream,
@@ -405,7 +433,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         backend_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         backend_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         backend_listener.bind(("127.0.0.1", 0))
-        backend_listener.listen(BRIDGE_ENCODING_LIMIT)
+        backend_listener.listen(BRIDGE_SESSION_LIMIT)
         backend_port = backend_listener.getsockname()[1]
 
         listener = control.transact(OP_SOCKET).handle
@@ -419,14 +447,14 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             int(ipaddress.IPv4Address(GUEST_IPV4)),
             PUBLIC_PORT,
         )
-        control.transact(OP_LISTEN, listener, BRIDGE_ENCODING_LIMIT)
+        control.transact(OP_LISTEN, listener, BRIDGE_SESSION_LIMIT)
         service_handle = control.transact(
             OP_SERVICE_START,
             listener,
             data=encode_service_config(
                 int(ipaddress.IPv4Address("127.0.0.1")),
                 backend_port,
-                BRIDGE_ENCODING_LIMIT,
+                BRIDGE_SESSION_LIMIT,
                 ACCEPT_BATCH,
             ),
         ).handle
@@ -446,6 +474,13 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                         client.close()
                         raise
                     clients.append(client)
+                    if len(clients) % ACCEPT_BATCH == 0:
+                        drain_available_backends(
+                            process,
+                            backend_listener,
+                            backends,
+                            len(clients),
+                        )
                 accept_backends(process, backend_listener, backends, target)
                 stats = wait_service_active(
                     process, control, service_handle, target
@@ -537,7 +572,8 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         return {
             "schema": SCHEMA,
             "status": "passed",
-            "encoding_limit": BRIDGE_ENCODING_LIMIT,
+            "encoding_limit": BRIDGE_SESSION_LIMIT,
+            "hosted_memory_mib": args.memory_mib,
             "minimum_required": args.minimum,
             "levels": list(args.levels),
             "reached_connections": reached,
@@ -578,10 +614,13 @@ def main() -> int:
     if (
         args.minimum < 1
         or args.minimum > args.levels[-1]
+        or args.memory_mib < 128
         or args.active_connections < 1
         or args.active_connections > args.minimum
     ):
-        raise SystemExit("minimum and active connection counts must be positive")
+        raise SystemExit(
+            "memory must be at least 128 MiB and connection counts must be positive"
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.boot_log.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, object]
@@ -590,6 +629,20 @@ def main() -> int:
         report = discover(args)
         report["driver_nofile_soft"] = nofile_soft
         report["driver_nofile_hard"] = nofile_hard
+        boot = args.boot_log.read_text(encoding="utf-8", errors="replace")
+        memory_matches = HOST_MEMORY.findall(boot)
+        if not memory_matches or int(memory_matches[-1]) != args.memory_mib:
+            raise RuntimeError(
+                f"hosted memory boot report does not match {args.memory_mib} MiB"
+            )
+        report["observed_hosted_memory_mib"] = int(memory_matches[-1])
+        buffer_matches = BUFFER_HIGH_WATER.findall(boot)
+        report["buffer_high_water_bytes"] = (
+            int(buffer_matches[-1][0]) if buffer_matches else None
+        )
+        report["buffer_current_bytes_at_shutdown"] = (
+            int(buffer_matches[-1][1]) if buffer_matches else None
+        )
     except BaseException as error:
         report = {
             "schema": SCHEMA,
@@ -602,12 +655,6 @@ def main() -> int:
         )
         raise
 
-    boot = args.boot_log.read_text(encoding="utf-8", errors="replace")
-    matches = BUFFER_HIGH_WATER.findall(boot)
-    report["buffer_high_water_bytes"] = int(matches[-1][0]) if matches else None
-    report["buffer_current_bytes_at_shutdown"] = (
-        int(matches[-1][1]) if matches else None
-    )
     args.output.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

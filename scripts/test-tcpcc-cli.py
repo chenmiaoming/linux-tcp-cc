@@ -24,6 +24,8 @@ from tcpcc_cli import (  # noqa: E402
     BRIDGE_BUFFER_LIMIT,
     BRIDGE_SESSION_LIMIT,
     BRIDGE_TOTAL_BUFFER_LIMIT,
+    DEFAULT_MAX_CONNECTIONS,
+    DEFAULT_MEMORY_MIB,
     ELF_HEADER,
     ELF_PROGRAM_HEADER,
     EM_X86_64,
@@ -305,24 +307,29 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(config.cc, "bbr")
         self.assertEqual(config.kernel, self.kernel.resolve())
         self.assertEqual(config.firewall_backend, "nft-lib")
-        self.assertEqual(config.max_connections, BRIDGE_SESSION_LIMIT)
+        self.assertEqual(config.memory_mib, DEFAULT_MEMORY_MIB)
+        self.assertEqual(config.max_connections, DEFAULT_MAX_CONNECTIONS)
         self.assertEqual(config.shutdown_grace_period, 5.0)
 
     def test_runtime_limits_are_explicit_and_bounded(self) -> None:
         namespace = build_parser(environ={}).parse_args(
             self.arguments(
                 "--max-connections",
-                "4",
+                "8192",
+                "--memory-mib",
+                "512",
                 "--shutdown-grace-period",
                 "1.25",
             )
         )
         config = config_from_namespace(namespace)
-        self.assertEqual(config.max_connections, 4)
+        self.assertEqual(config.max_connections, 8192)
+        self.assertEqual(config.memory_mib, 512)
         self.assertEqual(config.shutdown_grace_period, 1.25)
 
         for arguments, message in (
-            (("--max-connections", "4096"), "max connections"),
+            (("--max-connections", "65536"), "max connections"),
+            (("--memory-mib", "127"), "hosted memory"),
             (("--shutdown-grace-period", "-1"), "grace period"),
         ):
             with self.subTest(arguments=arguments):
@@ -595,6 +602,7 @@ class RuntimeTests(unittest.TestCase):
         )
         self.process = FakeProcess()
         self.control = FakeControl(self.process)
+        self.process_arguments: list[str] | None = None
 
     def runtime(
         self,
@@ -606,10 +614,15 @@ class RuntimeTests(unittest.TestCase):
         runtime_options = {}
         if runtime_clock is not None:
             runtime_options["clock"] = runtime_clock
+
+        def process_factory(arguments: list[str], **_kwargs: object) -> FakeProcess:
+            self.process_arguments = arguments
+            return self.process
+
         return HostedKernelRuntime(
             runtime_config(Path("/fixture/vmlinux"), **config_options),
             emitter=self.emitter,
-            process_factory=lambda *_args, **_kwargs: self.process,
+            process_factory=process_factory,
             control_factory=lambda _stdin, _stdout: selected,
             **runtime_options,
         )
@@ -627,6 +640,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual((l3[1], l3[2], l3[3]), (101, 0xC6120002, 32))
         self.assertEqual(self.control.operations[2][4], b"bbr")
         self.assertEqual(runtime.ifindex, 7)
+        self.assertEqual(
+            self.process_arguments,
+            ["/fixture/vmlinux", "--memory-mib=128"],
+        )
 
     def test_poll_verifies_inheritance_and_reaps_completed_bridge(self) -> None:
         runtime = self.runtime()

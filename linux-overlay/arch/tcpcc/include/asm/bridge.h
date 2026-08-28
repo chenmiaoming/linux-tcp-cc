@@ -6,11 +6,11 @@
 #include <asm/tcpcc_control_abi.h>
 
 /*
- * Handles reserve twelve low bits for a dynamically allocated slot.  This is
+ * Handles reserve sixteen low bits for a dynamically allocated slot.  This is
  * an encoding ceiling, not the supported/default admission limit; capacity is
  * selected by the service configuration and validated in CI.
  */
-#define TCPCC_BRIDGE_SESSION_LIMIT       4095U
+#define TCPCC_BRIDGE_SESSION_LIMIT       65535U
 /* Lazy direction buffers share this aggregate dispatcher-owned budget. */
 #define TCPCC_BRIDGE_BUFFER_LIMIT        (16U * 1024U)
 #define TCPCC_BRIDGE_TOTAL_BUFFER_LIMIT  (256U * 1024U)
@@ -19,10 +19,10 @@
 #define TCPCC_BRIDGE_HOST_SOCKET_BUFFER_LIMIT   (64U * 1024U)
 #define TCPCC_BRIDGE_RUNTIME_SLOT_BASE   2U
 
-/* Positive s32 handle: [30:12] generation, [11:0] one-based flow slot. */
-#define TCPCC_BRIDGE_HANDLE_SLOT_BITS    12U
-#define TCPCC_BRIDGE_HANDLE_SLOT_MASK    0x0fffU
-#define TCPCC_BRIDGE_HANDLE_GENERATION_MASK 0x0007ffffU
+/* Positive s32 handle: [30:16] generation, [15:0] one-based flow slot. */
+#define TCPCC_BRIDGE_HANDLE_SLOT_BITS    16U
+#define TCPCC_BRIDGE_HANDLE_SLOT_MASK    0x0000ffffU
+#define TCPCC_BRIDGE_HANDLE_GENERATION_MASK 0x00007fffU
 
 struct socket;
 
