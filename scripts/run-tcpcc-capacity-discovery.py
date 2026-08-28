@@ -116,7 +116,7 @@ def parse_args() -> argparse.Namespace:
         type=parse_levels,
         default=parse_levels("64,256,1024,2048,4095,8192,16384"),
     )
-    parser.add_argument("--minimum", type=int, default=8192)
+    parser.add_argument("--minimum", type=int, default=16384)
     parser.add_argument("--active-connections", type=int, default=64)
     return parser.parse_args()
 
@@ -630,6 +630,12 @@ def main() -> int:
         report = discover(args)
         report["driver_nofile_soft"] = nofile_soft
         report["driver_nofile_hard"] = nofile_hard
+        report["driver_ephemeral_port_range"] = [
+            int(value)
+            for value in Path(
+                "/proc/sys/net/ipv4/ip_local_port_range"
+            ).read_text().split()
+        ]
         boot = args.boot_log.read_text(encoding="utf-8", errors="replace")
         memory_matches = HOST_MEMORY.findall(boot)
         if not memory_matches or int(memory_matches[-1]) != args.memory_mib:

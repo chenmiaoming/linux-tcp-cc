@@ -194,7 +194,11 @@ held 4,101 host file descriptors, and consumed zero CPU ticks during the
 
 Because discovery reached the old 4095 encoding ceiling without admission or
 idle-resource failure, the next gate expands the handle ceiling to 65535 and
-runs 8192 and 16384 stages with 512 MiB of hosted RAM. The vmlinux launcher now
+runs 8192 and 16384 stages with 512 MiB of hosted RAM. Because the CI driver
+creates both the public clients and local backend sockets on one host, that job
+uses the full 1024-65535 ephemeral-port range and records it in the report; this
+prevents the load generator from consuming two default-range ports per flow and
+masquerading as a bridge limit. The vmlinux launcher now
 passes `--memory-mib=N`; 128 MiB remains the low-resource default and safety
 minimum, but no project-defined maximum remains. The default connection limit
 stays 4095 until the expanded stages pass CI. An ABI bit allocation must not

@@ -261,6 +261,7 @@ jobs:
         run: |
           sudo -n modprobe tun || true
           test -c /dev/net/tun
+          sudo -n sysctl -w net.ipv4.ip_local_port_range="1024 65535"
           chmod u+x .build/tcpcc-bootstrap-out/vmlinux
 
       - name: Discover idle and active connection capacity
@@ -270,7 +271,7 @@ jobs:
             --kernel .build/tcpcc-bootstrap-out/vmlinux \
             --memory-mib 512 \
             --levels 64,256,1024,2048,4095,8192,16384 \
-            --minimum 8192 \
+            --minimum 16384 \
             --active-connections 64 \
             --output .build/m9-capacity/report.json \
             --boot-log .build/m9-capacity/vmlinux.log
