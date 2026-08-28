@@ -203,3 +203,23 @@ passes `--memory-mib=N`; 128 MiB remains the low-resource default and safety
 minimum, but no project-defined maximum remains. Capacity stages use explicit
 targets and do not select a default connection limit. An ABI bit allocation
 must not become the product's final concurrency claim.
+
+## M9.7 production kernel configuration
+
+The production `tcpcc_defconfig` keeps the native IPv4 and IPv6 TCP stacks,
+CUBIC, BBR, FQ, high-resolution timers, the regular SLUB allocator, automatic
+stack-variable zeroing, `printk`, and `BUG` diagnostics. It removes guest
+userspace facilities, filesystems, block and hardware device classes, wireless
+networking, unused congestion controls, production debugging, and optional
+IPv6-over-IPv4 SIT tunneling. Native IPv6 does not depend on SIT and remains
+enabled for IPv6-only hosts.
+
+Kernel-link CI records the generated config and image section sizes. Against
+Linux 6.18.45, the trimmed IPv4+IPv6 image is 5,003,232 bytes with 113 enabled
+config symbols. CI rejects an image above 5.5 MiB or more than 120 enabled
+symbols by default, so later kernel updates and features must make material
+growth explicit in review.
+
+This gate concerns the kernel protocol stack. The current CLI endpoint parser,
+host control ABI, and TUN address setup still carry IPv4 addresses; accepting an
+IPv6 public endpoint requires a separate, end-to-end ABI and data-path change.

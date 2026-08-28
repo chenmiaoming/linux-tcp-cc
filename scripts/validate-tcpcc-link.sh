@@ -31,14 +31,45 @@ fi
 
 test -s "$OUT/vmlinux"
 readelf -h "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.elf-header"
+size -A "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.sections"
+cp "$OUT/.config" "$ROOT/.build/tcpcc-vmlinux.config"
+
+vmlinux_size=$(stat -c '%s' "$OUT/vmlinux")
+config_enabled_count=$(grep -Ec '^CONFIG_[A-Z0-9_]+=(y|m)$' "$OUT/.config")
+vmlinux_max_bytes=${TCPCC_VMLINUX_MAX_BYTES:-5767168}
+config_max_enabled=${TCPCC_CONFIG_MAX_ENABLED:-120}
+
+if (( vmlinux_size > vmlinux_max_bytes )); then
+  printf 'vmlinux size %d exceeds production ceiling %d bytes\n' \
+    "$vmlinux_size" "$vmlinux_max_bytes" >&2
+  exit 1
+fi
+if (( config_enabled_count > config_max_enabled )); then
+  printf 'enabled config count %d exceeds production ceiling %d\n' \
+    "$config_enabled_count" "$config_max_enabled" >&2
+  exit 1
+fi
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
 
 {
+	section_size() {
+		awk -v section="$1" '$1 == section { print $2; found = 1 } END { if (!found) print 0 }' \
+			"$ROOT/.build/tcpcc-vmlinux.sections"
+	}
+
   echo "ARCH=tcpcc"
   echo "KERNEL_VERSION=$(make -s -C "$SRC" kernelversion)"
   echo "VMLINUX_SHA256=$(sha256sum "$OUT/vmlinux" | awk '{print $1}')"
-  echo "VMLINUX_SIZE=$(stat -c '%s' "$OUT/vmlinux")"
+  echo "VMLINUX_SIZE=$vmlinux_size"
+  echo "VMLINUX_MAX_BYTES=$vmlinux_max_bytes"
+  echo "VMLINUX_TEXT_SIZE=$(section_size .text)"
+  echo "VMLINUX_RODATA_SIZE=$(section_size .rodata)"
+  echo "VMLINUX_DATA_SIZE=$(section_size .data)"
+  echo "VMLINUX_BSS_SIZE=$(section_size .bss)"
+  echo "VMLINUX_EH_FRAME_SIZE=$(section_size .eh_frame)"
+  echo "CONFIG_ENABLED_COUNT=$config_enabled_count"
+  echo "CONFIG_MAX_ENABLED=$config_max_enabled"
 } > "$ROOT/.build/tcpcc-link.env"
 
 printf 'ARCH=tcpcc vmlinux linked successfully\n'
