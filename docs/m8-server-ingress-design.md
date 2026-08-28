@@ -37,9 +37,10 @@ backend boundary deliberately accepts only `127.0.0.1`:
 ```
 
 The original M8 gate limited `--max-connections` to 8. M9.4 replaced that fixed
-table with dynamic flows, and M9.6 raised both the current default and maximum
-to 4095 after CI validation. The subsequent sixteen-bit slot layout raises the
-explicit maximum to 65535 while the default stays at the measured 4095.
+table with dynamic flows. M9.6 makes `0` the default, meaning that no admission
+policy is applied; positive values remain an opt-in operator limit. The current
+sixteen-bit slot layout still imposes a 65535 handle-encoding boundary, which
+is an implementation boundary rather than the default connection count.
 `--shutdown-grace-period` controls how long signal shutdown waits for active
 streams to finish before canceling them; it defaults to 5 seconds and accepts
 0 through 300 seconds. Zero requests immediate cancellation after listener

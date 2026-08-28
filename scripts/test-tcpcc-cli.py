@@ -232,11 +232,11 @@ class ControlCodecTests(unittest.TestCase):
         self.assertEqual(result.host_send_eagain, 4)
 
     def test_hosted_service_config_and_stats_have_fixed_layouts(self) -> None:
-        config = encode_service_config(0x7F000001, 8443, 8, 4)
+        config = encode_service_config(0x7F000001, 8443, 0, 4)
         self.assertEqual(len(config), 16)
         self.assertEqual(
             SERVICE_CONFIG.unpack(config),
-            (0x7F000001, 8443, 0, 8, 4),
+            (0x7F000001, 8443, 0, 0, 4),
         )
 
         raw = SERVICE_STATS.pack(
@@ -328,6 +328,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(config.shutdown_grace_period, 1.25)
 
         for arguments, message in (
+            (("--max-connections", "-1"), "max connections"),
             (("--max-connections", "65536"), "max connections"),
             (("--memory-mib", "127"), "hosted memory"),
             (("--shutdown-grace-period", "-1"), "grace period"),

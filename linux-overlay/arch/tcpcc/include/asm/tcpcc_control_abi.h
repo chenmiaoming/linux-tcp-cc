@@ -141,7 +141,7 @@ struct tcpcc_control_service_config {
 	__u32 backend_ipv4;
 	__u16 backend_port;
 	__u16 reserved;
-	__u32 max_connections;
+	__u32 max_connections; /* Zero disables the admission-policy limit. */
 	__u32 accept_batch;
 };
 

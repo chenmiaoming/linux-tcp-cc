@@ -189,6 +189,11 @@ def wait_service_active(
                 f"hosted kernel exited with {process.returncode} at target {target}"
             )
         latest = service_stats(control, handle)
+        if latest.max_connections != 0:
+            raise CapacityReached(
+                "capacity service unexpectedly enabled an admission limit: "
+                f"{latest.max_connections}"
+            )
         if (
             latest.rejected_connections
             or latest.bridge_start_failures
@@ -455,7 +460,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             data=encode_service_config(
                 int(ipaddress.IPv4Address("127.0.0.1")),
                 backend_port,
-                BRIDGE_SESSION_LIMIT,
+                0,
                 ACCEPT_BATCH,
             ),
         ).handle
@@ -574,6 +579,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             "schema": SCHEMA,
             "status": "passed",
             "encoding_limit": BRIDGE_SESSION_LIMIT,
+            "admission_limit": 0,
             "hosted_memory_mib": args.memory_mib,
             "minimum_required": args.minimum,
             "levels": list(args.levels),

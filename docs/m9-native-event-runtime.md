@@ -70,7 +70,7 @@ idle connection cost grow unnecessarily.
 M9 replaces it with dynamically allocated, generation-tagged flow objects and
 three independent limits:
 
-- `max_connections`: admission ceiling, configurable at runtime;
+- `max_connections`: optional admission ceiling (`0` means unlimited);
 - `max_buffer_bytes`: aggregate payload-buffer budget;
 - a small per-direction buffer cap allocated only when a flow carries data.
 
@@ -177,10 +177,10 @@ CPU and memory behavior rather than from a handle-encoding ceiling.
 
 ## M9.6 capacity discovery and admission policy
 
-The CLI defaults to the CI-validated current capacity of 4095 connections and
-retains an explicit operator override comparable to a proxy `maxconn` setting.
-This removes the historical eight-flow admission gate without claiming that a
-handle encoding is the final production capacity.
+The CLI defaults to `max_connections=0`, which disables policy admission
+limiting. A positive operator override remains available, comparable to a
+proxy `maxconn` setting. This removes the historical eight-flow admission gate
+without confusing a tested capacity or handle encoding with a product default.
 
 The first discovery job drives the hosted `SERVICE_START` path directly so the
 test harness does not create one polling loop or thread per flow. It grows one
@@ -200,6 +200,6 @@ uses the full 1024-65535 ephemeral-port range and records it in the report; this
 prevents the load generator from consuming two default-range ports per flow and
 masquerading as a bridge limit. The vmlinux launcher now
 passes `--memory-mib=N`; 128 MiB remains the low-resource default and safety
-minimum, but no project-defined maximum remains. The default connection limit
-stays 4095 until the expanded stages pass CI. An ABI bit allocation must not
-become the product's final concurrency claim.
+minimum, but no project-defined maximum remains. Capacity stages use explicit
+targets and do not select a default connection limit. An ABI bit allocation
+must not become the product's final concurrency claim.

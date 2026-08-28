@@ -189,8 +189,9 @@ static bool tcpcc_service_accept_batch(void)
 
 		mutex_lock(&tcpcc_service_lock);
 		if (tcpcc_service.draining || tcpcc_service.stopping ||
-		    tcpcc_service.stats.active_connections >=
-			tcpcc_service.config.max_connections) {
+		    (tcpcc_service.config.max_connections &&
+		     tcpcc_service.stats.active_connections >=
+			tcpcc_service.config.max_connections)) {
 			mutex_unlock(&tcpcc_service_lock);
 			break;
 		}
@@ -321,7 +322,7 @@ int tcpcc_service_start(struct socket *listener,
 
 	if (!listener || !listener->sk || !config || !handle ||
 	    config->backend_ipv4 != INADDR_LOOPBACK || !config->backend_port ||
-	    config->reserved || !config->max_connections ||
+	    config->reserved ||
 	    config->max_connections > TCPCC_BRIDGE_SESSION_LIMIT ||
 	    !config->accept_batch ||
 	    config->accept_batch > TCPCC_SERVICE_MAX_ACCEPT_BATCH)
@@ -356,8 +357,13 @@ int tcpcc_service_start(struct socket *listener,
 	mutex_unlock(&tcpcc_service_lock);
 	*handle = TCPCC_SERVICE_HANDLE;
 	complete(&tcpcc_service.work_ready);
-	pr_notice("tcpcc: M9.2 hosted service %d started (max %u, accept batch %u)\n",
-		  *handle, config->max_connections, config->accept_batch);
+	if (config->max_connections)
+		pr_notice("tcpcc: M9.2 hosted service %d started (max %u, accept batch %u)\n",
+			  *handle, config->max_connections,
+			  config->accept_batch);
+	else
+		pr_notice("tcpcc: M9.2 hosted service %d started (max unlimited, accept batch %u)\n",
+			  *handle, config->accept_batch);
 	return 0;
 
 restore_callback:

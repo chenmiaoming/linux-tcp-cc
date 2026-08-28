@@ -61,7 +61,7 @@ DEFAULT_KERNEL_SHUTDOWN_TIMEOUT = 10.0
 DEFAULT_MEMORY_MIB = 128
 MINIMUM_MEMORY_MIB = 128
 BRIDGE_SESSION_LIMIT = 65535
-DEFAULT_MAX_CONNECTIONS = 4095
+DEFAULT_MAX_CONNECTIONS = 0
 DEFAULT_SHUTDOWN_GRACE_PERIOD = 5.0
 MAX_SHUTDOWN_GRACE_PERIOD = 300.0
 BRIDGE_BUFFER_LIMIT = 16 * 1024
@@ -214,10 +214,10 @@ class ServiceConfig:
         if (
             isinstance(self.max_connections, bool)
             or not isinstance(self.max_connections, int)
-            or not 1 <= self.max_connections <= BRIDGE_SESSION_LIMIT
+            or not 0 <= self.max_connections <= BRIDGE_SESSION_LIMIT
         ):
             raise ValueError(
-                "max connections must be from 1 through "
+                "max connections must be 0 (unlimited) or from 1 through "
                 f"{BRIDGE_SESSION_LIMIT}"
             )
         if (
@@ -492,8 +492,8 @@ def build_parser(*, environ: dict[str, str] | None = None) -> argparse.ArgumentP
         default=DEFAULT_MAX_CONNECTIONS,
         metavar="N",
         help=(
-            "maximum simultaneous bridged connections "
-            f"(default: {DEFAULT_MAX_CONNECTIONS}; hosted encoding limit: "
+            "optional simultaneous-connection admission limit; 0 disables "
+            f"the policy limit (default: 0; hosted encoding limit: "
             f"{BRIDGE_SESSION_LIMIT})"
         ),
     )
@@ -754,7 +754,10 @@ class HostedKernelRuntime:
     def _accept_available(self) -> None:
         if self.listener_handle is None:
             raise RuntimeError("hosted listener is unavailable")
-        while len(self.active_bridges) < self.config.max_connections:
+        while (
+            not self.config.max_connections
+            or len(self.active_bridges) < self.config.max_connections
+        ):
             try:
                 accepted = self._channel().transact(
                     OP_ACCEPT_NONBLOCK,
