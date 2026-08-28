@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import re
+import resource
 import selectors
 import signal
 import socket
@@ -58,6 +59,25 @@ PAYLOAD_BYTES = 256
 BUFFER_HIGH_WATER = re.compile(
     r"M9\.4 bridge buffer high-water ([0-9]+)/262144 bytes, current ([0-9]+)"
 )
+
+
+def ensure_driver_fd_capacity(connections: int) -> tuple[int, int]:
+    """Keep the Python load generator from becoming the measured limit."""
+    required = connections * 2 + 256
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < required:
+        target = (
+            required
+            if hard == resource.RLIM_INFINITY
+            else min(required, hard)
+        )
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < required:
+        raise RuntimeError(
+            f"capacity driver needs RLIMIT_NOFILE >= {required}, got {soft}"
+        )
+    return soft, hard
 
 
 class CapacityReached(RuntimeError):
@@ -566,7 +586,10 @@ def main() -> int:
     args.boot_log.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, object]
     try:
+        nofile_soft, nofile_hard = ensure_driver_fd_capacity(args.levels[-1])
         report = discover(args)
+        report["driver_nofile_soft"] = nofile_soft
+        report["driver_nofile_hard"] = nofile_hard
     except BaseException as error:
         report = {
             "schema": SCHEMA,
