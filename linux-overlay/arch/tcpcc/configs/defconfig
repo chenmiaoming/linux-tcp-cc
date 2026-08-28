@@ -5,12 +5,62 @@ CONFIG_BUG=y
 CONFIG_HIGH_RES_TIMERS=y
 # CONFIG_MODULES is not set
 # CONFIG_SMP is not set
+
+# tcpcc is a single-purpose hosted IPv4 TCP data plane.  Keep host-only and
+# userspace-facing kernel facilities out of the production image.
+# CONFIG_MULTIUSER is not set
+# CONFIG_BPF is not set
+# CONFIG_AIO is not set
+# CONFIG_IO_URING is not set
+# CONFIG_ADVISE_SYSCALLS is not set
+# CONFIG_CACHESTAT_SYSCALL is not set
+# CONFIG_FUTEX is not set
+# CONFIG_EPOLL is not set
+# CONFIG_SIGNALFD is not set
+# CONFIG_TIMERFD is not set
+# CONFIG_EVENTFD is not set
+# CONFIG_BLOCK is not set
+# CONFIG_BINFMT_SCRIPT is not set
+# CONFIG_FILE_LOCKING is not set
+# CONFIG_FSNOTIFY is not set
+# CONFIG_DNOTIFY is not set
+# CONFIG_INOTIFY_USER is not set
+# CONFIG_FHANDLE is not set
+# CONFIG_PROC_FS is not set
+# CONFIG_SYSFS is not set
+# CONFIG_SYSCTL is not set
+# CONFIG_DEVMEM is not set
+# CONFIG_TTY is not set
+# CONFIG_VT is not set
+# CONFIG_INPUT is not set
+# CONFIG_HID is not set
+# CONFIG_USB_SUPPORT is not set
+# CONFIG_FW_LOADER is not set
+
 CONFIG_NET=y
 CONFIG_INET=y
+# CONFIG_IPV6 is not set
+# CONFIG_WIRELESS is not set
+# CONFIG_INET_DIAG is not set
+# CONFIG_ETHTOOL_NETLINK is not set
+# CONFIG_NET_RX_BUSY_POLL is not set
 CONFIG_TCP_CONG_ADVANCED=y
+# CONFIG_TCP_CONG_BIC is not set
 CONFIG_TCP_CONG_CUBIC=y
+# CONFIG_TCP_CONG_WESTWOOD is not set
+# CONFIG_TCP_CONG_HTCP is not set
 CONFIG_TCP_CONG_BBR=y
 CONFIG_NET_SCHED=y
 CONFIG_NET_SCH_FQ=y
 CONFIG_NET_SCH_DEFAULT=y
 CONFIG_DEFAULT_FQ=y
+
+# Production diagnostics retain printk/BUG boundaries but omit symbol tables
+# and allocator/debug machinery from the steady-state executable.
+# CONFIG_KALLSYMS is not set
+# CONFIG_DEBUG_KERNEL is not set
+# CONFIG_DEBUG_MISC is not set
+# CONFIG_SLUB_DEBUG is not set
+# CONFIG_SYMBOLIC_ERRNAME is not set
+# CONFIG_RUNTIME_TESTING_MENU is not set
+# CONFIG_LOCALVERSION_AUTO is not set

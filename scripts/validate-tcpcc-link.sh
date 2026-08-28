@@ -31,14 +31,26 @@ fi
 
 test -s "$OUT/vmlinux"
 readelf -h "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.elf-header"
+size -A "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.sections"
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
 
 {
+	section_size() {
+		awk -v section="$1" '$1 == section { print $2; found = 1 } END { if (!found) print 0 }' \
+			"$ROOT/.build/tcpcc-vmlinux.sections"
+	}
+
   echo "ARCH=tcpcc"
   echo "KERNEL_VERSION=$(make -s -C "$SRC" kernelversion)"
   echo "VMLINUX_SHA256=$(sha256sum "$OUT/vmlinux" | awk '{print $1}')"
   echo "VMLINUX_SIZE=$(stat -c '%s' "$OUT/vmlinux")"
+  echo "VMLINUX_TEXT_SIZE=$(section_size .text)"
+  echo "VMLINUX_RODATA_SIZE=$(section_size .rodata)"
+  echo "VMLINUX_DATA_SIZE=$(section_size .data)"
+  echo "VMLINUX_BSS_SIZE=$(section_size .bss)"
+  echo "VMLINUX_EH_FRAME_SIZE=$(section_size .eh_frame)"
+  echo "CONFIG_ENABLED_COUNT=$(grep -Ec '^CONFIG_[A-Z0-9_]+=(y|m)$' "$OUT/.config")"
 } > "$ROOT/.build/tcpcc-link.env"
 
 printf 'ARCH=tcpcc vmlinux linked successfully\n'
