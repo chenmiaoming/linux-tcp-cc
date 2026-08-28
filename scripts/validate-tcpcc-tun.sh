@@ -94,7 +94,7 @@ grep -F 'bridge-bbr: guest=192.0.2.2:18445 host=192.0.2.1:' \
 grep -F 'backend=127.0.0.1:' "$TCP_LOG" >/dev/null
 grep -F 'public_to_backend=65659 backend_to_public=65659' \
   "$TCP_LOG" >/dev/null
-grep -F 'buffer_limit=16384 total_buffer_limit=262144 session_limit=65535' \
+grep -F 'buffer_limit=16384 total_buffer_limit=262144 session_limit=1048575' \
   "$TCP_LOG" >/dev/null
 grep -F 'bridge-fast-cubic: guest=192.0.2.2:18446 host=192.0.2.1:' \
   "$TCP_LOG" >/dev/null
@@ -118,7 +118,7 @@ grep -F 'bridge-capacity: active_connections=9 unique_slots=9 beyond_legacy_limi
 grep -F 'slot_recovery=passed' "$TCP_LOG" >/dev/null
 grep -F 'bridge-reset-isolation: backend_status=-' "$TCP_LOG" >/dev/null
 grep -F 'survivor_isolation=passed' "$TCP_LOG" >/dev/null
-grep -F 'total_buffer_limit=262144 session_limit=65535' \
+grep -F 'total_buffer_limit=262144 session_limit=1048575' \
   "$TCP_LOG" >/dev/null
 grep -F 'bridge-cancel-victim-bbr: guest=192.0.2.2:18449' \
   "$TCP_LOG" >/dev/null

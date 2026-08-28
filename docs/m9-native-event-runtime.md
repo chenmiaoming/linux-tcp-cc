@@ -157,9 +157,9 @@ M9.4 replaces both remaining fixed-capacity structures. Bridge slots are
 allocated as the historical connection peak grows and retain their generation
 after a flow is reaped, while active flow objects and hosted-service tracking
 nodes exist only for live connections. M9.6 first exercised every slot in the
-twelve-bit layout, then widened the positive `s32` handle to a sixteen-bit slot
-and fifteen-bit generation. This raises the encoding ceiling from 4095 to
-65535 while retaining stale-handle protection.
+twelve-bit layout, then widened the positive `s32` handle to a twenty-bit slot
+and eleven-bit generation. This raises the encoding boundary from 4095 to
+1048575 while retaining stale-handle protection.
 
 The dispatcher consumes a deduplicated ready-flow queue instead of scanning
 the encoding range or every idle connection. Each direction obtains its
@@ -193,7 +193,7 @@ held 4,101 host file descriptors, and consumed zero CPU ticks during the
 250-millisecond idle sample.
 
 Because discovery reached the old 4095 encoding ceiling without admission or
-idle-resource failure, the next gate expands the handle ceiling to 65535 and
+idle-resource failure, the next gate expands the handle boundary to 1048575 and
 runs 8192 and 16384 stages with 512 MiB of hosted RAM. Because the CI driver
 creates both the public clients and local backend sockets on one host, that job
 uses the full 1024-65535 ephemeral-port range and records it in the report; this

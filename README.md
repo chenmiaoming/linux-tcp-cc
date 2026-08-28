@@ -94,12 +94,13 @@ sudo tcpcc \
 ```
 
 `--max-connections 0` (the default) disables the admission-policy limit; a
-positive value opts into a proxy-style `maxconn` limit up to the current 65535
-handle-encoding ceiling. The dynamic bridge allocates 16-KiB direction buffers
-only while data is ready and shares a 256-KiB aggregate payload-buffer budget.
-Capacity CI, rather than the default configuration, measures the practical
-limit in explicit stages. `--memory-mib` has a 128-MiB safety minimum but no
-project-defined upper ceiling; an oversized request fails at the host `mmap`.
+positive value opts into a proxy-style `maxconn` limit up to the current
+1048575 handle-encoding boundary. The dynamic bridge allocates 16-KiB direction
+buffers only while data is ready and shares a 256-KiB aggregate payload-buffer
+budget. Capacity CI, rather than the default configuration, measures the
+practical limit in explicit stages. `--memory-mib` has a 128-MiB safety minimum
+but no project-defined upper ceiling; an oversized request fails at the host
+`mmap`.
 
 The public connection terminates in the hosted Linux stack using BBR; the
 ordinary loopback connection to the application is a separate stream bridge.

@@ -315,7 +315,7 @@ class ParserTests(unittest.TestCase):
         namespace = build_parser(environ={}).parse_args(
             self.arguments(
                 "--max-connections",
-                "8192",
+                str(BRIDGE_SESSION_LIMIT),
                 "--memory-mib",
                 "512",
                 "--shutdown-grace-period",
@@ -323,13 +323,16 @@ class ParserTests(unittest.TestCase):
             )
         )
         config = config_from_namespace(namespace)
-        self.assertEqual(config.max_connections, 8192)
+        self.assertEqual(config.max_connections, BRIDGE_SESSION_LIMIT)
         self.assertEqual(config.memory_mib, 512)
         self.assertEqual(config.shutdown_grace_period, 1.25)
 
         for arguments, message in (
             (("--max-connections", "-1"), "max connections"),
-            (("--max-connections", "65536"), "max connections"),
+            (
+                ("--max-connections", str(BRIDGE_SESSION_LIMIT + 1)),
+                "max connections",
+            ),
             (("--memory-mib", "127"), "hosted memory"),
             (("--shutdown-grace-period", "-1"), "grace period"),
         ):
