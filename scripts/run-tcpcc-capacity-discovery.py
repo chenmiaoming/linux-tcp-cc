@@ -351,6 +351,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
     stages: list[dict[str, object]] = []
     capacity_failure: str | None = None
     active_result: dict[str, object] | None = None
+    expected_active_bytes: int | None = None
     idle_result: dict[str, object] | None = None
     final_stats: dict[str, object] | None = None
     last_successful = 0
@@ -442,18 +443,9 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 active_result = active_probe(
                     clients, backends, args.active_connections
                 )
-                active_stats = wait_service_active(
-                    process, control, service_handle, target
+                expected_active_bytes = (
+                    args.active_connections * PAYLOAD_BYTES
                 )
-                expected_bytes = args.active_connections * PAYLOAD_BYTES
-                if (
-                    active_stats.public_to_backend_bytes < expected_bytes
-                    or active_stats.backend_to_public_bytes < expected_bytes
-                ):
-                    raise RuntimeError(
-                        "active service byte counters are too small: "
-                        f"{asdict(active_stats)}"
-                    )
             idle_before = process_metrics(process.pid)
             time.sleep(0.25)
             idle_after = process_metrics(process.pid)
@@ -499,6 +491,19 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             response = control.transact(OP_SERVICE_STOP, service_handle, 30000)
             final_stats = asdict(decode_service_stats(response.data))
             service_handle = None
+            if (
+                expected_active_bytes is not None
+                and (
+                    final_stats["public_to_backend_bytes"]
+                    < expected_active_bytes
+                    or final_stats["backend_to_public_bytes"]
+                    < expected_active_bytes
+                )
+            ):
+                raise RuntimeError(
+                    "reaped service byte counters are too small: "
+                    f"{final_stats}"
+                )
             control.transact(OP_SHUTDOWN)
             status = process.wait(timeout=15)
             if status != 0:
