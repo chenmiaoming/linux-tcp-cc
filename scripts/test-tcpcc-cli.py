@@ -985,6 +985,8 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
             self.assertEqual(metrics["threads"], 1)
             self.assertEqual(metrics["host_fds"], 3)
             self.assertEqual(metrics["cpu_ticks"], 40)
+            self.assertTrue(metrics["smaps_rollup_available"])
+            self.assertEqual(metrics["rss_source"], "smaps_rollup")
 
     def test_process_metrics_fallback_without_smaps_rollup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1014,13 +1016,29 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
                 metrics = self.mod.process_metrics(1234)
 
             self.assertEqual(metrics["rss_kib"], 20480)
-            self.assertEqual(metrics["pss_kib"], 20480)
-            self.assertEqual(metrics["private_dirty_kib"], 0)
+            self.assertIsNone(metrics["pss_kib"])
+            self.assertIsNone(metrics["private_dirty_kib"])
             self.assertEqual(metrics["anonymous_kib"], 18432)
             self.assertEqual(metrics["virtual_kib"], 527012)
             self.assertEqual(metrics["threads"], 1)
             self.assertEqual(metrics["host_fds"], 1)
             self.assertEqual(metrics["cpu_ticks"], 15)
+            self.assertFalse(metrics["smaps_rollup_available"])
+            self.assertEqual(metrics["rss_source"], "status")
+
+    def test_process_metrics_rejects_missing_required_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_pid = Path(temp_dir)
+
+            with patch.object(
+                self.mod,
+                "Path",
+                side_effect=lambda path: proc_pid / Path(path).name
+                if str(path).startswith("/proc/1234/")
+                else Path(path),
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    self.mod.process_metrics(1234)
 
 
 if __name__ == "__main__":

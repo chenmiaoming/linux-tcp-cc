@@ -175,6 +175,34 @@ def service_stats(control: ControlClient, handle: int) -> ServiceStats:
     return decode_service_stats(response.data)
 
 
+def start_capacity_service(control: ControlClient, backend_port: int) -> int:
+    listener = control.transact(OP_SOCKET).handle
+    control.transact(OP_SET_CC, listener, data=b"bbr")
+    observed_cc = control.transact(OP_GET_CC, listener).data
+    if observed_cc != b"bbr":
+        raise RuntimeError(f"hosted listener CC is {observed_cc!r}")
+    control.transact(
+        OP_BIND,
+        listener,
+        int(ipaddress.IPv4Address(GUEST_IPV4)),
+        PUBLIC_PORT,
+    )
+    control.transact(OP_LISTEN, listener, LISTEN_BACKLOG)
+    service_handle = control.transact(
+        OP_SERVICE_START,
+        listener,
+        data=encode_service_config(
+            int(ipaddress.IPv4Address("127.0.0.1")),
+            backend_port,
+            0,
+            ACCEPT_BATCH,
+        ),
+    ).handle
+    if service_handle <= 0:
+        raise RuntimeError(f"invalid hosted service handle {service_handle}")
+    return service_handle
+
+
 def wait_service_active(
     process: subprocess.Popen[bytes],
     control: ControlClient,
@@ -352,54 +380,57 @@ def active_probe(clients: list[socket.socket],
     }
 
 
-def process_metrics(pid: int) -> dict[str, int]:
+def process_metrics(pid: int) -> dict[str, object]:
     status_values: dict[str, int] = {}
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        key, separator, raw = line.partition(":")
+        if separator:
+            cleaned_key = key.strip()
+            if cleaned_key in {"VmRSS", "VmSize", "RssAnon", "Threads"}:
+                status_values[cleaned_key] = int(raw.strip().split()[0])
+    missing_status = {"VmRSS", "VmSize", "Threads"} - status_values.keys()
+    if missing_status:
+        raise RuntimeError(
+            f"/proc/{pid}/status is missing {sorted(missing_status)}"
+        )
+
+    rollup_values: dict[str, int] = {}
+    rollup_available = False
     try:
-        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        rollup_lines = Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines()
+        rollup_available = True
+        for line in rollup_lines:
             key, separator, raw = line.partition(":")
             if separator:
                 cleaned_key = key.strip()
-                if cleaned_key in {"VmRSS", "VmSize", "RssAnon", "Threads"}:
-                    status_values[cleaned_key] = int(raw.strip().split()[0])
-    except OSError:
+                if cleaned_key in {"Rss", "Pss", "Private_Dirty", "Anonymous"}:
+                    rollup_values[cleaned_key] = int(raw.strip().split()[0])
+    except (FileNotFoundError, PermissionError):
         pass
+    if rollup_available:
+        missing_rollup = {
+            "Rss", "Pss", "Private_Dirty", "Anonymous"
+        } - rollup_values.keys()
+        if missing_rollup:
+            raise RuntimeError(
+                f"/proc/{pid}/smaps_rollup is missing {sorted(missing_rollup)}"
+            )
 
-    rollup_values: dict[str, int] = {}
-    try:
-        rollup_path = Path(f"/proc/{pid}/smaps_rollup")
-        if rollup_path.exists():
-            for line in rollup_path.read_text().splitlines():
-                key, separator, raw = line.partition(":")
-                if separator:
-                    cleaned_key = key.strip()
-                    if cleaned_key in {"Rss", "Pss", "Private_Dirty", "Anonymous"}:
-                        rollup_values[cleaned_key] = int(raw.strip().split()[0])
-    except OSError:
-        pass
+    raw_stat = Path(f"/proc/{pid}/stat").read_text().strip()
+    closing = raw_stat.rfind(")")
+    if closing == -1:
+        raise RuntimeError(f"/proc/{pid}/stat has no closing command delimiter")
+    fields = raw_stat[closing + 1 :].split()
+    if len(fields) <= 12:
+        raise RuntimeError(f"/proc/{pid}/stat is truncated")
+    cpu_ticks = int(fields[11]) + int(fields[12])
 
-    raw_stat = ""
-    try:
-        raw_stat = Path(f"/proc/{pid}/stat").read_text().strip()
-    except OSError:
-        pass
-    cpu_ticks = 0
-    if raw_stat:
-        closing = raw_stat.rfind(")")
-        if closing != -1:
-            fields = raw_stat[closing + 1 :].split()
-            if len(fields) > 12:
-                cpu_ticks = int(fields[11]) + int(fields[12])
-
-    host_fds = 0
-    try:
-        host_fds = len(list(Path(f"/proc/{pid}/fd").iterdir()))
-    except OSError:
-        pass
+    host_fds = len(list(Path(f"/proc/{pid}/fd").iterdir()))
 
     rss_kib = rollup_values.get("Rss", status_values.get("VmRSS", 0))
     virtual_kib = status_values.get("VmSize", 0)
-    pss_kib = rollup_values.get("Pss", rss_kib)
-    private_dirty_kib = rollup_values.get("Private_Dirty", 0)
+    pss_kib = rollup_values.get("Pss")
+    private_dirty_kib = rollup_values.get("Private_Dirty")
     anonymous_kib = rollup_values.get(
         "Anonymous", status_values.get("RssAnon", 0)
     )
@@ -414,6 +445,8 @@ def process_metrics(pid: int) -> dict[str, int]:
         "threads": threads,
         "host_fds": host_fds,
         "cpu_ticks": cpu_ticks,
+        "smaps_rollup_available": rollup_available,
+        "rss_source": "smaps_rollup" if rollup_available else "status",
     }
 
 
@@ -455,7 +488,39 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
     expected_active_bytes: int | None = None
     idle_result: dict[str, object] | None = None
     final_stats: dict[str, object] | None = None
+    ready_sample: dict[str, object] | None = None
+    post_drain_sample: dict[str, object] | None = None
+    post_drain_idle_samples: list[dict[str, object]] = []
+    reuse_sample: dict[str, object] | None = None
+    hosted_exit_status: int | None = None
+    reached = 0
     last_successful = 0
+
+    def lifecycle_report(status: str, error: BaseException | None = None) -> dict[str, object]:
+        report: dict[str, object] = {
+            "schema": SCHEMA,
+            "status": status,
+            "encoding_limit": BRIDGE_SESSION_LIMIT,
+            "admission_limit": 0,
+            "hosted_memory_mib": args.memory_mib,
+            "minimum_required": args.minimum,
+            "levels": list(args.levels),
+            "reached_connections": reached,
+            "capacity_failure": capacity_failure,
+            "hosted_exit_status_at_capacity": hosted_exit_status,
+            "ready_sample": ready_sample,
+            "stages": stages,
+            "active_probe": active_result,
+            "idle_sample": idle_result,
+            "post_drain_sample": post_drain_sample,
+            "post_drain_idle_samples": post_drain_idle_samples,
+            "reuse_sample": reuse_sample,
+            "service": final_stats,
+        }
+        if error is not None:
+            report["error"] = f"{type(error).__name__}: {error}"
+        return report
+
     boot_stream = args.boot_log.open("wb")
     try:
         child_tun_fd = tun_fd
@@ -489,30 +554,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         backend_listener.listen(LISTEN_BACKLOG)
         backend_port = backend_listener.getsockname()[1]
 
-        listener = control.transact(OP_SOCKET).handle
-        control.transact(OP_SET_CC, listener, data=b"bbr")
-        observed_cc = control.transact(OP_GET_CC, listener).data
-        if observed_cc != b"bbr":
-            raise RuntimeError(f"hosted listener CC is {observed_cc!r}")
-        control.transact(
-            OP_BIND,
-            listener,
-            int(ipaddress.IPv4Address(GUEST_IPV4)),
-            PUBLIC_PORT,
-        )
-        control.transact(OP_LISTEN, listener, LISTEN_BACKLOG)
-        service_handle = control.transact(
-            OP_SERVICE_START,
-            listener,
-            data=encode_service_config(
-                int(ipaddress.IPv4Address("127.0.0.1")),
-                backend_port,
-                0,
-                ACCEPT_BATCH,
-            ),
-        ).handle
-        if service_handle <= 0:
-            raise RuntimeError(f"invalid hosted service handle {service_handle}")
+        service_handle = start_capacity_service(control, backend_port)
 
         ready_stats = service_stats(control, service_handle)
         ready_sample = {
@@ -589,9 +631,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         if active_result is None:
             raise RuntimeError("active capacity probe was not executed")
         hosted_exit_status = process.poll()
-        if hosted_exit_status is None:
-            final_stats = asdict(service_stats(control, service_handle))
-        elif stages:
+        if hosted_exit_status is not None and stages:
             final_stats = dict(stages[-1]["service"])
 
         for connection in clients:
@@ -601,29 +641,32 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             close_socket(connection)
         backends.clear()
 
-        post_drain_sample: dict[str, object] | None = None
-        reclaim_samples: list[dict[str, object]] = []
-        reuse_sample: dict[str, object] | None = None
-
         if (
             hosted_exit_status is None
             and service_handle is not None
             and control is not None
         ):
-            drain_deadline = time.monotonic() + TIMEOUT
-            drain_stats = service_stats(control, service_handle)
-            while (
-                drain_stats.active_connections > 0
-                and time.monotonic() < drain_deadline
-            ):
-                time.sleep(0.01)
-                drain_stats = service_stats(control, service_handle)
+            response = control.transact(OP_SERVICE_STOP, service_handle, 30000)
+            drain_stats = decode_service_stats(response.data)
+            service_handle = None
+            final_stats = asdict(drain_stats)
             if drain_stats.active_connections != 0:
                 raise RuntimeError(
-                    f"flows did not drain to zero: {asdict(drain_stats)}"
+                    f"stopped service retained active flows: {final_stats}"
+                )
+            if (
+                expected_active_bytes is not None
+                and (
+                    drain_stats.public_to_backend_bytes < expected_active_bytes
+                    or drain_stats.backend_to_public_bytes < expected_active_bytes
+                )
+            ):
+                raise RuntimeError(
+                    "reaped capacity service byte counters are too small: "
+                    f"{final_stats}"
                 )
             post_drain_sample = {
-                "service": asdict(drain_stats),
+                "service": final_stats,
                 "process": process_metrics(process.pid),
             }
 
@@ -631,7 +674,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 window_before = process_metrics(process.pid)
                 time.sleep(0.5)
                 window_after = process_metrics(process.pid)
-                reclaim_samples.append(
+                post_drain_idle_samples.append(
                     {
                         "window": window_index + 1,
                         "seconds": 0.5,
@@ -647,9 +690,11 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             reuse_clients: list[socket.socket] = []
             reuse_backends: list[socket.socket] = []
             reuse_probe_result: dict[str, object] | None = None
-            reuse_metrics: dict[str, int] | None = None
-            reuse_stats_dict: dict[str, object] | None = None
+            reuse_metrics: dict[str, object] | None = None
+            reuse_active_stats: dict[str, object] | None = None
+            reuse_stop_stats: dict[str, object] | None = None
             try:
+                service_handle = start_capacity_service(control, backend_port)
                 for _ in range(reuse_target):
                     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     client.settimeout(TIMEOUT)
@@ -677,9 +722,9 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                     reuse_clients, reuse_backends, reuse_target
                 )
                 reuse_metrics = process_metrics(process.pid)
-                reuse_stats_dict = asdict(service_stats(control, service_handle))
-                if expected_active_bytes is not None:
-                    expected_active_bytes += reuse_target * PAYLOAD_BYTES
+                reuse_active_stats = asdict(
+                    service_stats(control, service_handle)
+                )
             finally:
                 for connection in reuse_clients:
                     close_socket(connection)
@@ -688,30 +733,29 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                     close_socket(connection)
                 reuse_backends.clear()
 
+            response = control.transact(OP_SERVICE_STOP, service_handle, 30000)
+            reuse_stop_stats = asdict(decode_service_stats(response.data))
+            service_handle = None
+            if (
+                reuse_stop_stats["active_connections"] != 0
+                or reuse_stop_stats["public_to_backend_bytes"]
+                < reuse_target * PAYLOAD_BYTES
+                or reuse_stop_stats["backend_to_public_bytes"]
+                < reuse_target * PAYLOAD_BYTES
+            ):
+                raise RuntimeError(
+                    f"reused service did not stop cleanly: {reuse_stop_stats}"
+                )
+
             reuse_sample = {
                 "connections": reuse_target,
                 "active_probe": reuse_probe_result,
-                "service": reuse_stats_dict,
+                "active_service": reuse_active_stats,
+                "stopped_service": reuse_stop_stats,
                 "process": reuse_metrics,
             }
 
         if hosted_exit_status is None:
-            response = control.transact(OP_SERVICE_STOP, service_handle, 30000)
-            final_stats = asdict(decode_service_stats(response.data))
-            service_handle = None
-            if (
-                expected_active_bytes is not None
-                and (
-                    final_stats["public_to_backend_bytes"]
-                    < expected_active_bytes
-                    or final_stats["backend_to_public_bytes"]
-                    < expected_active_bytes
-                )
-            ):
-                raise RuntimeError(
-                    "reaped service byte counters are too small: "
-                    f"{final_stats}"
-                )
             control.transact(OP_SHUTDOWN)
             status = process.wait(timeout=15)
             if status != 0:
@@ -722,26 +766,10 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             control = None
         process = None
 
-        return {
-            "schema": SCHEMA,
-            "status": "passed",
-            "encoding_limit": BRIDGE_SESSION_LIMIT,
-            "admission_limit": 0,
-            "hosted_memory_mib": args.memory_mib,
-            "minimum_required": args.minimum,
-            "levels": list(args.levels),
-            "reached_connections": reached,
-            "capacity_failure": capacity_failure,
-            "hosted_exit_status_at_capacity": hosted_exit_status,
-            "ready_sample": ready_sample,
-            "stages": stages,
-            "active_probe": active_result,
-            "idle_sample": idle_result,
-            "post_drain_sample": post_drain_sample,
-            "reclaim_samples": reclaim_samples,
-            "reuse_sample": reuse_sample,
-            "service": final_stats,
-        }
+        return lifecycle_report("passed")
+    except BaseException as error:
+        error.tcpcc_partial_report = lifecycle_report("failed", error)
+        raise
     finally:
         for connection in clients:
             close_socket(connection)
@@ -782,6 +810,8 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.boot_log.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, object]
+    nofile_soft: int | None = None
+    nofile_hard: int | None = None
     try:
         nofile_soft, nofile_hard = ensure_driver_fd_capacity(args.levels[-1])
         report = discover(args)
@@ -808,11 +838,19 @@ def main() -> int:
             int(buffer_matches[-1][1]) if buffer_matches else None
         )
     except BaseException as error:
-        report = {
-            "schema": SCHEMA,
-            "status": "failed",
-            "error": f"{type(error).__name__}: {error}",
-        }
+        partial_report = getattr(error, "tcpcc_partial_report", None)
+        report = (
+            partial_report
+            if isinstance(partial_report, dict)
+            else {
+                "schema": SCHEMA,
+                "status": "failed",
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        if nofile_soft is not None and nofile_hard is not None:
+            report["driver_nofile_soft"] = nofile_soft
+            report["driver_nofile_hard"] = nofile_hard
         args.output.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

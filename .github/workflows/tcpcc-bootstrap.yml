@@ -239,7 +239,7 @@ jobs:
           if-no-files-found: warn
 
   capacity-discovery:
-    name: M9 connection capacity discovery
+    name: M10 memory lifecycle and capacity
     needs: start-kernel
     runs-on: ubuntu-latest
     timeout-minutes: 15

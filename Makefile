@@ -63,7 +63,8 @@ $(NATIVE_BUILD_DIR)/test-hosted-child: native/test_hosted_child.c \
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-o $@ native/test_hosted_child.c
 
-$(NATIVE_BUILD_DIR)/test-process: native/test_process.c $(NATIVE_LIBRARY)
+$(NATIVE_BUILD_DIR)/test-process: native/test_process.c \
+		linux-overlay/arch/tcpcc/include/asm/host_mman.h $(NATIVE_LIBRARY)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-o $@ native/test_process.c $(NATIVE_LIBRARY)
 
