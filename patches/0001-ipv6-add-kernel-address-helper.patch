@@ -8,8 +8,8 @@ notification behavior.
 
 ---
  include/net/addrconf.h |  4 ++++
- net/ipv6/addrconf.c    | 30 ++++++++++++++++++++++++++++++
- 2 files changed, 34 insertions(+)
+ net/ipv6/addrconf.c    | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+)
 
 diff --git a/include/net/addrconf.h b/include/net/addrconf.h
 --- a/include/net/addrconf.h
@@ -28,7 +28,7 @@ diff --git a/include/net/addrconf.h b/include/net/addrconf.h
 diff --git a/net/ipv6/addrconf.c b/net/ipv6/addrconf.c
 --- a/net/ipv6/addrconf.c
 +++ b/net/ipv6/addrconf.c
-@@ -3073,6 +3073,36 @@ static int inet6_addr_add(struct net *net, struct net_device *dev,
+@@ -3073,6 +3073,35 @@ static int inet6_addr_add(struct net *net, struct net_device *dev,
  	return PTR_ERR(ifp);
  }
  
