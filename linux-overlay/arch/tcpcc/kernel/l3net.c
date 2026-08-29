@@ -6,6 +6,7 @@
 #include <linux/inetdevice.h>
 #include <linux/interrupt.h>
 #include <linux/ip.h>
+#include <linux/ipv6.h>
 #include <linux/irq.h>
 #include <linux/kthread.h>
 #include <linux/netdevice.h>
@@ -133,16 +134,38 @@ static bool tcpcc_l3_valid_ipv4(const u8 *packet, size_t len)
 	return true;
 }
 
+static bool tcpcc_l3_valid_ipv6(const u8 *packet, size_t len)
+{
+	const struct ipv6hdr *ip6h;
+
+	if (len < sizeof(struct ipv6hdr))
+		return false;
+
+	ip6h = (const struct ipv6hdr *)packet;
+	if (ip6h->version != 6)
+		return false;
+
+	/* The 1500-byte hosted MTU cannot carry IPv6 jumbograms. */
+	return ntohs(ip6h->payload_len) == len - sizeof(*ip6h);
+}
+
 static int tcpcc_l3_inject_one(struct tcpcc_l3_priv *priv,
 			       const u8 *packet, size_t len)
 {
 	struct sk_buff *skb;
+	__be16 protocol;
 
 	if (len > priv->dev->mtu) {
 		tcpcc_l3_stats_rx_drop(priv, false);
 		return -EMSGSIZE;
 	}
-	if (!tcpcc_l3_valid_ipv4(packet, len)) {
+	if (len && (packet[0] >> 4) == 4 &&
+	    tcpcc_l3_valid_ipv4(packet, len))
+		protocol = htons(ETH_P_IP);
+	else if (len && (packet[0] >> 4) == 6 &&
+		 tcpcc_l3_valid_ipv6(packet, len))
+		protocol = htons(ETH_P_IPV6);
+	else {
 		tcpcc_l3_stats_rx_drop(priv, true);
 		return -EINVAL;
 	}
@@ -155,7 +178,7 @@ static int tcpcc_l3_inject_one(struct tcpcc_l3_priv *priv,
 
 	skb_put_data(skb, packet, len);
 	skb->dev = priv->dev;
-	skb->protocol = htons(ETH_P_IP);
+	skb->protocol = protocol;
 	skb->pkt_type = PACKET_HOST;
 	skb->ip_summed = CHECKSUM_NONE;
 	skb_reset_mac_header(skb);

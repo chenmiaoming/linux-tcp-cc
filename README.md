@@ -65,9 +65,14 @@ but does not change global sysctls:
 
 ```bash
 sysctl net.ipv4.ip_forward
+sysctl net.ipv6.conf.all.forwarding
 sysctl net.ipv4.tcp_congestion_control
 sysctl net.ipv4.tcp_available_congestion_control
 ```
+
+IPv4 listeners require `net.ipv4.ip_forward=1`; IPv6 listeners require
+`net.ipv6.conf.all.forwarding=1`. Only the forwarding switch for the selected
+public address family is required.
 
 The stable server-facing command is:
 
@@ -77,6 +82,11 @@ sudo tcpcc \
   --backend 127.0.0.1:443 \
   --cc bbr
 ```
+
+IPv6 literals use brackets, as in
+`sudo tcpcc --listen '[2001:db8::10]:443' --backend 127.0.0.1:443 --cc bbr`.
+The public endpoint and TUN are IPv4 or IPv6 together; the local application
+bridge deliberately remains an ordinary IPv4 loopback connection.
 
 The CLI applies no connection admission limit by default and uses a five-second
 graceful-shutdown window. Hosted RAM defaults to 128 MiB but is no longer a
