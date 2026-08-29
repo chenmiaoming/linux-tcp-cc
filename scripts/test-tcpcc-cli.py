@@ -930,5 +930,98 @@ class ServiceTransactionTests(unittest.TestCase):
         self.assertIn("stopped cleanly", diagnostics.getvalue())
 
 
+class CapacityDiscoveryMetricsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import importlib.util
+
+        script_path = ROOT / "scripts" / "run-tcpcc-capacity-discovery.py"
+        spec = importlib.util.spec_from_file_location(
+            "capacity_discovery_mod", script_path
+        )
+        assert spec is not None and spec.loader is not None
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def test_process_metrics_with_smaps_rollup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_pid = Path(temp_dir)
+            (proc_pid / "status").write_text(
+                "VmSize:\t  527012 kB\n"
+                "VmRSS:\t   72144 kB\n"
+                "RssAnon:\t   68000 kB\n"
+                "Threads:\t1\n"
+            )
+            (proc_pid / "smaps_rollup").write_text(
+                "Rss:               72144 kB\n"
+                "Pss:               72100 kB\n"
+                "Private_Dirty:     71800 kB\n"
+                "Anonymous:         68000 kB\n"
+            )
+            (proc_pid / "stat").write_text(
+                "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 15 25 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "fd").mkdir()
+            (proc_pid / "fd" / "0").touch()
+            (proc_pid / "fd" / "1").touch()
+            (proc_pid / "fd" / "3").touch()
+
+            with patch.object(
+                self.mod,
+                "Path",
+                side_effect=lambda path: proc_pid
+                if str(path).startswith("/proc/1234")
+                and str(path) == "/proc/1234"
+                else proc_pid / Path(path).name
+                if str(path).startswith("/proc/1234/")
+                else Path(path),
+            ):
+                metrics = self.mod.process_metrics(1234)
+
+            self.assertEqual(metrics["rss_kib"], 72144)
+            self.assertEqual(metrics["pss_kib"], 72100)
+            self.assertEqual(metrics["private_dirty_kib"], 71800)
+            self.assertEqual(metrics["anonymous_kib"], 68000)
+            self.assertEqual(metrics["virtual_kib"], 527012)
+            self.assertEqual(metrics["threads"], 1)
+            self.assertEqual(metrics["host_fds"], 3)
+            self.assertEqual(metrics["cpu_ticks"], 40)
+
+    def test_process_metrics_fallback_without_smaps_rollup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_pid = Path(temp_dir)
+            (proc_pid / "status").write_text(
+                "VmSize:\t  527012 kB\n"
+                "VmRSS:\t   20480 kB\n"
+                "RssAnon:\t   18432 kB\n"
+                "Threads:\t1\n"
+            )
+            (proc_pid / "stat").write_text(
+                "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 5 10 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "fd").mkdir()
+            (proc_pid / "fd" / "0").touch()
+
+            with patch.object(
+                self.mod,
+                "Path",
+                side_effect=lambda path: proc_pid
+                if str(path).startswith("/proc/1234")
+                and str(path) == "/proc/1234"
+                else proc_pid / Path(path).name
+                if str(path).startswith("/proc/1234/")
+                else Path(path),
+            ):
+                metrics = self.mod.process_metrics(1234)
+
+            self.assertEqual(metrics["rss_kib"], 20480)
+            self.assertEqual(metrics["pss_kib"], 20480)
+            self.assertEqual(metrics["private_dirty_kib"], 0)
+            self.assertEqual(metrics["anonymous_kib"], 18432)
+            self.assertEqual(metrics["virtual_kib"], 527012)
+            self.assertEqual(metrics["threads"], 1)
+            self.assertEqual(metrics["host_fds"], 1)
+            self.assertEqual(metrics["cpu_ticks"], 15)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

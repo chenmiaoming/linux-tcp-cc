@@ -55,6 +55,7 @@
 #define TCPCC_HOST_PROT_WRITE     0x2
 #define TCPCC_HOST_MAP_PRIVATE    0x02
 #define TCPCC_HOST_MAP_ANONYMOUS  0x20
+#define TCPCC_HOST_MAP_NORESERVE  0x4000
 
 #define TCPCC_HOST_EPOLLIN        0x001
 #define TCPCC_HOST_EPOLLOUT       0x004
@@ -354,7 +355,8 @@ void *__init tcpcc_host_map_anon(size_t len)
 {
 	long ret = tcpcc_host_syscall6(TCPCC_HOST_NR_MMAP, 0, (long)len,
 				       TCPCC_HOST_PROT_READ | TCPCC_HOST_PROT_WRITE,
-				       TCPCC_HOST_MAP_PRIVATE | TCPCC_HOST_MAP_ANONYMOUS,
+				       TCPCC_HOST_MAP_PRIVATE | TCPCC_HOST_MAP_ANONYMOUS |
+				       TCPCC_HOST_MAP_NORESERVE,
 				       -1, 0);
 
 	/* Linux syscalls return -errno in the range [-4095, -1]. */

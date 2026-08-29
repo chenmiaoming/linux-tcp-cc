@@ -354,19 +354,66 @@ def active_probe(clients: list[socket.socket],
 
 def process_metrics(pid: int) -> dict[str, int]:
     status_values: dict[str, int] = {}
-    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-        key, separator, raw = line.partition(":")
-        if separator and key in {"VmRSS", "VmSize", "Threads"}:
-            status_values[key] = int(raw.strip().split()[0])
-    raw_stat = Path(f"/proc/{pid}/stat").read_text().strip()
-    closing = raw_stat.rfind(")")
-    fields = raw_stat[closing + 1 :].split()
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            key, separator, raw = line.partition(":")
+            if separator:
+                cleaned_key = key.strip()
+                if cleaned_key in {"VmRSS", "VmSize", "RssAnon", "Threads"}:
+                    status_values[cleaned_key] = int(raw.strip().split()[0])
+    except OSError:
+        pass
+
+    rollup_values: dict[str, int] = {}
+    try:
+        rollup_path = Path(f"/proc/{pid}/smaps_rollup")
+        if rollup_path.exists():
+            for line in rollup_path.read_text().splitlines():
+                key, separator, raw = line.partition(":")
+                if separator:
+                    cleaned_key = key.strip()
+                    if cleaned_key in {"Rss", "Pss", "Private_Dirty", "Anonymous"}:
+                        rollup_values[cleaned_key] = int(raw.strip().split()[0])
+    except OSError:
+        pass
+
+    raw_stat = ""
+    try:
+        raw_stat = Path(f"/proc/{pid}/stat").read_text().strip()
+    except OSError:
+        pass
+    cpu_ticks = 0
+    if raw_stat:
+        closing = raw_stat.rfind(")")
+        if closing != -1:
+            fields = raw_stat[closing + 1 :].split()
+            if len(fields) > 12:
+                cpu_ticks = int(fields[11]) + int(fields[12])
+
+    host_fds = 0
+    try:
+        host_fds = len(list(Path(f"/proc/{pid}/fd").iterdir()))
+    except OSError:
+        pass
+
+    rss_kib = rollup_values.get("Rss", status_values.get("VmRSS", 0))
+    virtual_kib = status_values.get("VmSize", 0)
+    pss_kib = rollup_values.get("Pss", rss_kib)
+    private_dirty_kib = rollup_values.get("Private_Dirty", 0)
+    anonymous_kib = rollup_values.get(
+        "Anonymous", status_values.get("RssAnon", 0)
+    )
+    threads = status_values.get("Threads", 0)
+
     return {
-        "rss_kib": status_values.get("VmRSS", 0),
-        "virtual_kib": status_values.get("VmSize", 0),
-        "threads": status_values.get("Threads", 0),
-        "host_fds": len(list(Path(f"/proc/{pid}/fd").iterdir())),
-        "cpu_ticks": int(fields[11]) + int(fields[12]),
+        "rss_kib": rss_kib,
+        "pss_kib": pss_kib,
+        "private_dirty_kib": private_dirty_kib,
+        "anonymous_kib": anonymous_kib,
+        "virtual_kib": virtual_kib,
+        "threads": threads,
+        "host_fds": host_fds,
+        "cpu_ticks": cpu_ticks,
     }
 
 
@@ -467,6 +514,12 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         if service_handle <= 0:
             raise RuntimeError(f"invalid hosted service handle {service_handle}")
 
+        ready_stats = service_stats(control, service_handle)
+        ready_sample = {
+            "service": asdict(ready_stats),
+            "process": process_metrics(process.pid),
+        }
+
         for target in args.levels:
             stage_started = time.monotonic()
             try:
@@ -548,6 +601,100 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             close_socket(connection)
         backends.clear()
 
+        post_drain_sample: dict[str, object] | None = None
+        reclaim_samples: list[dict[str, object]] = []
+        reuse_sample: dict[str, object] | None = None
+
+        if (
+            hosted_exit_status is None
+            and service_handle is not None
+            and control is not None
+        ):
+            drain_deadline = time.monotonic() + TIMEOUT
+            drain_stats = service_stats(control, service_handle)
+            while (
+                drain_stats.active_connections > 0
+                and time.monotonic() < drain_deadline
+            ):
+                time.sleep(0.01)
+                drain_stats = service_stats(control, service_handle)
+            if drain_stats.active_connections != 0:
+                raise RuntimeError(
+                    f"flows did not drain to zero: {asdict(drain_stats)}"
+                )
+            post_drain_sample = {
+                "service": asdict(drain_stats),
+                "process": process_metrics(process.pid),
+            }
+
+            for window_index in range(2):
+                window_before = process_metrics(process.pid)
+                time.sleep(0.5)
+                window_after = process_metrics(process.pid)
+                reclaim_samples.append(
+                    {
+                        "window": window_index + 1,
+                        "seconds": 0.5,
+                        "cpu_ticks_delta": (
+                            window_after["cpu_ticks"]
+                            - window_before["cpu_ticks"]
+                        ),
+                        "process": window_after,
+                    }
+                )
+
+            reuse_target = min(args.active_connections, 64)
+            reuse_clients: list[socket.socket] = []
+            reuse_backends: list[socket.socket] = []
+            reuse_probe_result: dict[str, object] | None = None
+            reuse_metrics: dict[str, int] | None = None
+            reuse_stats_dict: dict[str, object] | None = None
+            try:
+                for _ in range(reuse_target):
+                    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    client.settimeout(TIMEOUT)
+                    try:
+                        client.bind((HOST_IPV4, 0))
+                        client.connect((GUEST_IPV4, PUBLIC_PORT))
+                    except BaseException:
+                        client.close()
+                        raise
+                    reuse_clients.append(client)
+                    if len(reuse_clients) % ACCEPT_BATCH == 0:
+                        drain_available_backends(
+                            process,
+                            backend_listener,
+                            reuse_backends,
+                            len(reuse_clients),
+                        )
+                accept_backends(
+                    process, backend_listener, reuse_backends, reuse_target
+                )
+                wait_service_active(
+                    process, control, service_handle, reuse_target
+                )
+                reuse_probe_result = active_probe(
+                    reuse_clients, reuse_backends, reuse_target
+                )
+                reuse_metrics = process_metrics(process.pid)
+                reuse_stats_dict = asdict(service_stats(control, service_handle))
+                if expected_active_bytes is not None:
+                    expected_active_bytes += reuse_target * PAYLOAD_BYTES
+            finally:
+                for connection in reuse_clients:
+                    close_socket(connection)
+                reuse_clients.clear()
+                for connection in reuse_backends:
+                    close_socket(connection)
+                reuse_backends.clear()
+
+            reuse_sample = {
+                "connections": reuse_target,
+                "active_probe": reuse_probe_result,
+                "service": reuse_stats_dict,
+                "process": reuse_metrics,
+            }
+
         if hosted_exit_status is None:
             response = control.transact(OP_SERVICE_STOP, service_handle, 30000)
             final_stats = asdict(decode_service_stats(response.data))
@@ -586,9 +733,13 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             "reached_connections": reached,
             "capacity_failure": capacity_failure,
             "hosted_exit_status_at_capacity": hosted_exit_status,
+            "ready_sample": ready_sample,
             "stages": stages,
             "active_probe": active_result,
             "idle_sample": idle_result,
+            "post_drain_sample": post_drain_sample,
+            "reclaim_samples": reclaim_samples,
+            "reuse_sample": reuse_sample,
             "service": final_stats,
         }
     finally:
