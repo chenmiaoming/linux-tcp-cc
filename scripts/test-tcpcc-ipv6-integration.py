@@ -19,9 +19,9 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_ADDRESS = "2001:db8:7463:1::10"
-CLIENT_ADDRESS = "2001:db8:7463:1::20"
-PUBLIC_NETWORK = "2001:db8:7463:1::/64"
+PUBLIC_ADDRESS = "fd42:7463:7063:1::10"
+CLIENT_ADDRESS = "fd42:7463:7063:1::20"
+PUBLIC_NETWORK = "fd42:7463:7063:1::/64"
 HOSTED_ADDRESS = "fd00:198:18::2"
 PUBLIC_PORT = 18654
 BACKEND_PORT = 18655
@@ -87,7 +87,8 @@ def ipv6_client() -> int:
     connection = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     connection.settimeout(TIMEOUT)
     try:
-        connection.connect((PUBLIC_ADDRESS, PUBLIC_PORT))
+        connection.bind((CLIENT_ADDRESS, 0, 0, 0))
+        connection.connect((PUBLIC_ADDRESS, PUBLIC_PORT, 0, 0))
         connection.sendall(b"ipv6-through-hosted-linux")
         connection.shutdown(socket.SHUT_WR)
         received = bytearray()
