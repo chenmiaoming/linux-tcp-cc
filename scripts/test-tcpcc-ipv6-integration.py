@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_ADDRESS = "2001:db8:7463:1::10"
 CLIENT_ADDRESS = "2001:db8:7463:1::20"
+PUBLIC_NETWORK = "2001:db8:7463:1::/64"
 HOSTED_ADDRESS = "fd00:198:18::2"
 PUBLIC_PORT = 18654
 BACKEND_PORT = 18655
@@ -190,6 +191,10 @@ def integration(args: argparse.Namespace) -> int:
                     f"{address}/64", "dev", link, "nodad",
                 ])
                 run(["ip", "-n", namespace, "link", "set", link, "up"])
+                run([
+                    "ip", "-n", namespace, "-6", "route", "replace",
+                    PUBLIC_NETWORK, "dev", link, "src", address,
+                ])
             run(ns(router, "sysctl", "-q", "-w", "net.ipv6.conf.all.forwarding=1"))
             run(ns(router, "sysctl", "-q", "-w", "net.ipv4.tcp_congestion_control=bbr"))
 
@@ -273,6 +278,28 @@ def integration(args: argparse.Namespace) -> int:
                     if path.exists():
                         shutil.copy2(path, args.output_dir / path.name)
             return 0
+        except BaseException:
+            if args.output_dir is not None:
+                args.output_dir.mkdir(parents=True, exist_ok=True)
+                for path in (events_path, diagnostic_path, backend_path):
+                    if path.exists():
+                        shutil.copy2(path, args.output_dir / path.name)
+                for namespace, label in ((router, "router"), (client, "client")):
+                    if namespace not in namespaces:
+                        continue
+                    state = run(
+                        ns(namespace, "ip", "-6", "address", "show"),
+                        check=False,
+                    ).stdout
+                    routes = run(
+                        ns(namespace, "ip", "-6", "route", "show", "table", "all"),
+                        check=False,
+                    ).stdout
+                    (args.output_dir / f"{label}-network.txt").write_text(
+                        state + "\n" + routes,
+                        encoding="utf-8",
+                    )
+            raise
         finally:
             stop(tcpcc)
             stop(backend)
