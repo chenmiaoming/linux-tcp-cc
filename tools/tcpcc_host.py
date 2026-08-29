@@ -726,6 +726,8 @@ def create_tun_queue(
 
     for _ in range(attempts):
         name = _validate_tun_name(name_factory() if generated else config.name or "")
+        host_address = ipaddress.ip_address(config.host_address)
+        guest_address = ipaddress.ip_address(config.guest_address)
         fd = opener(str(tun_path), open_flags)
         name_collision = False
         try:
@@ -750,9 +752,9 @@ def create_tun_queue(
                     ip_path,
                     "address",
                     "add",
-                    f"{config.host_address}/{ipaddress.ip_address(config.host_address).max_prefixlen}",
+                    f"{config.host_address}/{host_address.max_prefixlen}",
                     "peer",
-                    f"{config.guest_address}/{ipaddress.ip_address(config.guest_address).max_prefixlen}",
+                    f"{config.guest_address}/{guest_address.max_prefixlen}",
                     "dev",
                     name,
                 ]
@@ -769,6 +771,22 @@ def create_tun_queue(
                     "up",
                 ]
             )
+            if host_address.version == 6:
+                # Unlike IPv4, an IPv6 peer address does not reliably install
+                # a route to the remote /128 on a point-to-point TUN.
+                runner(
+                    [
+                        ip_path,
+                        "-6",
+                        "route",
+                        "replace",
+                        f"{config.guest_address}/128",
+                        "dev",
+                        name,
+                        "src",
+                        config.host_address,
+                    ]
+                )
         except BaseException as setup_error:
             _close_after_setup_error(fd, closer, setup_error)
             if name_collision:

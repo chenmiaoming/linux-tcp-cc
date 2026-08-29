@@ -91,13 +91,15 @@ class TunFixture:
         self,
         *,
         name: str | None = "tcpcc-test0",
+        host_address: str = "198.18.0.1",
+        guest_address: str = "198.18.0.2",
         name_factory=lambda: "tcpcc-auto0",
         max_name_attempts: int = 8,
     ):
         return create_tun_queue(
             TunConfig(
-                host_address="198.18.0.1",
-                guest_address="198.18.0.2",
+                host_address=host_address,
+                guest_address=guest_address,
                 mtu=1460,
                 name=name,
             ),
@@ -179,6 +181,51 @@ class TunLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "closed"):
             _ = queue.fd
 
+    def test_ipv6_create_installs_explicit_guest_route(self) -> None:
+        fixture = TunFixture()
+        queue = fixture.create(
+            host_address="fd00:198:18::1",
+            guest_address="fd00:198:18::2",
+        )
+
+        self.assertEqual(
+            fixture.commands,
+            [
+                [
+                    "/usr/sbin/ip",
+                    "address",
+                    "add",
+                    "fd00:198:18::1/128",
+                    "peer",
+                    "fd00:198:18::2/128",
+                    "dev",
+                    "tcpcc-test0",
+                ],
+                [
+                    "/usr/sbin/ip",
+                    "link",
+                    "set",
+                    "dev",
+                    "tcpcc-test0",
+                    "mtu",
+                    "1460",
+                    "up",
+                ],
+                [
+                    "/usr/sbin/ip",
+                    "-6",
+                    "route",
+                    "replace",
+                    "fd00:198:18::2/128",
+                    "dev",
+                    "tcpcc-test0",
+                    "src",
+                    "fd00:198:18::1",
+                ],
+            ],
+        )
+        queue.close()
+
     def test_each_setup_failure_closes_the_new_fd(self) -> None:
         fixture = TunFixture()
         fixture.ioctl_errors["tcpcc-test0"] = OSError(
@@ -198,6 +245,16 @@ class TunLifecycleTests(unittest.TestCase):
                     fixture.create()
                 self.assertEqual(fixture.closed, [100])
                 self.assertEqual(len(fixture.commands), fail_command)
+
+        fixture = TunFixture()
+        fixture.fail_command = 3
+        with self.assertRaises(subprocess.CalledProcessError):
+            fixture.create(
+                host_address="fd00:198:18::1",
+                guest_address="fd00:198:18::2",
+            )
+        self.assertEqual(fixture.closed, [100])
+        self.assertEqual(len(fixture.commands), 3)
 
     def test_kernel_name_mismatch_closes_fd_before_reporting(self) -> None:
         fixture = TunFixture()
