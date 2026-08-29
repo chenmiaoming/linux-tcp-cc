@@ -756,7 +756,13 @@ static int tcpcc_control_bridge_start(
 	if (request->length || request->arg0 != INADDR_LOOPBACK ||
 	    !request->arg1 || request->arg1 > 0xffffU)
 		return -EINVAL;
-	if (public_sock->sk->sk_state != TCP_ESTABLISHED)
+	/*
+	 * A peer may send FIN before userspace hands the accepted socket to the
+	 * bridge.  CLOSE_WAIT is still connected and carries any queued request
+	 * bytes; the bridge's normal half-close state machine must consume it.
+	 */
+	if (public_sock->sk->sk_state != TCP_ESTABLISHED &&
+	    public_sock->sk->sk_state != TCP_CLOSE_WAIT)
 		return -ENOTCONN;
 
 	ret = tcpcc_bridge_start(public_sock, htonl(request->arg0),
