@@ -3,9 +3,11 @@
 config TCPCC
 	def_bool y
 	depends on !SMP && !COREDUMP && !COMPAT
+	select ARCH_CONFIGURES_CPU_MITIGATIONS
 	select FLATMEM
 	select GENERIC_CLOCKEVENTS
-	select GENERIC_CPU_DEVICES
+	select HAVE_LD_DEAD_CODE_DATA_ELIMINATION
+	select NO_DMA
 	select NO_PREEMPT
 	select THREAD_INFO_IN_TASK
 	select UACCESS_MEMCPY
@@ -40,6 +42,11 @@ config GENERIC_CSUM
 	def_bool y
 
 config NO_IOPORT_MAP
+	def_bool y
+
+# The hosted architecture has no memory-mapped devices.  Linux references this
+# negative capability but does not provide a generic definition for it.
+config NO_IOMEM
 	def_bool y
 
 config HZ

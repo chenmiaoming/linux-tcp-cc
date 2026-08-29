@@ -214,11 +214,18 @@ networking, unused congestion controls, production debugging, and optional
 IPv6-over-IPv4 SIT tunneling. Native IPv6 does not depend on SIT and remains
 enabled for IPv6-only hosts.
 
-Kernel-link CI records the generated config and image section sizes. Against
-Linux 6.18.45, the trimmed IPv4+IPv6 image is 5,003,232 bytes with 113 enabled
-config symbols. CI rejects an image above 5.5 MiB or more than 120 enabled
-symbols by default, so later kernel updates and features must make material
-growth explicit in review.
+Kernel-link CI records the generated config, image section sizes, and a
+size-sorted symbol report. Against Linux 6.18.45, the aggressively trimmed
+IPv4+IPv6 image is 2,725,256 bytes with 111 enabled config symbols. The hosted
+architecture declares that DMA and MMIO do not exist, uses only eight static
+IRQ descriptors for its four IRQ lines, and retains a 4-KiB production printk
+ring. Because it has no stack unwinder, compiler-generated DWARF unwind tables
+are omitted. Linker dead-code/data elimination also removes network, filter,
+and BPF implementations that are unreachable from the hosted entry points;
+Linux still exposes the base `CONFIG_BPF` capability because `CONFIG_NET`
+selects it. CI rejects an image above 3.25 MiB, more than 112 enabled symbols,
+or any returning `.eh_frame` section, so later kernel updates and features must
+make material growth explicit in review.
 
 This gate concerns the kernel protocol stack. The current CLI endpoint parser,
 host control ABI, and TUN address setup still carry IPv4 addresses; accepting an
