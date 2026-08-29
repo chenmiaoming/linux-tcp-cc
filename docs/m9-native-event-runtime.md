@@ -216,11 +216,14 @@ enabled for IPv6-only hosts.
 
 Kernel-link CI records the generated config, image section sizes, and a
 size-sorted symbol report. Against Linux 6.18.45, the aggressively trimmed
-IPv4+IPv6 image is 3,920,376 bytes with 109 enabled config symbols. The hosted
+IPv4+IPv6 image is 2,725,256 bytes with 111 enabled config symbols. The hosted
 architecture declares that DMA and MMIO do not exist, uses only eight static
 IRQ descriptors for its four IRQ lines, and retains a 4-KiB production printk
 ring. Because it has no stack unwinder, compiler-generated DWARF unwind tables
-are omitted. CI rejects an image above 4.5 MiB, more than 112 enabled symbols,
+are omitted. Linker dead-code/data elimination also removes network, filter,
+and BPF implementations that are unreachable from the hosted entry points;
+Linux still exposes the base `CONFIG_BPF` capability because `CONFIG_NET`
+selects it. CI rejects an image above 3.25 MiB, more than 112 enabled symbols,
 or any returning `.eh_frame` section, so later kernel updates and features must
 make material growth explicit in review.
 

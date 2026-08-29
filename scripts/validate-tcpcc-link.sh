@@ -44,7 +44,7 @@ section_size() {
 vmlinux_size=$(stat -c '%s' "$OUT/vmlinux")
 config_enabled_count=$(grep -Ec '^CONFIG_[A-Z0-9_]+=(y|m)$' "$OUT/.config")
 eh_frame_size=$(section_size .eh_frame)
-vmlinux_max_bytes=${TCPCC_VMLINUX_MAX_BYTES:-4718592}
+vmlinux_max_bytes=${TCPCC_VMLINUX_MAX_BYTES:-3407872}
 config_max_enabled=${TCPCC_CONFIG_MAX_ENABLED:-112}
 
 if (( vmlinux_size > vmlinux_max_bytes )); then
