@@ -25,6 +25,7 @@ on:
       - 'scripts/run-tcpcc-high-bdp-iperf.py'
       - 'scripts/test-tcpcc-cli.py'
       - 'scripts/test-tcpcc-cli-integration.py'
+      - 'scripts/test-tcpcc-ipv6-integration.py'
       - 'scripts/test-tcpcc-high-bdp-iperf.py'
       - 'scripts/collect-m7-hosted-report.py'
       - 'tools/tcpcc_cli.py'
@@ -75,6 +76,7 @@ jobs:
           python3 -m py_compile scripts/run-tcpcc-high-bdp-iperf.py
           python3 -m py_compile scripts/test-tcpcc-cli.py
           python3 -m py_compile scripts/test-tcpcc-cli-integration.py
+          python3 -m py_compile scripts/test-tcpcc-ipv6-integration.py
           python3 -m py_compile scripts/test-tcpcc-high-bdp-iperf.py
           python3 -m py_compile scripts/collect-m7-hosted-report.py
           python3 -m py_compile tools/tcpcc_cli.py
@@ -282,6 +284,58 @@ jobs:
         with:
           name: tcpcc-m9-capacity
           path: .build/m9-capacity
+          if-no-files-found: warn
+
+  ipv6-ingress:
+    name: IPv6 public endpoint
+    needs: start-kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Download hosted kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: tcpcc-m85-vmlinux
+          path: .build/tcpcc-bootstrap-out
+
+      - name: Install IPv6 ingress dependencies
+        run: |
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends \
+              iproute2 \
+              libnftables1 \
+              nftables \
+              procps
+
+      - name: Prepare IPv6 TUN, BBR, NAT, and conntrack
+        run: |
+          sudo -n modprobe tun || true
+          sudo -n modprobe tcp_bbr || true
+          sudo -n modprobe nf_tables || true
+          sudo -n modprobe nf_nat || true
+          sudo -n modprobe nf_conntrack || true
+          test -c /dev/net/tun
+          test -r /proc/net/if_inet6
+          sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
+
+      - name: Prove IPv6 public ingress through the hosted stack
+        run: |
+          sudo -n python3 scripts/test-tcpcc-ipv6-integration.py \
+            --integration \
+            --kernel .build/tcpcc-bootstrap-out/vmlinux \
+            --output-dir .build/m9-ipv6
+
+      - name: Upload IPv6 ingress diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-m9-ipv6
+          path: .build/m9-ipv6
           if-no-files-found: warn
 
   high-bdp-iperf:

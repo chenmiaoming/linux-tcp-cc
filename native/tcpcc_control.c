@@ -28,6 +28,12 @@ _Static_assert(sizeof(struct tcpcc_control_service_config) == 16,
 	       "tcpcc service-config ABI drift");
 _Static_assert(sizeof(struct tcpcc_control_service_stats) == 88,
 	       "tcpcc service-stats ABI drift");
+_Static_assert(sizeof(struct tcpcc_control_ip_address) == 20,
+	       "tcpcc IP-address ABI drift");
+_Static_assert(sizeof(struct tcpcc_control_ip_endpoint) == 24,
+	       "tcpcc IP-endpoint ABI drift");
+_Static_assert(sizeof(struct tcpcc_control_l3_config) == 24,
+	       "tcpcc L3-config ABI drift");
 
 #if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error "the tcpcc version-1 control ABI requires a little-endian host"

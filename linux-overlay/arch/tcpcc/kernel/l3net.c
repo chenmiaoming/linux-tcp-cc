@@ -2,6 +2,7 @@
 #include <linux/completion.h>
 #include <linux/errno.h>
 #include <linux/if_arp.h>
+#include <linux/if_addr.h>
 #include <linux/inetdevice.h>
 #include <linux/interrupt.h>
 #include <linux/ip.h>
@@ -15,12 +16,16 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <net/checksum.h>
+#include <net/addrconf.h>
 #include <net/ip_fib.h>
+#include <net/ip6_fib.h>
+#include <net/ip6_route.h>
 #include <net/ip_tunnels.h>
 #include <net/net_namespace.h>
 #include <net/sch_generic.h>
 #include <asm/host.h>
 #include <asm/l3net.h>
+#include <asm/tcpcc_control_abi.h>
 
 #define TCPCC_L3_IRQ              3
 #define TCPCC_L3_MTU              1500U
@@ -409,6 +414,53 @@ static int tcpcc_l3_configure_default_route(struct net_device *dev,
 	return ret;
 }
 
+static int tcpcc_l3_configure_ipv6(struct net_device *dev,
+				    const struct in6_addr *address,
+				    u32 prefix_len)
+{
+	int ret;
+
+	if (!prefix_len || prefix_len > 128 || ipv6_addr_any(address) ||
+	    ipv6_addr_is_multicast(address))
+		return -EINVAL;
+
+	rtnl_lock();
+	ret = dev_open(dev, NULL);
+	rtnl_unlock();
+	if (ret)
+		return ret;
+
+	/* A point-to-point TUN has no neighbour discovery peer; skip DAD. */
+	return addrconf_add_dev_addr(&init_net, dev, address, prefix_len,
+				     IFA_F_NODAD);
+}
+
+static int tcpcc_l3_configure_default_route_ipv6(
+					struct net_device *dev,
+					const struct in6_addr *address)
+{
+	struct fib6_config config = {
+		.fc_table = RT6_TABLE_MAIN,
+		.fc_metric = IP6_RT_PRIO_USER,
+		.fc_dst_len = 0,
+		.fc_ifindex = dev->ifindex,
+		.fc_flags = RTF_UP | RTF_DEFAULT,
+		.fc_protocol = RTPROT_BOOT,
+		.fc_type = RTN_UNICAST,
+		.fc_prefsrc = *address,
+		.fc_nlinfo = {
+			.nl_net = &init_net,
+		},
+	};
+	int ret;
+
+	ret = ip6_route_add(&config, GFP_KERNEL, NULL);
+	if (!ret)
+		pr_notice("tcpcc: default IPv6 route active on %s\n",
+			  dev->name);
+	return ret;
+}
+
 static int tcpcc_l3_validate_fq_qdisc(struct net_device *dev)
 {
 	struct Qdisc *qdisc;
@@ -425,16 +477,44 @@ static int tcpcc_l3_validate_fq_qdisc(struct net_device *dev)
 	return ret;
 }
 
-int tcpcc_l3_attach(int host_fd, u32 ipv4_addr, u32 prefix_len, int *ifindex)
+static int tcpcc_l3_attach_config(
+			int host_fd,
+			const struct tcpcc_control_l3_config *config,
+			int *ifindex)
 {
 	struct tcpcc_l3_priv *priv;
 	struct net_device *dev;
+	struct in6_addr ipv6_addr;
+	u32 ipv4_addr = 0;
 	int ret;
 
 	if (tcpcc_l3_dev)
 		return -EBUSY;
-	if (host_fd < 3 || !ifindex)
+	if (host_fd < 3 || !config || !ifindex ||
+	    memchr_inv(config->address.reserved, 0,
+		       sizeof(config->address.reserved)) ||
+	    memchr_inv(config->reserved, 0, sizeof(config->reserved)))
 		return -EINVAL;
+	if (config->address.version == TCPCC_CONTROL_IP_VERSION_4) {
+		__be32 network_address;
+
+		if (!config->prefix_len || config->prefix_len > 32 ||
+		    memchr_inv(config->address.bytes + sizeof(network_address), 0,
+			       sizeof(config->address.bytes) -
+			       sizeof(network_address)))
+			return -EINVAL;
+		memcpy(&network_address, config->address.bytes,
+		       sizeof(network_address));
+		ipv4_addr = ntohl(network_address);
+	} else if (config->address.version == TCPCC_CONTROL_IP_VERSION_6) {
+		memcpy(&ipv6_addr, config->address.bytes, sizeof(ipv6_addr));
+		if (!config->prefix_len || config->prefix_len > 128 ||
+		    ipv6_addr_any(&ipv6_addr) ||
+		    ipv6_addr_is_multicast(&ipv6_addr))
+			return -EINVAL;
+	} else {
+		return -EAFNOSUPPORT;
+	}
 
 	ret = tcpcc_host_set_nonblock(host_fd);
 	if (ret)
@@ -482,11 +562,18 @@ int tcpcc_l3_attach(int host_fd, u32 ipv4_addr, u32 prefix_len, int *ifindex)
 		goto err_teardown;
 	}
 
-	ret = tcpcc_l3_configure_ipv4(dev, ipv4_addr, prefix_len);
-	if (ret)
-		goto err_teardown;
-
-	ret = tcpcc_l3_configure_default_route(dev, ipv4_addr);
+	if (config->address.version == TCPCC_CONTROL_IP_VERSION_4) {
+		ret = tcpcc_l3_configure_ipv4(dev, ipv4_addr,
+					      config->prefix_len);
+		if (!ret)
+			ret = tcpcc_l3_configure_default_route(dev, ipv4_addr);
+	} else {
+		ret = tcpcc_l3_configure_ipv6(dev, &ipv6_addr,
+					      config->prefix_len);
+		if (!ret)
+			ret = tcpcc_l3_configure_default_route_ipv6(dev,
+							       &ipv6_addr);
+	}
 	if (ret)
 		goto err_teardown;
 
@@ -505,6 +592,27 @@ err_teardown:
 err_free:
 	free_netdev(dev);
 	return ret;
+}
+
+int tcpcc_l3_attach(int host_fd, u32 ipv4_addr, u32 prefix_len, int *ifindex)
+{
+	struct tcpcc_control_l3_config config = {
+		.address.version = TCPCC_CONTROL_IP_VERSION_4,
+		.prefix_len = prefix_len,
+	};
+	__be32 network_address = htonl(ipv4_addr);
+
+	if (!prefix_len || prefix_len > 32)
+		return -EINVAL;
+	memcpy(config.address.bytes, &network_address, sizeof(network_address));
+	return tcpcc_l3_attach_config(host_fd, &config, ifindex);
+}
+
+int tcpcc_l3_attach_ip(int host_fd,
+		       const struct tcpcc_control_l3_config *config,
+		       int *ifindex)
+{
+	return tcpcc_l3_attach_config(host_fd, config, ifindex);
 }
 
 int tcpcc_l3_get_stats(struct tcpcc_l3_stats *stats)
