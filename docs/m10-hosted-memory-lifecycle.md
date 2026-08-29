@@ -70,11 +70,12 @@ records host memory telemetry across five distinct lifecycle phases:
 4. **`post_drain_idle_samples`**: Captured across two bounded idle windows (0.5
    seconds each) to establish the pre-reclaim residency and quiescent-CPU
    baseline for M10.3.
-5. **`reuse_sample`**: Starts a fresh listener and service inside the same
-   hosted kernel, then executes 64 bidirectional flows with payload verification.
-   It proves that the runtime remains reusable after the capacity service is
-   fully torn down; it does not claim that host pages have already been
-   discarded.
+5. **`reuse_sample`**: Starts a fresh listener and service on the dedicated
+   lifecycle-test port 18501 inside the same hosted kernel, then executes 64
+   bidirectional flows with payload verification. A distinct port avoids making
+   this memory test depend on TCP's previous-connection port reuse timing. It
+   proves that the runtime remains reusable after the capacity service is fully
+   torn down; it does not claim that host pages have already been discarded.
 
 ### Process Telemetry Metrics
 

@@ -47,6 +47,7 @@ HOST_IPV4 = "192.0.2.1"
 GUEST_IPV4 = "192.0.2.2"
 GUEST_PREFIX = 32
 PUBLIC_PORT = 18500
+REUSE_PUBLIC_PORT = 18501
 BRIDGE_SESSION_LIMIT = 1048575
 DEFAULT_MEMORY_MIB = 512
 ACCEPT_BATCH = 64
@@ -175,7 +176,9 @@ def service_stats(control: ControlClient, handle: int) -> ServiceStats:
     return decode_service_stats(response.data)
 
 
-def start_capacity_service(control: ControlClient, backend_port: int) -> int:
+def start_capacity_service(
+    control: ControlClient, backend_port: int, public_port: int
+) -> int:
     listener = control.transact(OP_SOCKET).handle
     control.transact(OP_SET_CC, listener, data=b"bbr")
     observed_cc = control.transact(OP_GET_CC, listener).data
@@ -185,7 +188,7 @@ def start_capacity_service(control: ControlClient, backend_port: int) -> int:
         OP_BIND,
         listener,
         int(ipaddress.IPv4Address(GUEST_IPV4)),
-        PUBLIC_PORT,
+        public_port,
     )
     control.transact(OP_LISTEN, listener, LISTEN_BACKLOG)
     service_handle = control.transact(
@@ -554,7 +557,9 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         backend_listener.listen(LISTEN_BACKLOG)
         backend_port = backend_listener.getsockname()[1]
 
-        service_handle = start_capacity_service(control, backend_port)
+        service_handle = start_capacity_service(
+            control, backend_port, PUBLIC_PORT
+        )
 
         ready_stats = service_stats(control, service_handle)
         ready_sample = {
@@ -694,13 +699,15 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             reuse_active_stats: dict[str, object] | None = None
             reuse_stop_stats: dict[str, object] | None = None
             try:
-                service_handle = start_capacity_service(control, backend_port)
+                service_handle = start_capacity_service(
+                    control, backend_port, REUSE_PUBLIC_PORT
+                )
                 for _ in range(reuse_target):
                     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     client.settimeout(TIMEOUT)
                     try:
                         client.bind((HOST_IPV4, 0))
-                        client.connect((GUEST_IPV4, PUBLIC_PORT))
+                        client.connect((GUEST_IPV4, REUSE_PUBLIC_PORT))
                     except BaseException:
                         client.close()
                         raise
@@ -749,6 +756,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
 
             reuse_sample = {
                 "connections": reuse_target,
+                "public_port": REUSE_PUBLIC_PORT,
                 "active_probe": reuse_probe_result,
                 "active_service": reuse_active_stats,
                 "stopped_service": reuse_stop_stats,
