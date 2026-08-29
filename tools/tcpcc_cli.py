@@ -9,7 +9,6 @@ import errno
 import ipaddress
 import json
 import os
-import re
 import stat
 import struct
 import subprocess
@@ -21,23 +20,25 @@ from typing import Callable, Protocol, TextIO
 
 from tcpcc_control import (
     OP_ACCEPT_NONBLOCK,
-    OP_BIND,
+    OP_BIND_IP,
     OP_BRIDGE_CANCEL,
     OP_BRIDGE_JOIN_RESULT,
     OP_BRIDGE_START,
     OP_CLOSE,
     OP_GET_CC,
-    OP_L3_ATTACH,
+    OP_L3_ATTACH_IP,
     OP_LISTEN,
     OP_SET_CC,
     OP_SHUTDOWN,
-    OP_SOCKET,
+    OP_SOCKET_IP,
     BridgeResult,
     ControlClient,
     ControlOperationError,
     ControlProtocolError,
     ControlResponse,
     decode_bridge_result,
+    encode_ip_endpoint,
+    encode_l3_config,
 )
 from tcpcc_host import (
     CC_NAME,
@@ -54,7 +55,8 @@ from tcpcc_host import (
 
 DEFAULT_TUN_HOST_ADDRESS = "198.18.0.1"
 DEFAULT_TUN_GUEST_ADDRESS = "198.18.0.2"
-DEFAULT_TUN_PREFIX = 32
+DEFAULT_TUN_HOST_ADDRESS_IPV6 = "fd00:198:18::1"
+DEFAULT_TUN_GUEST_ADDRESS_IPV6 = "fd00:198:18::2"
 DEFAULT_BACKLOG = 128
 DEFAULT_POLL_INTERVAL = 0.01
 DEFAULT_KERNEL_SHUTDOWN_TIMEOUT = 10.0
@@ -70,7 +72,6 @@ BRIDGE_JOIN_POLL_MS = 1
 BRIDGE_DRAIN_JOIN_SLICE_MS = 50
 BRIDGE_SHUTDOWN_JOIN_MS = 5000
 HOST_EVENT_ERROR = 1 << 3
-ENDPOINT = re.compile(r"([^:]+):([0-9]{1,5})\Z")
 IPTABLES_VARIANTS = ("iptables", "iptables-nft", "iptables-legacy")
 EVENT_SCHEMA = "tcpcc.runtime.v1"
 
@@ -133,17 +134,36 @@ class Endpoint:
     @classmethod
     def parse(cls, value: str, field: str) -> Endpoint:
         if not isinstance(value, str) or "\0" in value:
-            raise ValueError(f"{field} must use IPv4:port syntax")
-        match = ENDPOINT.fullmatch(value)
-        if match is None:
-            raise ValueError(f"{field} must use IPv4:port syntax")
+            raise ValueError(f"{field} must use IPv4:port or [IPv6]:port syntax")
+        if value.startswith("["):
+            closing = value.find("]")
+            if closing < 0 or closing + 1 >= len(value) or value[closing + 1] != ":":
+                raise ValueError(
+                    f"{field} must use IPv4:port or [IPv6]:port syntax"
+                )
+            address_text = value[1:closing]
+            port_text = value[closing + 2 :]
+            expected_version = 6
+        else:
+            if value.count(":") != 1:
+                raise ValueError(
+                    f"{field} must use IPv4:port or [IPv6]:port syntax"
+                )
+            address_text, port_text = value.rsplit(":", 1)
+            expected_version = 4
         try:
-            address = ipaddress.IPv4Address(match.group(1))
-        except ipaddress.AddressValueError as error:
-            raise ValueError(f"{field} address must be a literal IPv4 address") from error
-        if address.is_unspecified or address.is_multicast or int(address) == 0xFFFFFFFF:
-            raise ValueError(f"{field} address must be a usable unicast IPv4 address")
-        port = int(match.group(2), 10)
+            address = ipaddress.ip_address(address_text)
+        except ValueError as error:
+            raise ValueError(f"{field} address must be a literal IP address") from error
+        if address.version != expected_version:
+            raise ValueError(f"{field} has mismatched address syntax")
+        if address.is_unspecified or address.is_multicast or (
+            address.version == 4 and int(address) == 0xFFFFFFFF
+        ):
+            raise ValueError(f"{field} address must be a usable unicast IP address")
+        if not port_text.isascii() or not port_text.isdecimal():
+            raise ValueError(f"{field} port must be from 1 through 65535")
+        port = int(port_text, 10)
         if not 1 <= port <= 65535:
             raise ValueError(f"{field} port must be from 1 through 65535")
         return cls(str(address), port)
@@ -152,7 +172,13 @@ class Endpoint:
     def ipv4_u32(self) -> int:
         return int(ipaddress.IPv4Address(self.address))
 
+    @property
+    def version(self) -> int:
+        return ipaddress.ip_address(self.address).version
+
     def __str__(self) -> str:
+        if self.version == 6:
+            return f"[{self.address}]:{self.port}"
         return f"{self.address}:{self.port}"
 
 
@@ -166,8 +192,8 @@ class ServiceConfig:
     firewall_backend: str = "nft-lib"
     iptables_variant: str = "iptables"
     tun_name: str | None = None
-    tun_host_address: str = DEFAULT_TUN_HOST_ADDRESS
-    tun_guest_address: str = DEFAULT_TUN_GUEST_ADDRESS
+    tun_host_address: str | None = None
+    tun_guest_address: str | None = None
     backlog: int = DEFAULT_BACKLOG
     max_connections: int = DEFAULT_MAX_CONNECTIONS
     shutdown_grace_period: float = DEFAULT_SHUTDOWN_GRACE_PERIOD
@@ -178,11 +204,36 @@ class ServiceConfig:
             raise TypeError("listen must be an Endpoint")
         if not isinstance(self.backend, Endpoint):
             raise TypeError("backend must be an Endpoint")
-        if self.backend.address != "127.0.0.1":
+        if self.backend.version != 4 or self.backend.address != "127.0.0.1":
             raise ValueError(
                 "backend must use 127.0.0.1; the current hosted bridge "
                 "intentionally reaches only a local application"
             )
+        default_host = (
+            DEFAULT_TUN_HOST_ADDRESS
+            if self.listen.version == 4
+            else DEFAULT_TUN_HOST_ADDRESS_IPV6
+        )
+        default_guest = (
+            DEFAULT_TUN_GUEST_ADDRESS
+            if self.listen.version == 4
+            else DEFAULT_TUN_GUEST_ADDRESS_IPV6
+        )
+        host_address = self.tun_host_address or default_host
+        guest_address = self.tun_guest_address or default_guest
+        try:
+            host = ipaddress.ip_address(host_address)
+            guest = ipaddress.ip_address(guest_address)
+        except ValueError as error:
+            raise ValueError("TUN addresses must be literal IP addresses") from error
+        if host.version != self.listen.version or guest.version != self.listen.version:
+            raise ValueError("TUN and public-listener address families must match")
+        if host == guest or host.is_unspecified or guest.is_unspecified or (
+            host.is_multicast or guest.is_multicast
+        ):
+            raise ValueError("TUN addresses must be distinct usable unicast addresses")
+        object.__setattr__(self, "tun_host_address", str(host))
+        object.__setattr__(self, "tun_guest_address", str(guest))
         if (
             isinstance(self.memory_mib, bool)
             or not isinstance(self.memory_mib, int)
@@ -379,16 +430,18 @@ def _endpoint_argument(field: str) -> Callable[[str], Endpoint]:
     return parse
 
 
-def _ipv4_argument(field: str) -> Callable[[str], str]:
+def _ip_argument(field: str) -> Callable[[str], str]:
     def parse(value: str) -> str:
         try:
-            address = ipaddress.IPv4Address(value)
-        except ipaddress.AddressValueError as error:
+            address = ipaddress.ip_address(value)
+        except ValueError as error:
             raise argparse.ArgumentTypeError(
-                f"{field} must be a literal IPv4 address"
+                f"{field} must be a literal IP address"
             ) from error
-        if address.is_unspecified or address.is_multicast or int(address) == 0xFFFFFFFF:
-            raise argparse.ArgumentTypeError(f"{field} must be usable unicast IPv4")
+        if address.is_unspecified or address.is_multicast or (
+            address.version == 4 and int(address) == 0xFFFFFFFF
+        ):
+            raise argparse.ArgumentTypeError(f"{field} must be usable unicast IP")
         return str(address)
 
     return parse
@@ -415,8 +468,8 @@ def build_parser(*, environ: dict[str, str] | None = None) -> argparse.ArgumentP
         "--listen",
         required=True,
         type=_endpoint_argument("listen"),
-        metavar="IPv4:PORT",
-        help="exact public IPv4/TCP endpoint",
+        metavar="IP:PORT",
+        help="exact public IPv4:port or [IPv6]:port TCP endpoint",
     )
     parser.add_argument(
         "--backend",
@@ -467,17 +520,15 @@ def build_parser(*, environ: dict[str, str] | None = None) -> argparse.ArgumentP
     )
     parser.add_argument(
         "--tun-host-address",
-        type=_ipv4_argument("tun host address"),
-        default=DEFAULT_TUN_HOST_ADDRESS,
-        metavar="IPv4",
-        help="host-side point-to-point address",
+        type=_ip_argument("tun host address"),
+        metavar="IP",
+        help="host-side point-to-point address (family-specific default)",
     )
     parser.add_argument(
         "--tun-guest-address",
-        type=_ipv4_argument("tun guest address"),
-        default=DEFAULT_TUN_GUEST_ADDRESS,
-        metavar="IPv4",
-        help="hosted-stack point-to-point address",
+        type=_ip_argument("tun guest address"),
+        metavar="IP",
+        help="hosted-stack point-to-point address (family-specific default)",
     )
     parser.add_argument(
         "--backlog",
@@ -517,7 +568,10 @@ def config_from_namespace(namespace: argparse.Namespace) -> ServiceConfig:
         raise ValueError(
             "--iptables-variant is valid only with --firewall-backend=iptables"
         )
-    if namespace.tun_host_address == namespace.tun_guest_address:
+    if (
+        namespace.tun_host_address is not None
+        and namespace.tun_host_address == namespace.tun_guest_address
+    ):
         raise ValueError("TUN host and guest addresses must be different")
     kernel = validate_kernel_image(namespace.kernel)
     return ServiceConfig(
@@ -555,10 +609,13 @@ def host_network_config(config: ServiceConfig) -> HostNetworkConfig:
     )
 
 
-def iptables_paths(variant: str) -> tuple[str, str, str]:
+def iptables_paths(variant: str, ip_version: int) -> tuple[str, str, str]:
     if variant not in IPTABLES_VARIANTS:
         raise ValueError("unsupported iptables variant")
-    return variant, f"{variant}-restore", f"{variant}-save"
+    if ip_version not in {4, 6}:
+        raise ValueError("unsupported IP version")
+    command = variant if ip_version == 4 else variant.replace("iptables", "ip6tables", 1)
+    return command, f"{command}-restore", f"{command}-save"
 
 
 class HostedKernelRuntime:
@@ -621,11 +678,14 @@ class HostedKernelRuntime:
             raise RuntimeError("hosted process did not expose control pipes")
         self.control = self.control_factory(self.process.stdin, self.process.stdout)
 
+        guest_address = self.config.tun_guest_address
+        if guest_address is None:
+            raise RuntimeError("hosted TUN address was not resolved")
+        guest_ip = ipaddress.ip_address(guest_address)
         response = self._channel().transact(
-            OP_L3_ATTACH,
+            OP_L3_ATTACH_IP,
             tun_fd,
-            int(ipaddress.IPv4Address(self.config.tun_guest_address)),
-            DEFAULT_TUN_PREFIX,
+            data=encode_l3_config(guest_address, guest_ip.max_prefixlen),
         )
         if response.handle <= 0:
             raise ControlProtocolError(
@@ -634,7 +694,10 @@ class HostedKernelRuntime:
         self.ifindex = response.handle
         self._l3_attached = True
 
-        response = self._channel().transact(OP_SOCKET)
+        response = self._channel().transact(
+            OP_SOCKET_IP,
+            arg0=self.config.listen.version,
+        )
         if response.handle <= 0:
             raise ControlProtocolError(
                 f"hosted socket returned invalid handle {response.handle}"
@@ -647,10 +710,9 @@ class HostedKernelRuntime:
         )
         self._verify_cc(self.listener_handle, "listener")
         self._channel().transact(
-            OP_BIND,
+            OP_BIND_IP,
             self.listener_handle,
-            int(ipaddress.IPv4Address(self.config.tun_guest_address)),
-            self.config.listen.port,
+            data=encode_ip_endpoint(guest_address, self.config.listen.port),
         )
         self._channel().transact(
             OP_LISTEN,
@@ -996,7 +1058,8 @@ def run_service(
     emitter = emitter or EventEmitter()
     network_config = host_network_config(config)
     iptables_path, restore_path, save_path = iptables_paths(
-        config.iptables_variant
+        config.iptables_variant,
+        config.listen.version,
     )
     lease: HostNetworkLease | None = None
     runtime: HostedKernelRuntime | None = None

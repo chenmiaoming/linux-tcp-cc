@@ -1,0 +1,68 @@
+From: tcpcc project <tcpcc@example.invalid>
+Subject: [PATCH] ipv6: add an in-kernel device-address helper
+
+ARCH=tcpcc has no userspace process inside the hosted kernel, so it cannot
+use the SIOCSIFADDR user-pointer interface.  Expose the same address setup
+path to built-in kernel callers while retaining the existing locking and
+notification behavior.
+
+---
+ include/net/addrconf.h |  4 ++++
+ net/ipv6/addrconf.c    | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/include/net/addrconf.h b/include/net/addrconf.h
+--- a/include/net/addrconf.h
++++ b/include/net/addrconf.h
+@@ -111,6 +111,10 @@ int addrconf_add_ifaddr(struct net *net, void __user *arg);
+ int addrconf_del_ifaddr(struct net *net, void __user *arg);
+ int addrconf_set_dstaddr(struct net *net, void __user *arg);
+ 
++int addrconf_add_dev_addr(struct net *net, struct net_device *dev,
++			  const struct in6_addr *addr,
++			  unsigned int prefix_len, u32 flags);
++
+ int ipv6_chk_addr(struct net *net, const struct in6_addr *addr,
+ 		  const struct net_device *dev, int strict);
+ int ipv6_chk_addr_and_flags(struct net *net, const struct in6_addr *addr,
+diff --git a/net/ipv6/addrconf.c b/net/ipv6/addrconf.c
+--- a/net/ipv6/addrconf.c
++++ b/net/ipv6/addrconf.c
+@@ -3073,6 +3073,35 @@ static int inet6_addr_add(struct net *net, struct net_device *dev,
+ 	return PTR_ERR(ifp);
+ }
+ 
++int addrconf_add_dev_addr(struct net *net, struct net_device *dev,
++			  const struct in6_addr *addr,
++			  unsigned int prefix_len, u32 flags)
++{
++	struct ifa6_config cfg = {
++		.pfx = addr,
++		.plen = prefix_len,
++		.ifa_flags = IFA_F_PERMANENT | flags,
++		.preferred_lft = INFINITY_LIFE_TIME,
++		.valid_lft = INFINITY_LIFE_TIME,
++	};
++	int err;
++
++	if (!net || !dev || !addr || prefix_len > 128)
++		return -EINVAL;
++
++	rtnl_net_lock(net);
++	if (__dev_get_by_index(net, dev->ifindex) != dev) {
++		err = -ENODEV;
++	} else {
++		netdev_lock_ops(dev);
++		err = inet6_addr_add(net, dev, &cfg, 0, 0, NULL);
++		netdev_unlock_ops(dev);
++	}
++	rtnl_net_unlock(net);
++
++	return err;
++}
++
+ static int inet6_addr_del(struct net *net, int ifindex, u32 ifa_flags,
+ 			  const struct in6_addr *pfx, unsigned int plen,
+ 			  struct netlink_ext_ack *extack)
+-- 
+2.43.0

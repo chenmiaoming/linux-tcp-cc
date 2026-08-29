@@ -42,6 +42,16 @@ def config(*, table_name: str | None = None) -> NftDnatConfig:
     )
 
 
+def config_ipv6(*, table_name: str | None = None) -> NftDnatConfig:
+    return NftDnatConfig(
+        listen_address="2001:db8::10",
+        listen_port=443,
+        target_address="fd00:198:18::2",
+        target_port=28443,
+        table_name=table_name,
+    )
+
+
 def owner(
     *,
     pid: int = 123,
@@ -260,6 +270,41 @@ class FirewallBackendTests(unittest.TestCase):
         self.assertIn("tcp dport 443", exec_batch or "")
         self.assertIn(owner().marker(), exec_batch or "")
         self.assertNotIn("flush", exec_batch or "")
+
+    def test_ipv6_nft_and_ip6tables_render_exact_family_rules(self) -> None:
+        calls: list[tuple[list[str], str | None]] = []
+
+        class Transport:
+            backend_id = "nft-exec"
+            command_name = "nft"
+
+            def run(self, argv, input_text) -> None:
+                calls.append((list(argv), input_text))
+
+            def read(self, _argv) -> str:
+                return '{"nftables":[]}'
+
+        nft = NftFirewallBackend(Transport(), "ip6")
+        nft_lease = nft.install(config_ipv6(table_name="tcpcc_v6"), owner())
+        nft_lease.close()
+        batch = calls[0][1] or ""
+        self.assertIn("create table ip6 tcpcc_v6", batch)
+        self.assertIn("ip6 daddr 2001:db8::10", batch)
+        self.assertIn("dnat to [fd00:198:18::2]:28443", batch)
+        self.assertEqual(calls[1][0], ["nft", "delete", "table", "ip6", "tcpcc_v6"])
+
+        runner = RecordingRunner()
+        ip6tables = IptablesFirewallBackend(
+            iptables_path="ip6tables-nft",
+            restore_path="ip6tables-nft-restore",
+            save_path="ip6tables-nft-save",
+            runner=runner,
+            chain_name_factory=lambda: "TCPCC_abcdef123456",
+        )
+        ip6tables.check_compatibility(config_ipv6())
+        rendered = runner.calls[0][1] or ""
+        self.assertIn("-d 2001:db8::10/128", rendered)
+        self.assertIn("--to-destination [fd00:198:18::2]:28443", rendered)
 
     def test_iptables_check_install_and_cleanup_are_exact_and_ordered(self) -> None:
         runner = RecordingRunner()

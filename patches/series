@@ -1,3 +1,4 @@
 # One repository-relative patch path per line, applied in order.
 # Patches are reserved for deliberate changes to files that already exist in
 # the pinned upstream Linux tree. Project-owned new files belong in linux-overlay/.
+0001-ipv6-add-kernel-address-helper.patch

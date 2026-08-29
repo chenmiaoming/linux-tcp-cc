@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 import select
 import struct
 import time
@@ -42,6 +43,9 @@ OP_SERVICE_START = 23
 OP_SERVICE_DRAIN = 24
 OP_SERVICE_STATS = 25
 OP_SERVICE_STOP = 26
+OP_SOCKET_IP = 27
+OP_BIND_IP = 28
+OP_L3_ATTACH_IP = 29
 
 OP_NAMES = {
     OP_SOCKET: "socket",
@@ -70,6 +74,9 @@ OP_NAMES = {
     OP_SERVICE_DRAIN: "service-drain",
     OP_SERVICE_STATS: "service-stats",
     OP_SERVICE_STOP: "service-stop",
+    OP_SOCKET_IP: "socket-ip",
+    OP_BIND_IP: "bind-ip",
+    OP_L3_ATTACH_IP: "l3-attach-ip",
 }
 
 REQUEST = struct.Struct("<IHHiIII256s")
@@ -77,6 +84,8 @@ RESPONSE = struct.Struct("<IHHiiI256s")
 BRIDGE_RESULT = struct.Struct("<QQQIIIIIIIiII")
 SERVICE_CONFIG = struct.Struct("<IHHII")
 SERVICE_STATS = struct.Struct("<QQQQQIIIIIIIIiIII")
+IP_ENDPOINT = struct.Struct("<B3x16sHH")
+L3_CONFIG = struct.Struct("<B3x16sB3x")
 
 
 class ControlError(RuntimeError):
@@ -297,6 +306,36 @@ def encode_service_config(
         max_connections,
         accept_batch,
     )
+
+
+def _ip_address(value: str, field: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be one IP address string")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise ValueError(f"{field} must be one literal IP address") from error
+    if address.is_unspecified or address.is_multicast:
+        raise ValueError(f"{field} must be a usable unicast IP address")
+    return address
+
+
+def encode_ip_endpoint(address: str, port: int) -> bytes:
+    """Encode one fixed-width IPv4 or IPv6 endpoint."""
+
+    parsed = _ip_address(address, "endpoint address")
+    _bounded_integer(port, "endpoint port", 1, 0xFFFF)
+    packed = parsed.packed.ljust(16, b"\0")
+    return IP_ENDPOINT.pack(parsed.version, packed, port, 0)
+
+
+def encode_l3_config(address: str, prefix_len: int) -> bytes:
+    """Encode one fixed-width hosted point-to-point interface address."""
+
+    parsed = _ip_address(address, "L3 address")
+    _bounded_integer(prefix_len, "L3 prefix length", 1, parsed.max_prefixlen)
+    packed = parsed.packed.ljust(16, b"\0")
+    return L3_CONFIG.pack(parsed.version, packed, prefix_len)
 
 
 def decode_service_stats(data: bytes) -> ServiceStats:

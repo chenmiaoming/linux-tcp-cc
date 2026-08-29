@@ -4,6 +4,7 @@
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/in.h>
+#include <linux/in6.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -156,13 +157,14 @@ static void tcpcc_control_release_all(void)
 	}
 }
 
-static int tcpcc_control_socket(struct tcpcc_control_response *response)
+static int tcpcc_control_socket_family(int family,
+				       struct tcpcc_control_response *response)
 {
 	struct socket *sock;
 	int handle;
 	int ret;
 
-	ret = sock_create_kern(&init_net, AF_INET, SOCK_STREAM, IPPROTO_TCP,
+	ret = sock_create_kern(&init_net, family, SOCK_STREAM, IPPROTO_TCP,
 			       &sock);
 	if (ret)
 		return ret;
@@ -175,6 +177,28 @@ static int tcpcc_control_socket(struct tcpcc_control_response *response)
 
 	response->handle = handle;
 	return 0;
+}
+
+static int tcpcc_control_socket(struct tcpcc_control_response *response)
+{
+	return tcpcc_control_socket_family(AF_INET, response);
+}
+
+static int tcpcc_control_socket_ip(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	int family;
+
+	if (request->handle || request->arg1 || request->length)
+		return -EINVAL;
+	if (request->arg0 == TCPCC_CONTROL_IP_VERSION_4)
+		family = AF_INET;
+	else if (request->arg0 == TCPCC_CONTROL_IP_VERSION_6)
+		family = AF_INET6;
+	else
+		return -EAFNOSUPPORT;
+	return tcpcc_control_socket_family(family, response);
 }
 
 static int tcpcc_control_bind(const struct tcpcc_control_request *request)
@@ -192,6 +216,53 @@ static int tcpcc_control_bind(const struct tcpcc_control_request *request)
 	addr.sin_addr.s_addr = htonl(request->arg0);
 	addr.sin_port = htons((u16)request->arg1);
 	return kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+}
+
+static int tcpcc_control_bind_ip(const struct tcpcc_control_request *request)
+{
+	struct tcpcc_control_ip_endpoint endpoint;
+	struct socket *sock = tcpcc_control_lookup(request->handle);
+
+	BUILD_BUG_ON(sizeof(endpoint) != 24);
+	if (!sock)
+		return -EBADF;
+	if (request->arg0 || request->arg1 ||
+	    request->length != sizeof(endpoint))
+		return -EINVAL;
+	memcpy(&endpoint, request->data, sizeof(endpoint));
+	if (!endpoint.port || endpoint.reserved ||
+	    memchr_inv(endpoint.address.reserved, 0,
+		       sizeof(endpoint.address.reserved)))
+		return -EINVAL;
+
+	if (endpoint.address.version == TCPCC_CONTROL_IP_VERSION_4) {
+		struct sockaddr_in addr = {
+			.sin_family = AF_INET,
+			.sin_port = htons(endpoint.port),
+		};
+
+		if (sock->sk->sk_family != AF_INET ||
+		    memchr_inv(endpoint.address.bytes + sizeof(addr.sin_addr), 0,
+			       sizeof(endpoint.address.bytes) -
+			       sizeof(addr.sin_addr)))
+			return -EINVAL;
+		memcpy(&addr.sin_addr, endpoint.address.bytes,
+		       sizeof(addr.sin_addr));
+		return kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+	}
+	if (endpoint.address.version == TCPCC_CONTROL_IP_VERSION_6) {
+		struct sockaddr_in6 addr = {
+			.sin6_family = AF_INET6,
+			.sin6_port = htons(endpoint.port),
+		};
+
+		if (sock->sk->sk_family != AF_INET6)
+			return -EINVAL;
+		memcpy(&addr.sin6_addr, endpoint.address.bytes,
+		       sizeof(addr.sin6_addr));
+		return kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+	}
+	return -EAFNOSUPPORT;
 }
 
 static int tcpcc_control_listen(const struct tcpcc_control_request *request)
@@ -685,7 +756,13 @@ static int tcpcc_control_bridge_start(
 	if (request->length || request->arg0 != INADDR_LOOPBACK ||
 	    !request->arg1 || request->arg1 > 0xffffU)
 		return -EINVAL;
-	if (public_sock->sk->sk_state != TCP_ESTABLISHED)
+	/*
+	 * A peer may send FIN before userspace hands the accepted socket to the
+	 * bridge.  CLOSE_WAIT is still connected and carries any queued request
+	 * bytes; the bridge's normal half-close state machine must consume it.
+	 */
+	if (public_sock->sk->sk_state != TCP_ESTABLISHED &&
+	    public_sock->sk->sk_state != TCP_CLOSE_WAIT)
 		return -ENOTCONN;
 
 	ret = tcpcc_bridge_start(public_sock, htonl(request->arg0),
@@ -801,6 +878,24 @@ static int tcpcc_control_l3_attach(const struct tcpcc_control_request *request,
 	return ret;
 }
 
+static int tcpcc_control_l3_attach_ip(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_l3_config config;
+	int ifindex;
+	int ret;
+
+	BUILD_BUG_ON(sizeof(config) != 24);
+	if (request->arg0 || request->arg1 || request->length != sizeof(config))
+		return -EINVAL;
+	memcpy(&config, request->data, sizeof(config));
+	ret = tcpcc_l3_attach_ip(request->handle, &config, &ifindex);
+	if (!ret)
+		response->handle = ifindex;
+	return ret;
+}
+
 static int tcpcc_control_l3_stats(struct tcpcc_control_response *response)
 {
 	struct tcpcc_l3_stats stats;
@@ -822,7 +917,8 @@ static int tcpcc_control_hello(const struct tcpcc_control_request *request,
 		.control_version = TCPCC_CONTROL_VERSION,
 		.feature_bits = TCPCC_CONTROL_FEATURE_BRIDGE_RESULT |
 				TCPCC_CONTROL_FEATURE_HOSTED_SERVICE |
-				TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS,
+				TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS |
+				TCPCC_CONTROL_FEATURE_IP_ENDPOINTS,
 		.session_limit = TCPCC_BRIDGE_SESSION_LIMIT,
 		.bridge_buffer_limit = TCPCC_BRIDGE_BUFFER_LIMIT,
 		.bridge_total_buffer_limit = TCPCC_BRIDGE_TOTAL_BUFFER_LIMIT,
@@ -983,6 +1079,12 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_service_stats(request, response);
 	case TCPCC_CONTROL_SERVICE_STOP:
 		return tcpcc_control_service_stop(request, response);
+	case TCPCC_CONTROL_SOCKET_IP:
+		return tcpcc_control_socket_ip(request, response);
+	case TCPCC_CONTROL_BIND_IP:
+		return tcpcc_control_bind_ip(request);
+	case TCPCC_CONTROL_L3_ATTACH_IP:
+		return tcpcc_control_l3_attach_ip(request, response);
 	default:
 		return -EOPNOTSUPP;
 	}

@@ -47,16 +47,19 @@ from tcpcc_control import (  # noqa: E402
     MAX_PAYLOAD,
     OP_ACCEPT_NONBLOCK,
     OP_BIND,
+    OP_BIND_IP,
     OP_BRIDGE_CANCEL,
     OP_BRIDGE_JOIN_RESULT,
     OP_BRIDGE_START,
     OP_CLOSE,
     OP_GET_CC,
     OP_L3_ATTACH,
+    OP_L3_ATTACH_IP,
     OP_LISTEN,
     OP_SET_CC,
     OP_SHUTDOWN,
     OP_SOCKET,
+    OP_SOCKET_IP,
     REQUEST,
     RESPONSE,
     SERVICE_CONFIG,
@@ -70,6 +73,8 @@ from tcpcc_control import (  # noqa: E402
     decode_response,
     decode_service_stats,
     encode_request,
+    encode_ip_endpoint,
+    encode_l3_config,
     encode_service_config,
 )
 from tcpcc_host import (  # noqa: E402
@@ -113,6 +118,18 @@ def write_test_elf(path: Path, *, program_type: int = 1) -> None:
 
 
 class ControlCodecTests(unittest.TestCase):
+    def test_fixed_ip_payloads_cover_ipv4_and_ipv6(self) -> None:
+        ipv4 = encode_ip_endpoint("198.18.0.2", 443)
+        ipv6 = encode_ip_endpoint("fd00:198:18::2", 443)
+        l3 = encode_l3_config("fd00:198:18::2", 128)
+
+        self.assertEqual(len(ipv4), 24)
+        self.assertEqual(len(ipv6), 24)
+        self.assertEqual(len(l3), 24)
+        self.assertEqual(ipv4[0], 4)
+        self.assertEqual(ipv6[0], 6)
+        self.assertEqual(l3[0], 6)
+
     def test_request_is_fixed_size_and_preserves_fields(self) -> None:
         encoded = encode_request(OP_BIND, 7, 0xCB00710A, 443, b"abc")
 
@@ -346,7 +363,8 @@ class ParserTests(unittest.TestCase):
     def test_endpoints_reject_forward_proxy_and_nonliteral_forms(self) -> None:
         invalid = (
             "nginx.example:443",
-            "[2001:db8::1]:443",
+            "2001:db8::1:443",
+            "[::]:443",
             "203.0.113.10:0",
             "0.0.0.0:443",
             "224.0.0.1:443",
@@ -355,6 +373,10 @@ class ParserTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     Endpoint.parse(value, "listen")
+
+        ipv6 = Endpoint.parse("[2001:db8::1]:443", "listen")
+        self.assertEqual(ipv6.version, 6)
+        self.assertEqual(str(ipv6), "[2001:db8::1]:443")
 
         namespace = build_parser(environ={}).parse_args(
             self.arguments()[0:2]
@@ -370,6 +392,16 @@ class ParserTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "valid only"):
             config_from_namespace(namespace)
+
+    def test_ipv6_listener_selects_ipv6_tun_defaults(self) -> None:
+        arguments = self.arguments()
+        arguments[1] = "[2001:db8::10]:443"
+        namespace = build_parser(environ={}).parse_args(arguments)
+        config = config_from_namespace(namespace)
+
+        self.assertEqual(config.listen.version, 6)
+        self.assertEqual(config.tun_host_address, "fd00:198:18::1")
+        self.assertEqual(config.tun_guest_address, "fd00:198:18::2")
 
     def test_kernel_validator_rejects_interpreter_and_non_executable(self) -> None:
         write_test_elf(self.kernel, program_type=3)
@@ -539,9 +571,9 @@ class FakeControl:
         status = 0
         response_handle = handle
         response_data = b""
-        if operation == OP_L3_ATTACH:
+        if operation == OP_L3_ATTACH_IP:
             response_handle = 7
-        elif operation == OP_SOCKET:
+        elif operation == OP_SOCKET_IP:
             response_handle = 1
         elif operation == OP_GET_CC:
             response_data = (
@@ -572,7 +604,7 @@ class FakeControl:
             self.process.status = 0
         elif operation not in {
             OP_SET_CC,
-            OP_BIND,
+            OP_BIND_IP,
             OP_LISTEN,
             OP_CLOSE,
         }:
@@ -638,10 +670,23 @@ class RuntimeTests(unittest.TestCase):
         operations = [entry[0] for entry in self.control.operations]
         self.assertEqual(
             operations,
-            [OP_L3_ATTACH, OP_SOCKET, OP_SET_CC, OP_GET_CC, OP_BIND, OP_LISTEN],
+            [
+                OP_L3_ATTACH_IP,
+                OP_SOCKET_IP,
+                OP_SET_CC,
+                OP_GET_CC,
+                OP_BIND_IP,
+                OP_LISTEN,
+            ],
         )
         l3 = self.control.operations[0]
-        self.assertEqual((l3[1], l3[2], l3[3]), (101, 0xC6120002, 32))
+        self.assertEqual((l3[1], l3[2], l3[3]), (101, 0, 0))
+        self.assertEqual(l3[4], encode_l3_config("198.18.0.2", 32))
+        self.assertEqual(self.control.operations[1][2], 4)
+        self.assertEqual(
+            self.control.operations[4][4],
+            encode_ip_endpoint("198.18.0.2", 443),
+        )
         self.assertEqual(self.control.operations[2][4], b"bbr")
         self.assertEqual(runtime.ifindex, 7)
         self.assertEqual(

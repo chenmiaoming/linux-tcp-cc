@@ -52,6 +52,7 @@ IFREQ_SIZE = 40
 DEFAULT_TUN_PATH = Path("/dev/net/tun")
 DEFAULT_TUN_MTU = 1500
 MIN_IPV4_MTU = 68
+MIN_IPV6_MTU = 1280
 MAX_IPV4_MTU = 65535
 DEFAULT_NAME_ATTEMPTS = 8
 
@@ -386,6 +387,7 @@ def collect_preflight(
     requested_cc: str,
     inspector: HostInspector | None = None,
     *,
+    ip_version: int = 4,
     firewall_backend: str = "nft-exec",
     nft_path: str = "nft",
     iptables_path: str = "iptables",
@@ -399,6 +401,8 @@ def collect_preflight(
             "requested congestion-control name must contain 1-15 lowercase "
             "letters, digits, underscores, or hyphens"
         )
+    if ip_version not in {4, 6}:
+        raise ValueError("ip_version must be 4 or 6")
     if inspector is None:
         inspector = HostInspector()
 
@@ -449,16 +453,32 @@ def collect_preflight(
             + ", ".join(sorted(FIREWALL_BACKENDS))
         )
 
-    checks = (
-        *prefix_checks,
-        *firewall_checks,
+    forwarding_check = (
         _required_sysctl(
             inspector,
             "sysctl.ipv4_forward",
             "sys/net/ipv4/ip_forward",
             "1",
             "set net.ipv4.ip_forward=1 before starting tcpcc",
-        ),
+        )
+        if ip_version == 4
+        else _required_sysctl(
+            inspector,
+            "sysctl.ipv6_forward",
+            "sys/net/ipv6/conf/all/forwarding",
+            "1",
+            "set net.ipv6.conf.all.forwarding=1 before starting tcpcc",
+        )
+    )
+    family_advisories = (
+        (_rp_filter(inspector, "all"), _rp_filter(inspector, "default"))
+        if ip_version == 4
+        else ()
+    )
+    checks = (
+        *prefix_checks,
+        *firewall_checks,
+        forwarding_check,
         _required_sysctl(
             inspector,
             "sysctl.tcp_congestion_control",
@@ -467,8 +487,7 @@ def collect_preflight(
             f"set net.ipv4.tcp_congestion_control={requested_cc} before starting tcpcc",
         ),
         _available_cc(inspector, requested_cc),
-        _rp_filter(inspector, "all"),
-        _rp_filter(inspector, "default"),
+        *family_advisories,
     )
     return PreflightReport(requested_cc=requested_cc, checks=checks)
 
@@ -488,7 +507,7 @@ def _validate_tun_name(name: str) -> str:
 
 @dataclass(frozen=True)
 class TunConfig:
-    """Validated point-to-point IPv4 configuration for one TUN queue."""
+    """Validated point-to-point IPv4 or IPv6 configuration for one TUN queue."""
 
     host_address: str
     guest_address: str
@@ -497,32 +516,46 @@ class TunConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.host_address, str):
-            raise ValueError("host_address must be one IPv4 address")
+            raise ValueError("host_address must be one IP address")
         if not isinstance(self.guest_address, str):
-            raise ValueError("guest_address must be one IPv4 address")
+            raise ValueError("guest_address must be one IP address")
         try:
-            host = str(ipaddress.IPv4Address(self.host_address))
-        except (ipaddress.AddressValueError, TypeError) as error:
-            raise ValueError("host_address must be one IPv4 address") from error
+            host_ip = ipaddress.ip_address(self.host_address)
+        except (ValueError, TypeError) as error:
+            raise ValueError("host_address must be one IP address") from error
         try:
-            guest = str(ipaddress.IPv4Address(self.guest_address))
-        except (ipaddress.AddressValueError, TypeError) as error:
-            raise ValueError("guest_address must be one IPv4 address") from error
-        if host == guest:
+            guest_ip = ipaddress.ip_address(self.guest_address)
+        except (ValueError, TypeError) as error:
+            raise ValueError("guest_address must be one IP address") from error
+        if host_ip.version != guest_ip.version:
+            raise ValueError("host_address and guest_address families must match")
+        if (
+            host_ip.is_unspecified
+            or guest_ip.is_unspecified
+            or host_ip.is_multicast
+            or guest_ip.is_multicast
+        ):
+            raise ValueError("host_address and guest_address must be usable unicast")
+        if host_ip == guest_ip:
             raise ValueError("host_address and guest_address must be different")
+        minimum_mtu = MIN_IPV4_MTU if host_ip.version == 4 else MIN_IPV6_MTU
         if (
             isinstance(self.mtu, bool)
             or not isinstance(self.mtu, int)
-            or not MIN_IPV4_MTU <= self.mtu <= MAX_IPV4_MTU
+            or not minimum_mtu <= self.mtu <= MAX_IPV4_MTU
         ):
             raise ValueError(
-                f"TUN MTU must be an integer from {MIN_IPV4_MTU} "
+                f"TUN MTU must be an integer from {minimum_mtu} "
                 f"through {MAX_IPV4_MTU}"
             )
         if self.name is not None:
             _validate_tun_name(self.name)
-        object.__setattr__(self, "host_address", host)
-        object.__setattr__(self, "guest_address", guest)
+        object.__setattr__(self, "host_address", str(host_ip))
+        object.__setattr__(self, "guest_address", str(guest_ip))
+
+    @property
+    def ip_version(self) -> int:
+        return ipaddress.ip_address(self.host_address).version
 
 
 @dataclass(frozen=True)
@@ -693,6 +726,8 @@ def create_tun_queue(
 
     for _ in range(attempts):
         name = _validate_tun_name(name_factory() if generated else config.name or "")
+        host_address = ipaddress.ip_address(config.host_address)
+        guest_address = ipaddress.ip_address(config.guest_address)
         fd = opener(str(tun_path), open_flags)
         name_collision = False
         try:
@@ -717,9 +752,9 @@ def create_tun_queue(
                     ip_path,
                     "address",
                     "add",
-                    f"{config.host_address}/32",
+                    f"{config.host_address}/{host_address.max_prefixlen}",
                     "peer",
-                    f"{config.guest_address}/32",
+                    f"{config.guest_address}/{guest_address.max_prefixlen}",
                     "dev",
                     name,
                 ]
@@ -736,6 +771,22 @@ def create_tun_queue(
                     "up",
                 ]
             )
+            if host_address.version == 6:
+                # Unlike IPv4, an IPv6 peer address does not reliably install
+                # a route to the remote /128 on a point-to-point TUN.
+                runner(
+                    [
+                        ip_path,
+                        "-6",
+                        "route",
+                        "replace",
+                        f"{config.guest_address}/128",
+                        "dev",
+                        name,
+                        "src",
+                        config.host_address,
+                    ]
+                )
         except BaseException as setup_error:
             _close_after_setup_error(fd, closer, setup_error)
             if name_collision:
@@ -770,19 +821,19 @@ def _validate_port(port: int, field: str) -> int:
 
 def _validate_endpoint_address(value: str, field: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{field} must be one usable IPv4 address")
+        raise ValueError(f"{field} must be one usable IP address")
     try:
-        address = ipaddress.IPv4Address(value)
-    except ipaddress.AddressValueError as error:
-        raise ValueError(f"{field} must be one usable IPv4 address") from error
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise ValueError(f"{field} must be one usable IP address") from error
     if address.is_unspecified or address.is_multicast:
-        raise ValueError(f"{field} must be one usable IPv4 address")
+        raise ValueError(f"{field} must be one usable IP address")
     return str(address)
 
 
 @dataclass(frozen=True)
 class NftDnatConfig:
-    """One exact public IPv4/TCP endpoint and its hosted destination."""
+    """One exact public IPv4/IPv6 TCP endpoint and hosted destination."""
 
     listen_address: str
     listen_port: int
@@ -801,6 +852,10 @@ class NftDnatConfig:
         )
         listen_port = _validate_port(self.listen_port, "listen_port")
         target_port = _validate_port(self.target_port, "target_port")
+        if ipaddress.ip_address(listen_address).version != ipaddress.ip_address(
+            target_address
+        ).version:
+            raise ValueError("DNAT listen and target address families must match")
         if listen_address == target_address:
             raise ValueError("DNAT listen and target addresses must be different")
         if self.table_name is not None:
@@ -809,6 +864,28 @@ class NftDnatConfig:
         object.__setattr__(self, "listen_port", listen_port)
         object.__setattr__(self, "target_address", target_address)
         object.__setattr__(self, "target_port", target_port)
+
+    @property
+    def ip_version(self) -> int:
+        return ipaddress.ip_address(self.listen_address).version
+
+    @property
+    def table_family(self) -> str:
+        return "ip" if self.ip_version == 4 else "ip6"
+
+    @property
+    def address_selector(self) -> str:
+        return "ip" if self.ip_version == 4 else "ip6"
+
+    @property
+    def destination_prefix(self) -> int:
+        return 32 if self.ip_version == 4 else 128
+
+    @property
+    def dnat_destination(self) -> str:
+        if self.ip_version == 6:
+            return f"[{self.target_address}]:{self.target_port}"
+        return f"{self.target_address}:{self.target_port}"
 
 
 @dataclass(frozen=True)
@@ -919,6 +996,7 @@ def current_nft_ownership(
 
 def inspect_nft_ownership(
     *,
+    table_family: str = "ip",
     nft_path: str = "nft",
     runner: OutputRunner = _read_command,
     proc_root: Path = Path("/proc"),
@@ -928,7 +1006,9 @@ def inspect_nft_ownership(
 
     if not isinstance(nft_path, str) or not nft_path or "\0" in nft_path:
         raise ValueError("nft_path must name one executable")
-    raw = runner([nft_path, "--json", "list", "ruleset", "ip"])
+    if table_family not in {"ip", "ip6"}:
+        raise ValueError("table_family must be ip or ip6")
+    raw = runner([nft_path, "--json", "list", "ruleset", table_family])
     try:
         document = json.loads(raw)
         entries = document["nftables"]
@@ -942,7 +1022,7 @@ def inspect_nft_ownership(
         if not isinstance(entry, dict):
             continue
         rule = entry.get("rule")
-        if not isinstance(rule, dict) or rule.get("family") != "ip":
+        if not isinstance(rule, dict) or rule.get("family") != table_family:
             continue
         comment = rule.get("comment")
         if not isinstance(comment, str) or not comment.startswith(NFT_OWNER_PREFIX):
@@ -963,8 +1043,9 @@ def inspect_nft_ownership(
             remediation = "inspect the complete nftables ruleset manually"
             if safe_table is not None:
                 remediation = (
-                    f"inspect with: nft list table ip {safe_table}; after verifying "
-                    f"ownership, remove with: nft delete table ip {safe_table}"
+                    f"inspect with: nft list table {table_family} {safe_table}; "
+                    "after verifying ownership, remove with: "
+                    f"nft delete table {table_family} {safe_table}"
                 )
             observations.append(
                 NftOwnershipObservation(
@@ -1007,7 +1088,7 @@ def inspect_nft_ownership(
         if status == "stale":
             remediation = (
                 "verify the recorded owner is gone, then run: "
-                f"nft delete table ip {table_name}"
+                f"nft delete table {table_family} {table_name}"
             )
         observations.append(
             NftOwnershipObservation(
@@ -1034,13 +1115,13 @@ def _dnat_batch(
     if ownership is not None:
         owner_comment = f' comment "{ownership.marker()}"'
     return (
-        f"create table ip {table_name}\n"
-        f"add chain ip {table_name} prerouting "
+        f"create table {config.table_family} {table_name}\n"
+        f"add chain {config.table_family} {table_name} prerouting "
         "{ type nat hook prerouting priority dstnat; policy accept; }\n"
-        f"add rule ip {table_name} prerouting "
-        f"ip daddr {config.listen_address} "
+        f"add rule {config.table_family} {table_name} prerouting "
+        f"{config.address_selector} daddr {config.listen_address} "
         f"tcp dport {config.listen_port} counter "
-        f"dnat to {config.target_address}:{config.target_port}"
+        f"dnat to {config.dnat_destination}"
         f"{owner_comment}\n"
     )
 
@@ -1092,11 +1173,13 @@ class NftDnatLease:
         nft_path: str,
         runner: NftRunner,
         backend_id: str = "nft-exec",
+        table_family: str = "ip",
     ) -> None:
         self.table_name = table_name
         self.backend_id = backend_id
         self._nft_path = nft_path
         self._runner = runner
+        self._table_family = table_family
         self._closed = False
 
     @property
@@ -1116,7 +1199,7 @@ class NftDnatLease:
                 self._nft_path,
                 "delete",
                 "table",
-                "ip",
+                self._table_family,
                 self.table_name,
             ],
             None,
@@ -1145,7 +1228,13 @@ def install_nft_dnat(
         [nft_path, "--file", "-"],
         _dnat_batch(config, table_name, ownership),
     )
-    return NftDnatLease(table_name, nft_path, runner, backend_id)
+    return NftDnatLease(
+        table_name,
+        nft_path,
+        runner,
+        backend_id,
+        config.table_family,
+    )
 
 
 class FirewallDnatLease(Protocol):
@@ -1402,23 +1491,27 @@ class LibNftablesTransport:
             return
         if (
             len(argv) == 5
-            and argv[:4] == [self.command_name, "delete", "table", "ip"]
+            and argv[:3] == [self.command_name, "delete", "table"]
+            and argv[3] in {"ip", "ip6"}
             and input_text is None
         ):
             table_name = _validate_nft_table_name(argv[4])
             self._invoke(
-                f"delete table ip {table_name}\n",
+                f"delete table {argv[3]} {table_name}\n",
                 operation="delete",
             )
             return
         raise ValueError(f"unsupported libnftables runner invocation: {argv!r}")
 
     def read(self, argv: list[str]) -> str:
-        expected = [self.command_name, "--json", "list", "ruleset", "ip"]
-        if argv != expected:
+        if (
+            len(argv) != 5
+            or argv[:4] != [self.command_name, "--json", "list", "ruleset"]
+            or argv[4] not in {"ip", "ip6"}
+        ):
             raise ValueError(f"unsupported libnftables read invocation: {argv!r}")
         return self._invoke(
-            "list ruleset ip\n",
+            f"list ruleset {argv[4]}\n",
             operation="list-ruleset",
             json_output=True,
         )
@@ -1427,19 +1520,25 @@ class LibNftablesTransport:
 class NftFirewallBackend:
     """Common nft policy rendered through either supported transport."""
 
-    def __init__(self, transport: NftTransport) -> None:
+    def __init__(self, transport: NftTransport, table_family: str = "ip") -> None:
         if transport.backend_id not in {"nft-lib", "nft-exec"}:
             raise ValueError("nft transport has an unsupported backend identifier")
         self.transport = transport
         self.backend_id = transport.backend_id
+        if table_family not in {"ip", "ip6"}:
+            raise ValueError("table_family must be ip or ip6")
+        self.table_family = table_family
 
     def inspect_ownership(self) -> NftOwnershipReport:
         return inspect_nft_ownership(
             nft_path=self.transport.command_name,
             runner=self.transport.read,
+            table_family=self.table_family,
         )
 
     def check_compatibility(self, config: NftDnatConfig) -> None:
+        if config.table_family != self.table_family:
+            raise ValueError("nftables backend address family mismatch")
         check_nft_dnat_compatibility(
             config,
             ownership=current_nft_ownership("tcpcc-probe"),
@@ -1452,6 +1551,8 @@ class NftFirewallBackend:
         config: NftDnatConfig,
         ownership: NftOwnership,
     ) -> NftDnatLease:
+        if config.table_family != self.table_family:
+            raise ValueError("nftables backend address family mismatch")
         return install_nft_dnat(
             config,
             nft_path=self.transport.command_name,
@@ -1481,7 +1582,7 @@ def _iptables_rules(
 ) -> tuple[list[str], list[str]]:
     exact = [
         "-d",
-        f"{config.listen_address}/32",
+        f"{config.listen_address}/{config.destination_prefix}",
         "-p",
         "tcp",
         "-m",
@@ -1507,7 +1608,7 @@ def _iptables_rules(
         "-j",
         "DNAT",
         "--to-destination",
-        f"{config.target_address}:{config.target_port}",
+        config.dnat_destination,
     ]
     return jump, dnat
 
@@ -1930,6 +2031,7 @@ class IptablesFirewallBackend:
 def create_firewall_backend(
     backend_id: str,
     *,
+    table_family: str = "ip",
     nft_path: str = "nft",
     iptables_path: str = "iptables",
     iptables_restore_path: str = "iptables-restore",
@@ -1938,9 +2040,9 @@ def create_firewall_backend(
     """Construct one explicit backend; automatic fallback is a later CLI policy."""
 
     if backend_id == "nft-lib":
-        return NftFirewallBackend(LibNftablesTransport())
+        return NftFirewallBackend(LibNftablesTransport(), table_family)
     if backend_id == "nft-exec":
-        return NftFirewallBackend(NftExecTransport(nft_path))
+        return NftFirewallBackend(NftExecTransport(nft_path), table_family)
     if backend_id == "iptables":
         return IptablesFirewallBackend(
             iptables_path=iptables_path,
@@ -2140,6 +2242,7 @@ def acquire_host_network(
         preflight_collector = lambda cc: collect_preflight(
             cc,
             host_inspector,
+            ip_version=config.dnat.ip_version,
             firewall_backend=config.firewall_backend,
             nft_path=nft_path,
             iptables_path=iptables_path,
@@ -2154,6 +2257,7 @@ def acquire_host_network(
         if firewall is None:
             firewall = create_firewall_backend(
                 config.firewall_backend,
+                table_family=config.dnat.table_family,
                 nft_path=nft_path,
                 iptables_path=iptables_path,
                 iptables_restore_path=iptables_restore_path,

@@ -43,12 +43,39 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_SERVICE_DRAIN,
 	TCPCC_CONTROL_SERVICE_STATS,
 	TCPCC_CONTROL_SERVICE_STOP,
+	TCPCC_CONTROL_SOCKET_IP,
+	TCPCC_CONTROL_BIND_IP,
+	TCPCC_CONTROL_L3_ATTACH_IP,
 };
 
 /* Capabilities returned by TCPCC_CONTROL_HELLO. */
 #define TCPCC_CONTROL_FEATURE_BRIDGE_RESULT (1U << 0)
 #define TCPCC_CONTROL_FEATURE_HOSTED_SERVICE (1U << 1)
 #define TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS (1U << 2)
+#define TCPCC_CONTROL_FEATURE_IP_ENDPOINTS  (1U << 3)
+
+/* Project values deliberately match the IP version, not Linux AF_* values. */
+#define TCPCC_CONTROL_IP_VERSION_4 4U
+#define TCPCC_CONTROL_IP_VERSION_6 6U
+
+/* Fixed-width network-byte-order address used by all address-family APIs. */
+struct tcpcc_control_ip_address {
+	__u8 version;
+	__u8 reserved[3];
+	__u8 bytes[16];
+};
+
+struct tcpcc_control_ip_endpoint {
+	struct tcpcc_control_ip_address address;
+	__u16 port;
+	__u16 reserved;
+};
+
+struct tcpcc_control_l3_config {
+	struct tcpcc_control_ip_address address;
+	__u8 prefix_len;
+	__u8 reserved[3];
+};
 
 struct tcpcc_control_request {
 	__u32 magic;

@@ -227,6 +227,17 @@ selects it. CI rejects an image above 3.25 MiB, more than 112 enabled symbols,
 or any returning `.eh_frame` section, so later kernel updates and features must
 make material growth explicit in review.
 
-This gate concerns the kernel protocol stack. The current CLI endpoint parser,
-host control ABI, and TUN address setup still carry IPv4 addresses; accepting an
-IPv6 public endpoint requires a separate, end-to-end ABI and data-path change.
+## M9.9 dual-stack public endpoint
+
+M9.9 extends the public path without changing the IPv4-only local backend
+contract. The CLI accepts `IPv4:PORT` or `[IPv6]:PORT`, selects matching TUN
+defaults, checks only that family's forwarding prerequisite, and renders owned
+DNAT state through nftables `ip`/`ip6` or iptables/ip6tables as appropriate.
+
+Three append-only control operations carry a fixed-width address version plus
+16 address bytes for socket creation, bind, and L3 attach. The hosted kernel
+uses AF_INET or AF_INET6 from that representation, configures the matching TUN
+address and default route, and leaves the stream bridge to the local
+`127.0.0.1` application unchanged. A privileged CI gate creates isolated IPv6
+client/router namespaces and proves the complete public TCP, DNAT, raw TUN,
+hosted listener, reverse conntrack, bridge, signal shutdown, and cleanup path.
