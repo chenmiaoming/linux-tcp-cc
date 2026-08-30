@@ -105,7 +105,7 @@ They do not claim that all guest TCP objects have reached their terminal state.
 ### Reclaim CI Gate
 
 The 512 MiB / 16,384-flow lifecycle job retains the M10.1 samples and adds a
-bounded 45-second reclaim observation after synchronous bridge teardown. It
+bounded 120-second reclaim observation after synchronous bridge teardown. It
 requires all of the following:
 
 1. the load grows anonymous RSS by at least 16 MiB over the ready sample;
@@ -122,6 +122,8 @@ discard delta, elapsed time, and recovered-delta ratio. The ratio is tied to
 the same process's ready and peak samples rather than an exact runner-specific
 RSS number. The gate does not require RSS to return exactly to boot level:
 TCP timers, orphaned sockets, allocator metadata, and caches may remain live.
+The window covers the observed exponential TCP close/orphan timer cadence; it
+does not shorten those timers or treat bridge teardown as transport quiescence.
 
 ## M10.1: Complete Memory Lifecycle Measurement
 
