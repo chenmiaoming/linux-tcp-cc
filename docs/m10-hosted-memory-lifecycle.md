@@ -87,7 +87,8 @@ and `/proc/<pid>/stat` fallback) and record:
   available
 - `private_dirty_kib`: Private dirty pages (`Private_Dirty`), or `null` when
   rollup data is not available
-- `anonymous_kib`: Anonymous resident pages (`Anonymous` / `RssAnon`)
+- `anonymous_kib`: Anonymous resident pages (`Anonymous` / `RssAnon`), or
+  `null` when neither source exposes the value
 - `virtual_kib`: Virtual memory size (`VmSize`)
 - `threads`: Process thread count (always 1 for the hosted kernel)
 - `host_fds`: Number of open host file descriptors
@@ -101,3 +102,31 @@ samples collected before the error in its JSON artifact.
 
 The resulting `tcpcc.capacity-discovery.v1` JSON artifact maintains append-only
 compatibility while exposing detailed memory profiles across all stages.
+
+## Bridge Drain Is Not TCP Quiescence
+
+`post_drain_sample.service.active_connections == 0` means that the hosted
+service has synchronously stopped and reaped every bridge session. It does not
+mean that every underlying guest TCP control block has completed its close
+state machine or that its slab pages are already free in the buddy allocator.
+
+The first successful M10.1 capacity artifact made this distinction visible:
+
+- RSS was about 72.1 MiB with 16,384 active flows and about 86.5 MiB immediately
+  after service teardown;
+- the two 0.5-second post-drain windows consumed 10 and 3 CPU ticks;
+- the guest log emitted bounded `TCP: too many orphaned sockets` warnings while
+  the second service nevertheless completed its 64-flow reuse probe.
+
+These samples are the immediate post-bridge baseline, not a reclaim-success
+threshold. M10.3 must distinguish at least these phases:
+
+1. all bridge sessions reaped;
+2. bounded TCP orphan/close-state quiescence;
+3. guest-free pages reported and discarded by the host;
+4. a fresh traffic pass proving safe reuse.
+
+Reclaim gates must not require the page reporter to discard memory still owned
+by TCP timers or orphaned sockets. The M10.3 CI design should add longer bounded
+quiescence observations and report orphan-pressure evidence separately before
+setting an RSS-reduction ratio from the resulting artifacts.

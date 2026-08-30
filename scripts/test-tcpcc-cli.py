@@ -1040,6 +1040,31 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):
                     self.mod.process_metrics(1234)
 
+    def test_process_metrics_does_not_invent_anonymous_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_pid = Path(temp_dir)
+            (proc_pid / "status").write_text(
+                "VmSize:\t  527012 kB\n"
+                "VmRSS:\t   20480 kB\n"
+                "Threads:\t1\n"
+            )
+            (proc_pid / "stat").write_text(
+                "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 5 10 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "fd").mkdir()
+
+            with patch.object(
+                self.mod,
+                "Path",
+                side_effect=lambda path: proc_pid / Path(path).name
+                if str(path).startswith("/proc/1234/")
+                else Path(path),
+            ):
+                metrics = self.mod.process_metrics(1234)
+
+            self.assertIsNone(metrics["anonymous_kib"])
+            self.assertFalse(metrics["smaps_rollup_available"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -434,9 +434,9 @@ def process_metrics(pid: int) -> dict[str, object]:
     virtual_kib = status_values.get("VmSize", 0)
     pss_kib = rollup_values.get("Pss")
     private_dirty_kib = rollup_values.get("Private_Dirty")
-    anonymous_kib = rollup_values.get(
-        "Anonymous", status_values.get("RssAnon", 0)
-    )
+    anonymous_kib = rollup_values.get("Anonymous")
+    if anonymous_kib is None:
+        anonymous_kib = status_values.get("RssAnon")
     threads = status_values.get("Threads", 0)
 
     return {
@@ -636,8 +636,13 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         if active_result is None:
             raise RuntimeError("active capacity probe was not executed")
         hosted_exit_status = process.poll()
-        if hosted_exit_status is not None and stages:
-            final_stats = dict(stages[-1]["service"])
+        if hosted_exit_status is not None:
+            if stages:
+                final_stats = dict(stages[-1]["service"])
+            raise RuntimeError(
+                "hosted kernel exited after reaching capacity with status "
+                f"{hosted_exit_status}"
+            )
 
         for connection in clients:
             close_socket(connection)
@@ -763,15 +768,17 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 "process": reuse_metrics,
             }
 
-        if hosted_exit_status is None:
-            control.transact(OP_SHUTDOWN)
-            status = process.wait(timeout=15)
-            if status != 0:
-                raise RuntimeError(f"hosted kernel shutdown returned {status}")
-        else:
-            process.wait(timeout=1)
-            service_handle = None
-            control = None
+        if (
+            post_drain_sample is None
+            or len(post_drain_idle_samples) != 2
+            or reuse_sample is None
+        ):
+            raise RuntimeError("hosted memory lifecycle did not complete")
+
+        control.transact(OP_SHUTDOWN)
+        status = process.wait(timeout=15)
+        if status != 0:
+            raise RuntimeError(f"hosted kernel shutdown returned {status}")
         process = None
 
         return lifecycle_report("passed")
