@@ -13,7 +13,7 @@
 #include <asm/reclaim.h>
 
 /* Avoid order-0 syscall churn and bound each host advisory range to 16 MiB. */
-#define TCPCC_RECLAIM_MIN_ORDER		3U
+#define TCPCC_RECLAIM_MIN_ORDER		2U
 #define TCPCC_RECLAIM_MAX_RANGE_BYTES	(16UL * 1024UL * 1024UL)
 
 struct tcpcc_reclaim_range {

@@ -213,7 +213,7 @@ class ControlCodecTests(unittest.TestCase):
         data = BRIDGE_RESULT.pack(
             1,
             2,
-            3,
+            2,
             BRIDGE_BUFFER_LIMIT,
             BRIDGE_TOTAL_BUFFER_LIMIT,
             0,
@@ -312,7 +312,7 @@ class ControlCodecTests(unittest.TestCase):
         stats = decode_reclaim_stats(raw)
         self.assertEqual(stats.successful_discard_bytes, 48 * 1024 * 1024)
         self.assertEqual(stats.state, 1)
-        self.assertEqual(stats.minimum_order, 3)
+        self.assertEqual(stats.minimum_order, 2)
 
         values = list(RECLAIM_STATS.unpack(raw))
         values[-1] = 1

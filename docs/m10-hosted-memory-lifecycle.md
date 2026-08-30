@@ -67,7 +67,7 @@ The reporting provider in `arch/tcpcc/kernel/reclaim.c` has these properties:
 - reporting starts two seconds after a qualifying free event through the
   generic freezable workqueue, so host syscalls run in sleepable process
   context rather than IRQ, softirq, spinlock, or allocator atomic context;
-- the minimum reporting order is 3 (32 KiB), avoiding an advisory call for
+- the minimum reporting order is 2 (16 KiB), avoiding an advisory call for
   every order-0 page;
 - each generic batch contains at most 32 entries; tcpcc sorts those entries by
   guest PFN, coalesces adjacent ranges, and caps each host advisory call at
