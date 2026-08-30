@@ -229,38 +229,22 @@ class SummaryTests(unittest.TestCase):
 class TcpccEventTests(unittest.TestCase):
     @staticmethod
     def events(data_status: int) -> list[dict[str, object]]:
-        events: list[dict[str, object]] = [
+        return [
             {"event": "ready", "cc": "bbr"},
+            {
+                "event": "service-stats",
+                "accepted_connections": 6,
+                "completed_connections": 6,
+                "active_connections": 0,
+                "peak_connections": 2,
+                "rejected_connections": 0,
+                "bridge_start_failures": 0,
+                "terminal_failures": 3 if data_status else 0,
+                "last_error": data_status,
+                "backend_to_public_bytes": 24_000_000,
+            },
+            {"event": "stopped", "clean": True},
         ]
-        for index in range(3):
-            events.extend(
-                (
-                    {
-                        "event": "connection-opened",
-                        "bridge_handle": 2 * index + 1,
-                        "accepted_cc": "bbr",
-                    },
-                    {
-                        "event": "connection-opened",
-                        "bridge_handle": 2 * index + 2,
-                        "accepted_cc": "bbr",
-                    },
-                    {
-                        "event": "connection-closed",
-                        "bridge_handle": 2 * index + 1,
-                        "status": 0,
-                        "backend_to_public_bytes": 2048,
-                    },
-                    {
-                        "event": "connection-closed",
-                        "bridge_handle": 2 * index + 2,
-                        "status": data_status,
-                        "backend_to_public_bytes": 8_000_000,
-                    },
-                )
-            )
-        events.append({"event": "stopped", "clean": True})
-        return events
 
     def test_iperf_abortive_data_close_is_recorded_not_failed(self) -> None:
         scenario = benchmark.parse_scenario(scenario_document())
@@ -275,7 +259,7 @@ class TcpccEventTests(unittest.TestCase):
 
     def test_cancellation_is_not_accepted_as_iperf_teardown(self) -> None:
         scenario = benchmark.parse_scenario(scenario_document())
-        with self.assertRaisesRegex(RuntimeError, "unexpected terminal"):
+        with self.assertRaisesRegex(RuntimeError, "unexpected terminal aggregate"):
             benchmark.validate_tcpcc_events(
                 self.events(-errno.ECANCELED),
                 scenario,

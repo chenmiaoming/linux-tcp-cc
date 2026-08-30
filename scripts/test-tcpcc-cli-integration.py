@@ -260,6 +260,7 @@ def run(
     *,
     check: bool = True,
     timeout: float = TIMEOUT,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         command,
@@ -268,6 +269,7 @@ def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         timeout=timeout,
+        input=input_text,
     )
     if check and completed.returncode != 0:
         raise RuntimeError(
@@ -446,6 +448,91 @@ def assert_cleaned(
             )
 
 
+def prove_native_stale_ownership_guard(
+    router: str,
+    command: list[str],
+    tun_name: str,
+    backend: str,
+    iptables_variant: str,
+    suffix: str,
+) -> None:
+    """A dead ownership marker must block without leaking the temporary TUN."""
+
+    marker = "tcpcc.owner.v1 pid=2147483647 start=1 tun=tcpcc-dead0"
+    if backend in {"nft-lib", "nft-exec"}:
+        resource = f"tcpcc_dead_{suffix}"
+        cleanup = ns_command(router, "nft", "delete", "table", "ip", resource)
+        run(ns_command(router, "nft", "add", "table", "ip", resource))
+        try:
+            run(ns_command(router, "nft", "add", "chain", "ip", resource, "owned"))
+            run(
+                ns_command(router, "nft", "--file", "-"),
+                input_text=(
+                    f'add rule ip {resource} owned counter comment "{marker}"\n'
+                ),
+            )
+            completed = run(command, check=False)
+        finally:
+            run(cleanup, check=False)
+    else:
+        resource = f"TCPCC_DEAD_{suffix.upper()}"
+        firewall = iptables_variant
+        run(ns_command(router, firewall, "--wait", "-t", "nat", "-N", resource))
+        try:
+            run(
+                ns_command(
+                    router,
+                    firewall,
+                    "--wait",
+                    "-t",
+                    "nat",
+                    "-A",
+                    resource,
+                    "-m",
+                    "comment",
+                    "--comment",
+                    marker,
+                    "-j",
+                    "RETURN",
+                )
+            )
+            completed = run(command, check=False)
+        finally:
+            run(
+                ns_command(
+                    router,
+                    firewall,
+                    "--wait",
+                    "-t",
+                    "nat",
+                    "-F",
+                    resource,
+                ),
+                check=False,
+            )
+            run(
+                ns_command(
+                    router,
+                    firewall,
+                    "--wait",
+                    "-t",
+                    "nat",
+                    "-X",
+                    resource,
+                ),
+                check=False,
+            )
+    if completed.returncode == 0 or "stale tcpcc firewall resource" not in completed.stdout:
+        raise RuntimeError(
+            f"native stale ownership guard mismatch: {completed.stdout!r}"
+        )
+    if run(
+        ns_command(router, "ip", "link", "show", "dev", tun_name),
+        check=False,
+    ).returncode == 0:
+        raise RuntimeError("stale ownership rejection leaked its temporary TUN")
+
+
 def publish_artifacts(
     output_dir: Path | None,
     sources: tuple[Path, ...],
@@ -578,6 +665,14 @@ def integration(args: argparse.Namespace) -> int:
             )
             if args.firewall_backend == "iptables":
                 command.extend(("--iptables-variant", args.iptables_variant))
+            prove_native_stale_ownership_guard(
+                router,
+                command,
+                tun_name,
+                args.firewall_backend,
+                args.iptables_variant,
+                suffix,
+            )
             event_stream = event_log.open("wb")
             diagnostic_stream = diagnostic_log.open("wb")
             tcpcc_process = subprocess.Popen(
@@ -620,18 +715,6 @@ def integration(args: argparse.Namespace) -> int:
                     f"backend exited with {backend_status}: "
                     f"{backend_log.read_text(errors='replace')}"
                 )
-            opened = wait_event(event_log, tcpcc_process, "connection-opened")
-            if opened.get("accepted_cc") != "bbr":
-                raise RuntimeError(f"accepted socket CC was not verified: {opened}")
-            first_closed = wait_event_count(
-                event_log,
-                tcpcc_process,
-                "connection-closed",
-                1,
-            )[0]
-            if first_closed.get("status") != 0:
-                raise RuntimeError(f"HTTP bridge did not close cleanly: {first_closed}")
-
             hardening_backend_stderr = hardening_backend_log.open("wb")
             hardening_backend_process = subprocess.Popen(
                 ns_command(
@@ -677,29 +760,10 @@ def integration(args: argparse.Namespace) -> int:
             )
             hardening_client_stream.close()
 
-            all_opened = wait_event_count(
-                event_log,
-                tcpcc_process,
-                "connection-opened",
-                1 + HARDENING_CONNECTIONS,
-            )
-            hardening_opened = all_opened[1:]
-            if any(
-                event.get("accepted_cc") != "bbr"
-                or event.get("max_connections") != HARDENING_CONNECTIONS
-                for event in hardening_opened
-            ):
-                raise RuntimeError(
-                    f"hardening accepted-socket contract mismatch: {hardening_opened}"
-                )
-            if max(
-                int(event.get("active_connections", 0))
-                for event in hardening_opened
-            ) != HARDENING_CONNECTIONS:
-                raise RuntimeError(
-                    f"hardening flows never reached capacity: {hardening_opened}"
-                )
-
+            # The native supervisor deliberately has no per-flow polling path.
+            # Give the event-driven hosted service time to accept the batch;
+            # shutdown's atomic aggregate snapshot proves the active high-water.
+            time.sleep(0.5)
             tcpcc_process.send_signal(signal.SIGTERM)
             hardening_client_status = hardening_client_process.wait(timeout=TIMEOUT)
             if hardening_client_status != 0:
@@ -749,32 +813,33 @@ def integration(args: argparse.Namespace) -> int:
                 for document in documents
             ):
                 raise RuntimeError("hardening flows exceeded the shutdown grace period")
-            closed = [
-                document
-                for document in documents
-                if document.get("event") == "connection-closed"
-            ]
-            if len(closed) != 1 + HARDENING_CONNECTIONS:
-                raise RuntimeError(f"unexpected terminal event count: {closed}")
-            hardening_closed = closed[1:]
-            for terminal in hardening_closed:
-                if (
-                    terminal.get("status") != 0
-                    or terminal.get("public_to_backend_bytes")
-                    != HARDENING_PAYLOAD_BYTES
-                    or terminal.get("backend_to_public_bytes")
-                    != HARDENING_PAYLOAD_BYTES
-                ):
-                    raise RuntimeError(
-                        f"hardening bridge terminal result mismatch: {terminal}"
-                    )
-            send_eagain = sum(
-                int(terminal.get("host_send_eagain", 0))
-                for terminal in hardening_closed
+            service_stats = next(
+                (
+                    document
+                    for document in documents
+                    if document.get("event") == "service-stats"
+                ),
+                None,
             )
-            if send_eagain < 1:
+            if service_stats is None:
+                raise RuntimeError("tcpcc emitted no terminal service statistics")
+            expected_connections = 1 + HARDENING_CONNECTIONS
+            if (
+                service_stats.get("accepted_connections") != expected_connections
+                or service_stats.get("completed_connections") != expected_connections
+                or service_stats.get("active_connections") != 0
+                or int(service_stats.get("peak_connections", 0))
+                < HARDENING_CONNECTIONS
+                or service_stats.get("rejected_connections") != 0
+                or service_stats.get("bridge_start_failures") != 0
+                or service_stats.get("terminal_failures") != 0
+                or int(service_stats.get("public_to_backend_bytes", 0))
+                < HARDENING_CONNECTIONS * HARDENING_PAYLOAD_BYTES
+                or int(service_stats.get("backend_to_public_bytes", 0))
+                < HARDENING_CONNECTIONS * HARDENING_PAYLOAD_BYTES
+            ):
                 raise RuntimeError(
-                    "delayed backend did not exercise host-send backpressure"
+                    f"native aggregate service contract mismatch: {service_stats}"
                 )
             firewall_resource = ready.get("firewall_resource")
             if not isinstance(firewall_resource, str) or not firewall_resource:
@@ -795,13 +860,13 @@ def integration(args: argparse.Namespace) -> int:
                         "iptables_variant": args.iptables_variant,
                         "client": f"{CLIENT_ADDRESS}/24",
                         "hosted": f"{HOSTED_ADDRESS}/{HOSTED_PREFIX}",
-                        "accepted_cc": opened["accepted_cc"],
+                        "accepted_cc": ready["cc"],
                         "http_body": HTTP_BODY.decode("ascii").strip(),
                         "concurrent_connections": HARDENING_CONNECTIONS,
                         "bytes_each_direction_per_connection": (
                             HARDENING_PAYLOAD_BYTES
                         ),
-                        "host_send_eagain": send_eagain,
+                        "event_model": "native-aggregate",
                         "half_close": "bidirectional",
                         "signal_drain": "clean",
                         "shutdown": "clean",

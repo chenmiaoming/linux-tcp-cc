@@ -65,42 +65,49 @@ def backend_server() -> int:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.settimeout(TIMEOUT)
     listener.bind(("127.0.0.1", BACKEND_PORT))
-    listener.listen(1)
+    listener.listen(2)
     print("backend-ready", flush=True)
-    connection, peer = listener.accept()
     try:
-        connection.settimeout(TIMEOUT)
-        if peer[0] != "127.0.0.1":
-            raise RuntimeError(f"unexpected backend peer {peer!r}")
-        request = connection.recv(4096)
-        if request != b"ipv6-through-hosted-linux":
-            raise RuntimeError(f"unexpected backend payload {request!r}")
-        connection.sendall(BODY)
-        connection.shutdown(socket.SHUT_WR)
+        for _ in range(2):
+            connection, peer = listener.accept()
+            try:
+                connection.settimeout(TIMEOUT)
+                if peer[0] != "127.0.0.1":
+                    raise RuntimeError(f"unexpected backend peer {peer!r}")
+                request = connection.recv(4096)
+                if request != b"ipv6-through-hosted-linux":
+                    raise RuntimeError(f"unexpected backend payload {request!r}")
+                connection.sendall(BODY)
+                connection.shutdown(socket.SHUT_WR)
+            finally:
+                connection.close()
     finally:
-        connection.close()
         listener.close()
     return 0
 
 
 def ipv6_client() -> int:
-    connection = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    connection.settimeout(TIMEOUT)
-    try:
-        connection.bind((CLIENT_ADDRESS, 0, 0, 0))
-        connection.connect((PUBLIC_ADDRESS, PUBLIC_PORT, 0, 0))
-        connection.sendall(b"ipv6-through-hosted-linux")
-        connection.shutdown(socket.SHUT_WR)
-        received = bytearray()
-        while True:
-            chunk = connection.recv(4096)
-            if not chunk:
-                break
-            received.extend(chunk)
-    finally:
-        connection.close()
-    if bytes(received) != BODY:
-        raise RuntimeError(f"IPv6 client received {bytes(received)!r}")
+    for pass_index in range(2):
+        connection = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        connection.settimeout(TIMEOUT)
+        try:
+            connection.bind((CLIENT_ADDRESS, 0, 0, 0))
+            connection.connect((PUBLIC_ADDRESS, PUBLIC_PORT, 0, 0))
+            connection.sendall(b"ipv6-through-hosted-linux")
+            connection.shutdown(socket.SHUT_WR)
+            received = bytearray()
+            while True:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                received.extend(chunk)
+        finally:
+            connection.close()
+        if bytes(received) != BODY:
+            raise RuntimeError(f"IPv6 client received {bytes(received)!r}")
+        if pass_index == 0:
+            # Cross the generic page-reporting delay before the reuse pass.
+            time.sleep(3.0)
     print(BODY.decode("ascii").strip())
     return 0
 
@@ -243,16 +250,30 @@ def integration(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"IPv6 client output mismatch: {client_result.stdout!r}")
             if backend.wait(timeout=TIMEOUT) != 0:
                 raise RuntimeError(backend_path.read_text(errors="replace"))
-            closed = wait_event(events_path, tcpcc, "connection-closed")
-            if closed.get("status") != 0:
-                raise RuntimeError(f"IPv6 bridge failed: {closed!r}")
-
             tcpcc.send_signal(signal.SIGTERM)
             if tcpcc.wait(timeout=TIMEOUT) != 0:
                 raise RuntimeError(diagnostic_path.read_text(errors="replace"))
             documents = read_events(events_path)
             if not any(item.get("event") == "stopped" for item in documents):
                 raise RuntimeError("tcpcc did not stop cleanly")
+            service_stats = next(
+                (
+                    item
+                    for item in documents
+                    if item.get("event") == "service-stats"
+                ),
+                None,
+            )
+            if (
+                service_stats is None
+                or service_stats.get("accepted_connections") != 2
+                or service_stats.get("completed_connections") != 2
+                or service_stats.get("active_connections") != 0
+                or service_stats.get("terminal_failures") != 0
+            ):
+                raise RuntimeError(
+                    f"IPv6 native aggregate service mismatch: {service_stats!r}"
+                )
             if run(ns(router, "ip", "link", "show", "dev", tun_name), check=False).returncode == 0:
                 raise RuntimeError("IPv6 TUN survived shutdown")
             resource = ready.get("firewall_resource")
@@ -271,6 +292,7 @@ def integration(args: argparse.Namespace) -> int:
                 "backend": f"127.0.0.1:{BACKEND_PORT}",
                 "firewall": "nft-ip6",
                 "bridge": "clean",
+                "post_reporting_reuse_flows": 2,
                 "shutdown": "clean",
             }, sort_keys=True, separators=(",", ":")))
             if args.output_dir is not None:

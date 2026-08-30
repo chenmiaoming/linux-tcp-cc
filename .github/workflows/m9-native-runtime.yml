@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/m9-native-runtime.yml'
       - 'Makefile'
+      - 'tcpcc'
       - 'docs/m9-native-event-runtime.md'
       - 'native/**'
       - 'linux-overlay/arch/tcpcc/include/asm/bridge.h'

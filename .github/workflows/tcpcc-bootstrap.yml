@@ -110,6 +110,8 @@ jobs:
             VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
             install
           .build/m85-install-root/usr/local/bin/tcpcc --help >/dev/null
+          test "$(dd if=.build/m85-install-root/usr/local/bin/tcpcc bs=1 count=4 2>/dev/null)" = "$(printf '\177ELF')"
+          test ! -e .build/m85-install-root/usr/local/lib/tcpcc
 
       - name: Execute hosted M6.3 lossless delayed-path milestone
         run: bash scripts/validate-tcpcc-long-fat.sh
@@ -219,6 +221,7 @@ jobs:
           test -c /dev/net/tun
           command -v '${{ matrix.iptables_variant }}'
           sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          make native-build
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 
       - name: Prove concurrent BBR ingress, backpressure, and signal drain
@@ -239,10 +242,10 @@ jobs:
           if-no-files-found: warn
 
   capacity-discovery:
-    name: M9 connection capacity discovery
+    name: M10 memory lifecycle and capacity
     needs: start-kernel
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout linux-tcp-cc
         uses: actions/checkout@v4
@@ -266,7 +269,7 @@ jobs:
           sudo -n sysctl -w net.ipv4.ip_local_port_range="1024 65535"
           chmod u+x .build/tcpcc-bootstrap-out/vmlinux
 
-      - name: Discover idle and active connection capacity
+      - name: Prove capacity, post-spike reclaim, reuse, and stable RSS floors
         run: |
           sudo -n python3 scripts/run-tcpcc-capacity-discovery.py \
             --integration \
@@ -275,6 +278,9 @@ jobs:
             --levels 64,256,1024,2048,4095,8192,16384 \
             --minimum 16384 \
             --active-connections 64 \
+            --stability-rounds 6 \
+            --stability-connections 8192 \
+            --stability-drift-kib 8192 \
             --output .build/m9-capacity/report.json \
             --boot-log .build/m9-capacity/vmlinux.log
 
@@ -321,6 +327,7 @@ jobs:
           test -c /dev/net/tun
           test -r /proc/net/if_inet6
           sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          make native-build
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 
       - name: Prove IPv6 public ingress through the hosted stack
@@ -375,6 +382,7 @@ jobs:
           sudo -n modprobe nf_conntrack || true
           test -c /dev/net/tun
           sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          make native-build
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 
       - name: Compare native CUBIC, native BBR, and tcpcc BBR

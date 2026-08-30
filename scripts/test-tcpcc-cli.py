@@ -62,6 +62,7 @@ from tcpcc_control import (  # noqa: E402
     OP_SOCKET_IP,
     REQUEST,
     RESPONSE,
+    RECLAIM_STATS,
     SERVICE_CONFIG,
     SERVICE_STATS,
     VERSION,
@@ -71,6 +72,7 @@ from tcpcc_control import (  # noqa: E402
     ControlResponse,
     decode_bridge_result,
     decode_response,
+    decode_reclaim_stats,
     decode_service_stats,
     encode_request,
     encode_ip_endpoint,
@@ -211,7 +213,7 @@ class ControlCodecTests(unittest.TestCase):
         data = BRIDGE_RESULT.pack(
             1,
             2,
-            3,
+            2,
             BRIDGE_BUFFER_LIMIT,
             BRIDGE_TOTAL_BUFFER_LIMIT,
             0,
@@ -291,6 +293,35 @@ class ControlCodecTests(unittest.TestCase):
         values[13] = 1
         with self.assertRaisesRegex(ControlProtocolError, "positive"):
             decode_service_stats(SERVICE_STATS.pack(*values))
+
+    def test_reclaim_stats_have_fixed_layout_and_strict_fields(self) -> None:
+        raw = RECLAIM_STATS.pack(
+            64 * 1024 * 1024,
+            48 * 1024 * 1024,
+            17,
+            31,
+            0,
+            0,
+            1,
+            0,
+            2,
+            16 * 1024 * 1024,
+            0,
+            0,
+        )
+        stats = decode_reclaim_stats(raw)
+        self.assertEqual(stats.successful_discard_bytes, 48 * 1024 * 1024)
+        self.assertEqual(stats.state, 1)
+        self.assertEqual(stats.minimum_order, 2)
+
+        values = list(RECLAIM_STATS.unpack(raw))
+        values[-1] = 1
+        with self.assertRaisesRegex(ControlProtocolError, "reserved"):
+            decode_reclaim_stats(RECLAIM_STATS.pack(*values))
+        values[-1] = 0
+        values[6] = 4
+        with self.assertRaisesRegex(ControlProtocolError, "unknown state"):
+            decode_reclaim_stats(RECLAIM_STATS.pack(*values))
 
 
 class ParserTests(unittest.TestCase):
@@ -928,6 +959,185 @@ class ServiceTransactionTests(unittest.TestCase):
         self.assertEqual(documents[0]["cc"], "bbr")
         self.assertEqual(documents[1]["signal"], signal.SIGTERM)
         self.assertIn("stopped cleanly", diagnostics.getvalue())
+
+
+class CapacityDiscoveryMetricsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import importlib.util
+
+        script_path = ROOT / "scripts" / "run-tcpcc-capacity-discovery.py"
+        spec = importlib.util.spec_from_file_location(
+            "capacity_discovery_mod", script_path
+        )
+        assert spec is not None and spec.loader is not None
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    @staticmethod
+    def stability_round(anonymous_kib: int) -> dict[str, object]:
+        return {
+            "post_reclaim_process": {"anonymous_kib": anonymous_kib}
+        }
+
+    def test_stability_summary_accepts_bounded_multi_round_floors(self) -> None:
+        result = self.mod.summarize_stability(
+            40 * 1024,
+            8 * 1024,
+            6,
+            [
+                self.stability_round(value * 1024)
+                for value in (41, 43, 42, 44, 43, 42)
+            ],
+        )
+
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["maximum_drift_kib"], 4 * 1024)
+        self.assertEqual(result["final_drift_kib"], 2 * 1024)
+        self.assertEqual(result["late_round_span_kib"], 2 * 1024)
+
+    def test_stability_summary_rejects_ratcheting_floor(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "ratcheted"):
+            self.mod.summarize_stability(
+                40 * 1024,
+                8 * 1024,
+                6,
+                [
+                    self.stability_round(value * 1024)
+                    for value in (42, 44, 46, 48, 49, 50)
+                ],
+            )
+
+    def test_stability_summary_requires_every_round(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "completed 2/3"):
+            self.mod.summarize_stability(
+                40 * 1024,
+                8 * 1024,
+                3,
+                [self.stability_round(41 * 1024)] * 2,
+            )
+
+    def test_process_metrics_with_smaps_rollup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_pid = Path(temp_dir)
+            (proc_pid / "status").write_text(
+                "VmSize:\t  527012 kB\n"
+                "VmRSS:\t   72144 kB\n"
+                "RssAnon:\t   68000 kB\n"
+                "Threads:\t1\n"
+            )
+            (proc_pid / "smaps_rollup").write_text(
+                "Rss:               72144 kB\n"
+                "Pss:               72100 kB\n"
+                "Private_Dirty:     71800 kB\n"
+                "Anonymous:         68000 kB\n"
+            )
+            (proc_pid / "stat").write_text(
+                "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 15 25 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "fd").mkdir()
+            (proc_pid / "fd" / "0").touch()
+            (proc_pid / "fd" / "1").touch()
+            (proc_pid / "fd" / "3").touch()
+
+            with patch.object(
+                self.mod,
+                "Path",
+                side_effect=lambda path: proc_pid
+                if str(path).startswith("/proc/1234")
+                and str(path) == "/proc/1234"
+                else proc_pid / Path(path).name
+                if str(path).startswith("/proc/1234/")
+                else Path(path),
+            ):
+                metrics = self.mod.process_metrics(1234)
+
+            self.assertEqual(metrics["rss_kib"], 72144)
+            self.assertEqual(metrics["pss_kib"], 72100)
+            self.assertEqual(metrics["private_dirty_kib"], 71800)
+            self.assertEqual(metrics["anonymous_kib"], 68000)
+            self.assertEqual(metrics["virtual_kib"], 527012)
+            self.assertEqual(metrics["threads"], 1)
+            self.assertEqual(metrics["host_fds"], 3)
+            self.assertEqual(metrics["cpu_ticks"], 40)
+            self.assertTrue(metrics["smaps_rollup_available"])
+            self.assertEqual(metrics["rss_source"], "smaps_rollup")
+
+    def test_process_metrics_fallback_without_smaps_rollup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_pid = Path(temp_dir)
+            (proc_pid / "status").write_text(
+                "VmSize:\t  527012 kB\n"
+                "VmRSS:\t   20480 kB\n"
+                "RssAnon:\t   18432 kB\n"
+                "Threads:\t1\n"
+            )
+            (proc_pid / "stat").write_text(
+                "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 5 10 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "fd").mkdir()
+            (proc_pid / "fd" / "0").touch()
+
+            with patch.object(
+                self.mod,
+                "Path",
+                side_effect=lambda path: proc_pid
+                if str(path).startswith("/proc/1234")
+                and str(path) == "/proc/1234"
+                else proc_pid / Path(path).name
+                if str(path).startswith("/proc/1234/")
+                else Path(path),
+            ):
+                metrics = self.mod.process_metrics(1234)
+
+            self.assertEqual(metrics["rss_kib"], 20480)
+            self.assertIsNone(metrics["pss_kib"])
+            self.assertIsNone(metrics["private_dirty_kib"])
+            self.assertEqual(metrics["anonymous_kib"], 18432)
+            self.assertEqual(metrics["virtual_kib"], 527012)
+            self.assertEqual(metrics["threads"], 1)
+            self.assertEqual(metrics["host_fds"], 1)
+            self.assertEqual(metrics["cpu_ticks"], 15)
+            self.assertFalse(metrics["smaps_rollup_available"])
+            self.assertEqual(metrics["rss_source"], "status")
+
+    def test_process_metrics_rejects_missing_required_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_pid = Path(temp_dir)
+
+            with patch.object(
+                self.mod,
+                "Path",
+                side_effect=lambda path: proc_pid / Path(path).name
+                if str(path).startswith("/proc/1234/")
+                else Path(path),
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    self.mod.process_metrics(1234)
+
+    def test_process_metrics_does_not_invent_anonymous_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            proc_pid = Path(temp_dir)
+            (proc_pid / "status").write_text(
+                "VmSize:\t  527012 kB\n"
+                "VmRSS:\t   20480 kB\n"
+                "Threads:\t1\n"
+            )
+            (proc_pid / "stat").write_text(
+                "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 5 10 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "fd").mkdir()
+
+            with patch.object(
+                self.mod,
+                "Path",
+                side_effect=lambda path: proc_pid / Path(path).name
+                if str(path).startswith("/proc/1234/")
+                else Path(path),
+            ):
+                metrics = self.mod.process_metrics(1234)
+
+            self.assertIsNone(metrics["anonymous_kib"])
+            self.assertFalse(metrics["smaps_rollup_available"])
 
 
 if __name__ == "__main__":
