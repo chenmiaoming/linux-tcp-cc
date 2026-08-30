@@ -110,6 +110,8 @@ jobs:
             VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
             install
           .build/m85-install-root/usr/local/bin/tcpcc --help >/dev/null
+          test "$(dd if=.build/m85-install-root/usr/local/bin/tcpcc bs=1 count=4 2>/dev/null)" = "$(printf '\177ELF')"
+          test ! -e .build/m85-install-root/usr/local/lib/tcpcc
 
       - name: Execute hosted M6.3 lossless delayed-path milestone
         run: bash scripts/validate-tcpcc-long-fat.sh
@@ -219,6 +221,7 @@ jobs:
           test -c /dev/net/tun
           command -v '${{ matrix.iptables_variant }}'
           sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          make native-build
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 
       - name: Prove concurrent BBR ingress, backpressure, and signal drain
@@ -324,6 +327,7 @@ jobs:
           test -c /dev/net/tun
           test -r /proc/net/if_inet6
           sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          make native-build
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 
       - name: Prove IPv6 public ingress through the hosted stack
@@ -378,6 +382,7 @@ jobs:
           sudo -n modprobe nf_conntrack || true
           test -c /dev/net/tun
           sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          make native-build
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 
       - name: Compare native CUBIC, native BBR, and tcpcc BBR

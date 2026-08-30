@@ -47,8 +47,8 @@ gates pass.
 
 ## Server-ingress command
 
-Build and validate the hosted kernel, then install the command and its private
-Python modules under `/usr/local`:
+Build and validate the hosted kernel, then install the native C command and
+hosted image under `/usr/local`:
 
 ```bash
 bash ./scripts/validate-tcpcc-bootstrap.sh
@@ -56,8 +56,10 @@ sudo make install
 ```
 
 `VMLINUX=/path/to/vmlinux` and `PREFIX=/another/prefix` may be supplied to
-`make install`. From an uninstalled source checkout, use `sudo ./tcpcc` and
-either the default `.build/tcpcc-bootstrap-out/vmlinux` or `--kernel PATH`.
+`make install`. The installed runtime contains `bin/tcpcc` and
+`libexec/tcpcc/vmlinux` only and has no Python dependency. From an uninstalled
+source checkout, run `make native-build`, then use `sudo ./tcpcc` with either
+the default `.build/tcpcc-bootstrap-out/vmlinux` or `--kernel PATH`.
 
 Before startup, the operator must provide TUN, forwarding, and the requested
 host congestion-control prerequisite. tcpcc reports all missing prerequisites

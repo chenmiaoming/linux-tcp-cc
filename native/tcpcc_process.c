@@ -260,6 +260,16 @@ int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 
 	process->pid = child;
 	process->pid_fd = tcpcc_open_pidfd(child);
+	if (process->pid_fd < 0) {
+		int code = errno;
+
+		kill(child, SIGKILL);
+		tcpcc_reap_failed_child(child);
+		tcpcc_close(&requests[1]);
+		tcpcc_close(&responses[0]);
+		return tcpcc_process_fail(error, code,
+			"pidfd_open for hosted process failed: %s", strerror(code));
+	}
 	process->request_fd = requests[1];
 	process->response_fd = responses[0];
 	if (error) {

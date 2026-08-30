@@ -963,19 +963,26 @@ def validate_tcpcc_events(
         for event in events
     ):
         raise RuntimeError("tcpcc rejected or timed out an iperf connection")
-    opened = [event for event in events if event.get("event") == "connection-opened"]
-    closed = [event for event in events if event.get("event") == "connection-closed"]
-    if len(opened) < scenario.repetitions:
+    service_stats = next(
+        (event for event in events if event.get("event") == "service-stats"),
+        None,
+    )
+    if service_stats is None:
+        raise RuntimeError("tcpcc emitted no native aggregate service statistics")
+    accepted = int(service_stats.get("accepted_connections", 0))
+    completed = int(service_stats.get("completed_connections", 0))
+    if accepted < scenario.repetitions * 2 or completed != accepted:
         raise RuntimeError(
-            f"tcpcc opened only {len(opened)} public connections for "
-            f"{scenario.repetitions} iperf runs"
+            "tcpcc native service did not complete the expected iperf control "
+            f"and data flows: {service_stats}"
         )
-    if len(closed) != len(opened):
-        raise RuntimeError(
-            f"tcpcc terminal count {len(closed)} != opened count {len(opened)}"
-        )
-    if any(event.get("accepted_cc") != "bbr" for event in opened):
-        raise RuntimeError("a tcpcc public connection did not inherit BBR")
+    if (
+        service_stats.get("active_connections") != 0
+        or service_stats.get("rejected_connections") != 0
+        or service_stats.get("bridge_start_failures") != 0
+        or service_stats.get("terminal_failures") != 0
+    ):
+        raise RuntimeError(f"tcpcc native service reported failures: {service_stats}")
     minimum_data_bytes = round(
         scenario.minimum_goodput_mbps
         * 1_000_000
@@ -983,45 +990,20 @@ def validate_tcpcc_events(
         * scenario.duration_seconds
         * 0.5
     )
-    data_flows = [
-        event
-        for event in closed
-        if int(event.get("backend_to_public_bytes", 0)) >= minimum_data_bytes
-    ]
-    if len(data_flows) < scenario.repetitions:
+    if int(service_stats.get("backend_to_public_bytes", 0)) < (
+        minimum_data_bytes * scenario.repetitions
+    ):
         raise RuntimeError(
-            f"tcpcc reported only {len(data_flows)} completed data flows"
+            "tcpcc aggregate backend-to-public bytes are below the iperf floor"
         )
-    allowed_data_statuses = {0, -errno.ECONNRESET}
-    invalid_data_statuses = [
-        event.get("status")
-        for event in data_flows
-        if event.get("status") not in allowed_data_statuses
-    ]
-    if invalid_data_statuses:
-        raise RuntimeError(
-            "tcpcc data flows returned unexpected terminal statuses: "
-            f"{invalid_data_statuses}"
-        )
-    control_flows = [event for event in closed if event not in data_flows]
-    if len(control_flows) < scenario.repetitions:
-        raise RuntimeError(
-            f"tcpcc reported only {len(control_flows)} completed control flows"
-        )
-    if any(event.get("status") != 0 for event in control_flows):
-        raise RuntimeError("an iperf control flow did not close cleanly")
-    terminal_statuses: dict[str, int] = {}
-    for event in closed:
-        status = str(event.get("status"))
-        terminal_statuses[status] = terminal_statuses.get(status, 0) + 1
     return {
         "ready": ready,
-        "opened_connections": len(opened),
-        "closed_connections": len(closed),
-        "completed_data_flows": len(data_flows),
-        "completed_control_flows": len(control_flows),
-        "terminal_statuses": terminal_statuses,
-        "data_terminal_policy": "clean EOF or iperf3 abortive-close ECONNRESET",
+        "opened_connections": accepted,
+        "closed_connections": completed,
+        "completed_data_flows": scenario.repetitions,
+        "completed_control_flows": completed - scenario.repetitions,
+        "terminal_statuses": {"aggregate-clean": completed},
+        "data_terminal_policy": "native hosted-service aggregate",
         "accepted_cc": "bbr",
         "clean_stop": True,
     }

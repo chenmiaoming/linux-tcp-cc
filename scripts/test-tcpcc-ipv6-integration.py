@@ -250,16 +250,30 @@ def integration(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"IPv6 client output mismatch: {client_result.stdout!r}")
             if backend.wait(timeout=TIMEOUT) != 0:
                 raise RuntimeError(backend_path.read_text(errors="replace"))
-            closed = wait_event(events_path, tcpcc, "connection-closed")
-            if closed.get("status") != 0:
-                raise RuntimeError(f"IPv6 bridge failed: {closed!r}")
-
             tcpcc.send_signal(signal.SIGTERM)
             if tcpcc.wait(timeout=TIMEOUT) != 0:
                 raise RuntimeError(diagnostic_path.read_text(errors="replace"))
             documents = read_events(events_path)
             if not any(item.get("event") == "stopped" for item in documents):
                 raise RuntimeError("tcpcc did not stop cleanly")
+            service_stats = next(
+                (
+                    item
+                    for item in documents
+                    if item.get("event") == "service-stats"
+                ),
+                None,
+            )
+            if (
+                service_stats is None
+                or service_stats.get("accepted_connections") != 2
+                or service_stats.get("completed_connections") != 2
+                or service_stats.get("active_connections") != 0
+                or service_stats.get("terminal_failures") != 0
+            ):
+                raise RuntimeError(
+                    f"IPv6 native aggregate service mismatch: {service_stats!r}"
+                )
             if run(ns(router, "ip", "link", "show", "dev", tun_name), check=False).returncode == 0:
                 raise RuntimeError("IPv6 TUN survived shutdown")
             resource = ready.get("firewall_resource")

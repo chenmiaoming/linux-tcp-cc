@@ -20,11 +20,12 @@ choice is outside tcpcc's public-side contract.
 
 ### M8.4-M8.5 command contract
 
-The repository launcher is `./tcpcc`. `sudo make install` installs the launcher
-as `PREFIX/bin/tcpcc`, its private modules under `PREFIX/lib/tcpcc`, and the
-validated hosted image as `PREFIX/libexec/tcpcc/vmlinux`. The default prefix is
-`/usr/local`; `VMLINUX` can select another already-built hosted image. An
-uninstalled checkout can instead pass `--kernel` or set `TCPCC_KERNEL`.
+The repository launcher is `./tcpcc`. Since M9.5, `sudo make install` installs
+the native ELF executable as `PREFIX/bin/tcpcc` and the validated hosted image
+as `PREFIX/libexec/tcpcc/vmlinux`; the earlier private Python-module layout is
+no longer installed. The default prefix is `/usr/local`; `VMLINUX` can select
+another already-built hosted image. An uninstalled checkout can instead pass
+`--kernel` or set `TCPCC_KERNEL`.
 
 The three product arguments are mandatory and strictly parsed before any host
 mutation. Public addresses are literal IPv4 or bracketed IPv6, ports are

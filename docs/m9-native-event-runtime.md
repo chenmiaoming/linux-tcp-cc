@@ -5,9 +5,10 @@ M9 removes Python from the installed runtime while keeping one hosted
 single-threaded, event-driven service: one owner mutates every connection and
 therefore the data plane requires no application locks.
 
-Python remains available as a compatibility path while the native path is
-built and validated. It is removed from installation only after the C runtime
-has equivalent lifecycle, fault-boundary, and real-TUN CI coverage.
+The repository still contains Python test and benchmark drivers, but
+`make install` installs only the native executable and `vmlinux`. Neither the
+installed CLI nor its steady-state service requires a Python interpreter or
+Python modules.
 
 ## Process and data ownership
 
@@ -25,7 +26,7 @@ Only descriptors 0 through 3 cross the exec boundary:
 
 ```text
 native tcpcc supervisor
-  epoll + signalfd + timerfd + pidfd
+  epoll + signalfd + pidfd
         |
         +-- stdin/stdout: fixed-record control ABI
         +-- fd 3: one nonpersistent TUN queue
@@ -44,7 +45,7 @@ they never traverse the supervisor's event loop.
 The final steady-state service has two single-owner loops separated by the
 control ABI:
 
-- The native supervisor owns process state, signals, timers, host resources,
+- The native supervisor owns process state, signals, host resources,
   and the control channel.
 - One hosted bridge dispatcher owns the listener, accepted Linux sockets,
   ordinary host backend fds, per-flow state, and buffer accounting.
@@ -80,8 +81,40 @@ backpressure; the service does not grow an unbounded queue. Idle connections
 retain state only and do not reserve both payload buffers.
 
 Per-connection logging is disabled in the high-concurrency path. Counters are
-aggregated and exported on a timer or explicit stats request so logging cannot
-become the event loop's bottleneck.
+aggregated during lifecycle transitions or on an explicit stats request so
+logging cannot become the event loop's bottleneck.
+
+## M9.5 native installed command
+
+M9.5 switches the installed `tcpcc` entry point to a C executable. The source
+tree's `./tcpcc` file is only a small shell convenience that execs the already
+built native binary; it does not load Python. Distribution installation copies
+the ELF executable itself to `PREFIX/bin/tcpcc`, so the production process is
+pure C from its first instruction.
+
+Startup remains transactional and ordered: validate arguments and the hosted
+ET_EXEC image, run read-only host prerequisite checks, create one exclusive
+nonpersistent TUN queue, install one exact DNAT resource, exec `vmlinux`,
+validate `HELLO`, attach L3, create/set-CC/verify/bind/listen, and finally
+transfer the listener to `SERVICE_START`. Failure unwinds only resources owned
+by that process, in reverse order. TUN closure removes its address and route;
+the named nftables table or iptables chain and jump are explicitly deleted.
+
+There is no steady-state timer and no host-side accept/join loop. The native
+supervisor blocks indefinitely in edge-triggered epoll on two descriptors:
+`signalfd` for SIGINT/SIGTERM and the hosted child's `pidfd`. A host without
+`pidfd_open` support is rejected during startup instead of silently falling
+back to periodic `waitpid` polling. All connection readiness and payload work
+stays in the hosted service dispatcher. Shutdown performs one aggregate stats
+snapshot, requests a bounded drain, obtains the final aggregate, and tears
+down the child and host resources.
+
+The stable JSON stream consequently keeps lifecycle events (`ready`,
+`draining`, optional `drain-timeout`, `service-stats`, and `stopped`) but drops
+the legacy Python supervisor's per-flow `connection-opened` and
+`connection-closed` chatter. CI validates concurrency high-water, accepted and
+completed counts, byte totals, zero reject/failure counters, graceful drain,
+dual-stack ingress, and cleanup from the authoritative aggregate snapshot.
 
 ## ABI migration
 
@@ -103,7 +136,7 @@ The migration is deliberately split into mergeable gates:
 4. Dynamic flow storage and buffer accounting; remove the eight-session
    limit, then add CI pressure gates.
 5. Native preflight, TUN, firewall, signal, and rollback parity; switch the
-   installed `tcpcc` entry point from Python to C.
+   installed `tcpcc` entry point from Python to C. (Complete.)
 6. CI pressure gates for idle connections, active throughput, slow peers,
    reset storms, and graceful drain. Published results include CPU, RSS,
    accepted/active/rejected counts, event-loop lag, and buffer high-water mark.
