@@ -10,9 +10,16 @@ Each supported Linux LTS series has its own long-lived repository branch. The de
 
 Current branch: `6.18.y`
 
-Current pinned upstream baseline: Linux `v6.18.45` from the kernel.org stable tree.
+Current pinned upstream baseline: Linux `v6.18.48` from the kernel.org stable tree.
 
 Patch-level releases inside this branch will follow Linux 6.18.y stable updates after CI and regression validation.
+
+Release tags match the pinned upstream patch exactly (`v6.18.N`). A scheduled
+workflow proposes the next sequential stable tag without skipping intermediate
+patches. The update remains a normal pull request; after it is merged and the
+complete hosted bootstrap workflow succeeds on `6.18.y`, CI publishes the
+native C binary and hosted `vmlinux` as an immutable GitHub Release. See
+[`docs/releases.md`](docs/releases.md) for the package and maintenance contract.
 
 ## Maintenance boundary
 

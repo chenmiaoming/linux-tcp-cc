@@ -21,7 +21,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate scripts
-        run: bash -n scripts/fetch-linux.sh
+        run: |
+          bash -n scripts/check-linux-lts.sh
+          bash -n scripts/fetch-linux.sh
+          bash -n scripts/update-linux-lts.sh
+
+      - name: Check the current position in the LTS series
+        run: bash scripts/check-linux-lts.sh
 
       - name: Fetch pinned Linux stable source
         run: bash scripts/fetch-linux.sh

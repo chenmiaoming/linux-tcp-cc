@@ -1,0 +1,126 @@
+name: Linux LTS update
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: linux-lts-update-6.18.y
+  cancel-in-progress: false
+
+jobs:
+  propose-next-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout current LTS branch
+        uses: actions/checkout@v4
+        with:
+          ref: 6.18.y
+
+      - name: Detect the next Linux stable patch
+        id: lts
+        run: bash scripts/check-linux-lts.sh
+
+      - name: Stop when another LTS update is under review
+        if: steps.lts.outputs.update_available == 'true'
+        id: pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          active=$(gh pr list \
+            --base 6.18.y \
+            --state open \
+            --json headRefName,url \
+            --jq '[.[] | select(.headRefName | startswith("automation/linux-v6.18.")) | .url] | .[0] // ""')
+          if [[ -n "$active" ]]; then
+            echo "blocked=true" >> "$GITHUB_OUTPUT"
+            echo "An LTS update is already under review: $active" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "blocked=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare the next upstream pin
+        if: >-
+          steps.lts.outputs.update_available == 'true' &&
+          steps.pending.outputs.blocked == 'false'
+        env:
+          TARGET_TAG: ${{ steps.lts.outputs.next_tag }}
+        run: |
+          bash scripts/update-linux-lts.sh "$TARGET_TAG"
+          git diff --check
+
+      - name: Create the sequential update pull request
+        if: >-
+          steps.lts.outputs.update_available == 'true' &&
+          steps.pending.outputs.blocked == 'false'
+        id: pull_request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_TAG: ${{ steps.lts.outputs.next_tag }}
+          LATEST_TAG: ${{ steps.lts.outputs.latest_tag }}
+        run: |
+          branch="automation/linux-$TARGET_TAG"
+          if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
+            echo "remote update branch already exists without an open PR: $branch" >&2
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git add README.md upstream/linux.env upstream/protected.sha256
+          git commit -m "LTS: update Linux to $TARGET_TAG"
+          git push origin "$branch"
+
+          body=$(mktemp)
+          cat > "$body" <<EOF
+          Update the 6.18.y product branch to the next sequential Linux LTS patch,
+          **$TARGET_TAG**. The newest tag currently visible is **$LATEST_TAG**;
+          later patches deliberately wait so every upstream version receives its
+          own CI result and tcpcc Release.
+
+          - upstream tag: https://git.kernel.org/stable/h/$TARGET_TAG
+          - changelog: https://cdn.kernel.org/pub/linux/kernel/v6.x/ChangeLog-${TARGET_TAG#v}
+          - protected congestion-control hashes regenerated from the annotated tag
+          - merge only after the dispatched CI workflows are green
+          EOF
+
+          pr_url=$(gh pr create \
+            --base 6.18.y \
+            --head "$branch" \
+            --title "LTS: update Linux to $TARGET_TAG" \
+            --body-file "$body")
+          echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "Created $pr_url" >> "$GITHUB_STEP_SUMMARY"
+
+      # Pull requests created with GITHUB_TOKEN produce approval-gated workflow
+      # runs. Explicit workflow_dispatch calls attach the normal validation
+      # suites immediately while the PR itself remains human-gated.
+      - name: Dispatch the complete validation suite
+        if: steps.pull_request.outputs.url != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_TAG: ${{ steps.lts.outputs.next_tag }}
+        run: |
+          branch="automation/linux-$TARGET_TAG"
+          workflows=(
+            upstream.yml
+            overlay.yml
+            tcpcc-arch.yml
+            tcpcc-link.yml
+            tcpcc-bootstrap.yml
+            m7-native.yml
+            m7-lossless-parity.yml
+            m8-host-lifecycle.yml
+            m9-native-runtime.yml
+          )
+          for workflow in "${workflows[@]}"; do
+            gh workflow run "$workflow" --ref "$branch"
+          done

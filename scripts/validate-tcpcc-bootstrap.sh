@@ -10,10 +10,15 @@ CONTROL_RESPONSES="$ROOT/.build/tcpcc-control.responses"
 ELF_PROGRAM_HEADERS="$ROOT/.build/tcpcc-vmlinux.program-headers"
 STRACE_LOG="$ROOT/.build/tcpcc-host.strace"
 
+# shellcheck disable=SC1091
+source "$ROOT/upstream/linux.env"
+
 LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
   bash "$ROOT/scripts/validate-tcpcc-link.sh"
 
 grep -Fx 'CONFIG_HIGH_RES_TIMERS=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_BASE_SMALL=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_TINY_RCU=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_NET=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_INET=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_TCP_CONG_ADVANCED=y' "$OUT/.config" >/dev/null
@@ -55,7 +60,7 @@ strace -ff -ttt -s 256 -o "$STRACE_LOG" \
 
 cat "$BOOT_LOG"
 
-grep -F 'Linux version 6.18.45' "$BOOT_LOG" >/dev/null
+grep -F "Linux version $LINUX_VERSION" "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 host RAM 128 MiB at' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 setup_arch memory initialization complete' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.2 host monotonic clocksource active' "$BOOT_LOG" >/dev/null

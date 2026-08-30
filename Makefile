@@ -15,7 +15,7 @@ NATIVE_OBJECTS := \
 	$(NATIVE_BUILD_DIR)/tcpcc_control.o \
 	$(NATIVE_BUILD_DIR)/tcpcc_event.o \
 	$(NATIVE_BUILD_DIR)/tcpcc_process.o
-.PHONY: install native-build native-check
+.PHONY: install native-build native-check release-package
 install: $(NATIVE_CLI)
 	test -x "$(VMLINUX)"
 	install -d "$(DESTDIR)$(PREFIX)/bin"
@@ -83,3 +83,6 @@ native-check: $(NATIVE_BUILD_DIR)/test-control \
 	$(NATIVE_BUILD_DIR)/test-control
 	$(NATIVE_BUILD_DIR)/test-process $(NATIVE_BUILD_DIR)/test-hosted-child
 	$(NATIVE_BUILD_DIR)/test-event
+
+release-package: $(NATIVE_CLI)
+	VMLINUX="$(VMLINUX)" scripts/package-release.sh
