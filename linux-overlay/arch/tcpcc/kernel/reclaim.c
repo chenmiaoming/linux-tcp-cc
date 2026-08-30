@@ -56,8 +56,6 @@ static void tcpcc_reclaim_sort(struct tcpcc_reclaim_range *ranges,
 {
 	unsigned int index;
 
-	(void)prdev;
-
 	for (index = 1; index < count; index++) {
 		struct tcpcc_reclaim_range value = ranges[index];
 		unsigned int cursor = index;
@@ -98,6 +96,8 @@ static int tcpcc_reclaim_report(struct page_reporting_dev_info *prdev,
 	u64 total = 0;
 	unsigned int count = 0;
 	unsigned int index;
+
+	(void)prdev;
 
 	if (!nents || nents > ARRAY_SIZE(ranges))
 		return tcpcc_reclaim_fail(-EINVAL, 0);
