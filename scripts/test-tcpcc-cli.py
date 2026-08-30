@@ -213,7 +213,7 @@ class ControlCodecTests(unittest.TestCase):
         data = BRIDGE_RESULT.pack(
             1,
             2,
-            3,
+            2,
             BRIDGE_BUFFER_LIMIT,
             BRIDGE_TOTAL_BUFFER_LIMIT,
             0,
@@ -232,7 +232,7 @@ class ControlCodecTests(unittest.TestCase):
         data = BRIDGE_RESULT.pack(
             1,
             2,
-            2,
+            3,
             BRIDGE_BUFFER_LIMIT,
             BRIDGE_TOTAL_BUFFER_LIMIT,
             1 << 3,
