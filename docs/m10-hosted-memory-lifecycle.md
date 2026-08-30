@@ -125,6 +125,34 @@ TCP timers, orphaned sockets, allocator metadata, and caches may remain live.
 The window covers the observed exponential TCP close/orphan timer cadence; it
 does not shorten those timers or treat bridge teardown as transport quiescence.
 
+### Multi-Round RSS Stability Gate
+
+A single successful decline does not prove that a long-running process avoids
+a rising post-load floor. The same capacity job therefore continues inside the
+same hosted kernel, TUN, control channel, and host process for six additional
+rounds. Each round:
+
+1. starts a listener on a distinct port, without restarting the guest;
+2. establishes 8,192 simultaneous connections and verifies bidirectional data
+   on 64 of them;
+3. closes every host socket, synchronously stops the service, and verifies zero
+   active connections, rejects, bridge-start failures, and admission limit;
+4. requires successful discard bytes to increase after the active sample;
+5. waits up to the existing 120-second bound for anonymous RSS to return below
+   the stability ceiling, then records a further 0.5-second idle sample.
+
+The baseline is the last post-reclaim idle sample after the initial 16,384-flow
+spike. Every subsequent floor must remain within 8 MiB of that same baseline;
+the limit is not rebased upward after each round. This catches a staircase or
+"ratchet" pattern while allowing a small fixed amount of allocator/cache noise.
+It is a residency gate, not a claim that Linux must return to its boot RSS.
+
+The append-only report fields `stability_configuration`, `stability_rounds`,
+and `stability_result` retain per-round pre-load, active, stopped, reclaim,
+post-reclaim, discard-delta, verified-traffic, and idle-CPU evidence. The final
+summary publishes every observed floor, maximum/final drift, and the span of
+the last three floors so a passing result cannot hide its trajectory.
+
 ## M10.1: Complete Memory Lifecycle Measurement
 
 The capacity discovery harness (`scripts/run-tcpcc-capacity-discovery.py`)
@@ -151,9 +179,10 @@ records host memory telemetry across five distinct lifecycle phases:
    proves that the runtime remains reusable after the capacity service is fully
    torn down. Under M10.3 it runs after the bounded reclaim gate.
 
-M10.3 appends `reclaim_samples`, `reclaim_result`, and
-`post_reclaim_idle_samples`; it does not rename or reinterpret the earlier
-schema fields.
+M10.3 appends `reclaim_samples`, `reclaim_result`,
+`post_reclaim_idle_samples`, `stability_configuration`, `stability_rounds`,
+and `stability_result`; it does not rename or reinterpret the earlier schema
+fields.
 
 ### Process Telemetry Metrics
 

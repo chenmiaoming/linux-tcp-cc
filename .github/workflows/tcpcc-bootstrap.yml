@@ -242,7 +242,7 @@ jobs:
     name: M10 memory lifecycle and capacity
     needs: start-kernel
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout linux-tcp-cc
         uses: actions/checkout@v4
@@ -266,7 +266,7 @@ jobs:
           sudo -n sysctl -w net.ipv4.ip_local_port_range="1024 65535"
           chmod u+x .build/tcpcc-bootstrap-out/vmlinux
 
-      - name: Prove capacity, post-spike reclaim, and safe reuse
+      - name: Prove capacity, post-spike reclaim, reuse, and stable RSS floors
         run: |
           sudo -n python3 scripts/run-tcpcc-capacity-discovery.py \
             --integration \
@@ -275,6 +275,9 @@ jobs:
             --levels 64,256,1024,2048,4095,8192,16384 \
             --minimum 16384 \
             --active-connections 64 \
+            --stability-rounds 6 \
+            --stability-connections 8192 \
+            --stability-drift-kib 8192 \
             --output .build/m9-capacity/report.json \
             --boot-log .build/m9-capacity/vmlinux.log
 

@@ -52,6 +52,7 @@ GUEST_IPV4 = "192.0.2.2"
 GUEST_PREFIX = 32
 PUBLIC_PORT = 18500
 REUSE_PUBLIC_PORT = 18501
+STABILITY_PUBLIC_PORT_BASE = 18600
 BRIDGE_SESSION_LIMIT = 1048575
 DEFAULT_MEMORY_MIB = 512
 ACCEPT_BATCH = 64
@@ -65,6 +66,9 @@ TIMEOUT = 30.0
 RECLAIM_TIMEOUT = 120.0
 RECLAIM_SAMPLE_SECONDS = 1.0
 RECLAIM_MIN_LOAD_DELTA_KIB = 16 * 1024
+DEFAULT_STABILITY_ROUNDS = 0
+DEFAULT_STABILITY_CONNECTIONS = 8192
+DEFAULT_STABILITY_DRIFT_KIB = 8 * 1024
 PAYLOAD_BYTES = 256
 BUFFER_HIGH_WATER = re.compile(
     r"M9\.4 bridge buffer high-water ([0-9]+)/262144 bytes, current ([0-9]+)"
@@ -126,6 +130,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--minimum", type=int, default=16384)
     parser.add_argument("--active-connections", type=int, default=64)
+    parser.add_argument(
+        "--stability-rounds", type=int, default=DEFAULT_STABILITY_ROUNDS
+    )
+    parser.add_argument(
+        "--stability-connections",
+        type=int,
+        default=DEFAULT_STABILITY_CONNECTIONS,
+    )
+    parser.add_argument(
+        "--stability-drift-kib",
+        type=int,
+        default=DEFAULT_STABILITY_DRIFT_KIB,
+    )
     return parser.parse_args()
 
 
@@ -492,6 +509,54 @@ def stop_process(process: subprocess.Popen[bytes] | None) -> None:
             process.wait(timeout=3)
 
 
+def summarize_stability(
+    baseline_anonymous_kib: int,
+    drift_allowance_kib: int,
+    expected_rounds: int,
+    rounds: list[dict[str, object]],
+) -> dict[str, object]:
+    """Gate and summarize post-reclaim floors without hiding round detail."""
+    if len(rounds) != expected_rounds:
+        raise RuntimeError(
+            f"memory stability completed {len(rounds)}/{expected_rounds} rounds"
+        )
+    floors = [
+        round_sample["post_reclaim_process"]["anonymous_kib"]
+        for round_sample in rounds
+    ]
+    if any(value is None for value in floors):
+        raise RuntimeError("anonymous RSS is required for the stability gate")
+    observed_floors = [int(value) for value in floors]
+    ceiling = baseline_anonymous_kib + drift_allowance_kib
+    maximum_floor = max(observed_floors, default=baseline_anonymous_kib)
+    if maximum_floor > ceiling:
+        raise RuntimeError(
+            "post-reclaim anonymous RSS ratcheted above the stability ceiling: "
+            f"baseline={baseline_anonymous_kib} KiB "
+            f"allowance={drift_allowance_kib} KiB "
+            f"ceiling={ceiling} KiB floors={observed_floors}"
+        )
+    late_floors = observed_floors[-min(3, len(observed_floors)) :]
+    return {
+        "status": "passed",
+        "rounds": expected_rounds,
+        "baseline_anonymous_kib": baseline_anonymous_kib,
+        "drift_allowance_kib": drift_allowance_kib,
+        "ceiling_anonymous_kib": ceiling,
+        "post_reclaim_anonymous_kib": observed_floors,
+        "maximum_post_reclaim_anonymous_kib": maximum_floor,
+        "maximum_drift_kib": maximum_floor - baseline_anonymous_kib,
+        "final_drift_kib": (
+            observed_floors[-1] - baseline_anonymous_kib
+            if observed_floors
+            else 0
+        ),
+        "late_round_span_kib": (
+            max(late_floors) - min(late_floors) if late_floors else 0
+        ),
+    }
+
+
 def discover(args: argparse.Namespace) -> dict[str, object]:
     kernel = args.kernel.resolve(strict=True)
     if not os.access(kernel, os.X_OK):
@@ -517,6 +582,8 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
     reclaim_result: dict[str, object] | None = None
     post_reclaim_idle_samples: list[dict[str, object]] = []
     reuse_sample: dict[str, object] | None = None
+    stability_round_samples: list[dict[str, object]] = []
+    stability_result: dict[str, object] | None = None
     hosted_exit_status: int | None = None
     reached = 0
     last_successful = 0
@@ -543,6 +610,14 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             "reclaim_result": reclaim_result,
             "post_reclaim_idle_samples": post_reclaim_idle_samples,
             "reuse_sample": reuse_sample,
+            "stability_configuration": {
+                "rounds": args.stability_rounds,
+                "connections_per_round": args.stability_connections,
+                "drift_allowance_kib": args.stability_drift_kib,
+                "public_port_base": STABILITY_PUBLIC_PORT_BASE,
+            },
+            "stability_rounds": stability_round_samples,
+            "stability_result": stability_result,
             "service": final_stats,
         }
         if error is not None:
@@ -883,12 +958,215 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 "reclaim": asdict(reclaim_stats(control)),
             }
 
+            stability_baseline = post_reclaim_idle_samples[-1]["process"][
+                "anonymous_kib"
+            ]
+            if stability_baseline is None:
+                raise RuntimeError(
+                    "anonymous RSS is required for the multi-round stability gate"
+                )
+            stability_ceiling = stability_baseline + args.stability_drift_kib
+            for round_index in range(args.stability_rounds):
+                public_port = STABILITY_PUBLIC_PORT_BASE + round_index
+                round_started = time.monotonic()
+                pre_round_process = process_metrics(process.pid)
+                probe_count = min(args.active_connections, 64)
+                round_reclaim_samples: list[dict[str, object]] = []
+                round_sample: dict[str, object] = {
+                    "round": round_index + 1,
+                    "status": "running",
+                    "connections": args.stability_connections,
+                    "public_port": public_port,
+                    "pre_round_process": pre_round_process,
+                    "reclaim_samples": round_reclaim_samples,
+                }
+                stability_round_samples.append(round_sample)
+                round_probe: dict[str, object] | None = None
+                active_round_process: dict[str, object] | None = None
+                active_round_reclaim: ReclaimStats | None = None
+                active_round_service: ServiceStats | None = None
+
+                service_handle = start_capacity_service(
+                    control, backend_port, public_port
+                )
+                try:
+                    while len(clients) < args.stability_connections:
+                        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        client.settimeout(TIMEOUT)
+                        try:
+                            client.bind((HOST_IPV4, 0))
+                            client.connect((GUEST_IPV4, public_port))
+                        except BaseException:
+                            client.close()
+                            raise
+                        clients.append(client)
+                        if len(clients) % ACCEPT_BATCH == 0:
+                            drain_available_backends(
+                                process,
+                                backend_listener,
+                                backends,
+                                len(clients),
+                            )
+                    accept_backends(
+                        process,
+                        backend_listener,
+                        backends,
+                        args.stability_connections,
+                    )
+                    active_round_service = wait_service_active(
+                        process,
+                        control,
+                        service_handle,
+                        args.stability_connections,
+                    )
+                    round_probe = active_probe(
+                        clients, backends, probe_count
+                    )
+                    active_round_process = process_metrics(process.pid)
+                    active_round_reclaim = reclaim_stats(control)
+                finally:
+                    for connection in clients:
+                        close_socket(connection)
+                    clients.clear()
+                    for connection in backends:
+                        close_socket(connection)
+                    backends.clear()
+
+                if (
+                    active_round_process is None
+                    or active_round_reclaim is None
+                    or active_round_service is None
+                    or round_probe is None
+                ):
+                    raise RuntimeError(
+                        f"stability round {round_index + 1} did not reach load"
+                    )
+                round_sample.update(
+                    {
+                        "active_process": active_round_process,
+                        "active_service": asdict(active_round_service),
+                        "active_reclaim": asdict(active_round_reclaim),
+                        "active_probe": round_probe,
+                    }
+                )
+
+                response = control.transact(
+                    OP_SERVICE_STOP, service_handle, 30000
+                )
+                stopped_round_service = decode_service_stats(response.data)
+                service_handle = None
+                round_sample["stopped_service"] = asdict(
+                    stopped_round_service
+                )
+                if (
+                    stopped_round_service.active_connections != 0
+                    or stopped_round_service.max_connections != 0
+                    or stopped_round_service.rejected_connections
+                    or stopped_round_service.bridge_start_failures
+                    or stopped_round_service.public_to_backend_bytes
+                    < probe_count * PAYLOAD_BYTES
+                    or stopped_round_service.backend_to_public_bytes
+                    < probe_count * PAYLOAD_BYTES
+                ):
+                    raise RuntimeError(
+                        f"stability round {round_index + 1} did not stop "
+                        f"cleanly: {asdict(stopped_round_service)}"
+                    )
+                round_reclaim_started = time.monotonic()
+                post_reclaim_process: dict[str, object] | None = None
+                post_reclaim_stats: ReclaimStats | None = None
+                while (
+                    time.monotonic() - round_reclaim_started
+                    < RECLAIM_TIMEOUT
+                ):
+                    if process.poll() is not None:
+                        raise RuntimeError(
+                            "hosted kernel exited during stability reclaim "
+                            f"round {round_index + 1} with {process.returncode}"
+                        )
+                    observed_reclaim = reclaim_stats(control)
+                    observed_process = process_metrics(process.pid)
+                    round_reclaim_samples.append(
+                        {
+                            "elapsed_seconds": round(
+                                time.monotonic() - round_reclaim_started, 6
+                            ),
+                            "process": observed_process,
+                            "reclaim": asdict(observed_reclaim),
+                        }
+                    )
+                    observed_anonymous = observed_process["anonymous_kib"]
+                    if (
+                        observed_anonymous is not None
+                        and observed_anonymous <= stability_ceiling
+                        and observed_reclaim.successful_discard_bytes
+                        > active_round_reclaim.successful_discard_bytes
+                    ):
+                        post_reclaim_process = observed_process
+                        post_reclaim_stats = observed_reclaim
+                        break
+                    time.sleep(RECLAIM_SAMPLE_SECONDS)
+                if post_reclaim_process is None or post_reclaim_stats is None:
+                    raise RuntimeError(
+                        "multi-round reclaim did not return to the stability "
+                        f"ceiling in round {round_index + 1}: "
+                        f"ceiling={stability_ceiling} KiB "
+                        f"latest={round_reclaim_samples[-1] if round_reclaim_samples else None}"
+                    )
+
+                idle_before = process_metrics(process.pid)
+                time.sleep(0.5)
+                idle_after = process_metrics(process.pid)
+                post_idle_anonymous = idle_after["anonymous_kib"]
+                if (
+                    post_idle_anonymous is None
+                    or post_idle_anonymous > stability_ceiling
+                ):
+                    raise RuntimeError(
+                        "post-reclaim RSS exceeded the stability ceiling after "
+                        f"idle round {round_index + 1}: "
+                        f"ceiling={stability_ceiling} KiB observed={post_idle_anonymous}"
+                    )
+                round_sample.update(
+                    {
+                        "status": "passed",
+                        "elapsed_seconds": round(
+                            time.monotonic() - round_started, 6
+                        ),
+                        "post_reclaim_process": idle_after,
+                        "post_reclaim": asdict(post_reclaim_stats),
+                        "successful_discard_delta_bytes": (
+                            post_reclaim_stats.successful_discard_bytes
+                            - active_round_reclaim.successful_discard_bytes
+                        ),
+                        "idle_seconds": 0.5,
+                        "idle_cpu_ticks_delta": (
+                            idle_after["cpu_ticks"] - idle_before["cpu_ticks"]
+                        ),
+                    }
+                )
+
+            if args.stability_rounds:
+                stability_result = summarize_stability(
+                    stability_baseline,
+                    args.stability_drift_kib,
+                    args.stability_rounds,
+                    stability_round_samples,
+                )
+
         if (
             post_drain_sample is None
             or len(post_drain_idle_samples) != 2
             or reclaim_result is None
             or len(post_reclaim_idle_samples) != 2
             or reuse_sample is None
+            or (
+                args.stability_rounds
+                and (
+                    stability_result is None
+                    or len(stability_round_samples) != args.stability_rounds
+                )
+            )
         ):
             raise RuntimeError("hosted memory lifecycle did not complete")
 
@@ -935,9 +1213,21 @@ def main() -> int:
         or args.memory_mib < 128
         or args.active_connections < 1
         or args.active_connections > args.minimum
+        or args.stability_rounds < 0
+        or args.stability_rounds > 32
+        or args.stability_connections < 1
+        or args.stability_connections > BRIDGE_SESSION_LIMIT
+        or args.stability_drift_kib < 0
+        or STABILITY_PUBLIC_PORT_BASE + max(args.stability_rounds - 1, 0)
+        > 65535
+        or (
+            args.stability_rounds
+            and args.active_connections > args.stability_connections
+        )
     ):
         raise SystemExit(
-            "memory must be at least 128 MiB and connection counts must be positive"
+            "memory must be at least 128 MiB; connection, stability-round, "
+            "stability-drift, and public-port bounds must be valid"
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.boot_log.parent.mkdir(parents=True, exist_ok=True)
@@ -945,7 +1235,13 @@ def main() -> int:
     nofile_soft: int | None = None
     nofile_hard: int | None = None
     try:
-        nofile_soft, nofile_hard = ensure_driver_fd_capacity(args.levels[-1])
+        required_connections = max(
+            args.levels[-1],
+            args.stability_connections if args.stability_rounds else 0,
+        )
+        nofile_soft, nofile_hard = ensure_driver_fd_capacity(
+            required_connections
+        )
         report = discover(args)
         report["driver_nofile_soft"] = nofile_soft
         report["driver_nofile_hard"] = nofile_hard

@@ -973,6 +973,49 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
         self.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.mod)
 
+    @staticmethod
+    def stability_round(anonymous_kib: int) -> dict[str, object]:
+        return {
+            "post_reclaim_process": {"anonymous_kib": anonymous_kib}
+        }
+
+    def test_stability_summary_accepts_bounded_multi_round_floors(self) -> None:
+        result = self.mod.summarize_stability(
+            40 * 1024,
+            8 * 1024,
+            6,
+            [
+                self.stability_round(value * 1024)
+                for value in (41, 43, 42, 44, 43, 42)
+            ],
+        )
+
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["maximum_drift_kib"], 4 * 1024)
+        self.assertEqual(result["final_drift_kib"], 2 * 1024)
+        self.assertEqual(result["late_round_span_kib"], 2 * 1024)
+
+    def test_stability_summary_rejects_ratcheting_floor(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "ratcheted"):
+            self.mod.summarize_stability(
+                40 * 1024,
+                8 * 1024,
+                6,
+                [
+                    self.stability_round(value * 1024)
+                    for value in (42, 44, 46, 48, 49, 50)
+                ],
+            )
+
+    def test_stability_summary_requires_every_round(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "completed 2/3"):
+            self.mod.summarize_stability(
+                40 * 1024,
+                8 * 1024,
+                3,
+                [self.stability_round(41 * 1024)] * 2,
+            )
+
     def test_process_metrics_with_smaps_rollup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             proc_pid = Path(temp_dir)
