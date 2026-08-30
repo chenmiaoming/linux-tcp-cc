@@ -94,11 +94,15 @@ pure C from its first instruction.
 
 Startup remains transactional and ordered: validate arguments and the hosted
 ET_EXEC image, run read-only host prerequisite checks, create one exclusive
-nonpersistent TUN queue, install one exact DNAT resource, exec `vmlinux`,
-validate `HELLO`, attach L3, create/set-CC/verify/bind/listen, and finally
-transfer the listener to `SERVICE_START`. Failure unwinds only resources owned
-by that process, in reverse order. TUN closure removes its address and route;
-the named nftables table or iptables chain and jump are explicitly deleted.
+nonpersistent TUN queue, inspect existing project ownership markers, install
+one exact DNAT resource, exec `vmlinux`, validate `HELLO`, attach L3,
+create/set-CC/verify/bind/listen, and finally transfer the listener to
+`SERVICE_START`. Ownership markers contain PID, procfs start time, and TUN name
+so active instances can coexist while stale, PID-reused, or malformed state
+blocks mutation and requires explicit operator cleanup. Failure unwinds only
+resources owned by that process, in reverse order. TUN closure removes its
+address and route; the named nftables table or iptables chain and jump are
+explicitly deleted.
 
 There is no steady-state timer and no host-side accept/join loop. The native
 supervisor blocks indefinitely in edge-triggered epoll on two descriptors:

@@ -446,6 +446,99 @@ def assert_cleaned(
             )
 
 
+def prove_native_stale_ownership_guard(
+    router: str,
+    command: list[str],
+    tun_name: str,
+    backend: str,
+    iptables_variant: str,
+    suffix: str,
+) -> None:
+    """A dead ownership marker must block without leaking the temporary TUN."""
+
+    marker = "tcpcc.owner.v1 pid=2147483647 start=1 tun=tcpcc-dead0"
+    if backend in {"nft-lib", "nft-exec"}:
+        resource = f"tcpcc_dead_{suffix}"
+        cleanup = ns_command(router, "nft", "delete", "table", "ip", resource)
+        run(ns_command(router, "nft", "add", "table", "ip", resource))
+        try:
+            run(ns_command(router, "nft", "add", "chain", "ip", resource, "owned"))
+            run(
+                ns_command(
+                    router,
+                    "nft",
+                    "add",
+                    "rule",
+                    "ip",
+                    resource,
+                    "owned",
+                    "counter",
+                    "comment",
+                    marker,
+                )
+            )
+            completed = run(command, check=False)
+        finally:
+            run(cleanup, check=False)
+    else:
+        resource = f"TCPCC_DEAD_{suffix.upper()}"
+        firewall = iptables_variant
+        run(ns_command(router, firewall, "--wait", "-t", "nat", "-N", resource))
+        try:
+            run(
+                ns_command(
+                    router,
+                    firewall,
+                    "--wait",
+                    "-t",
+                    "nat",
+                    "-A",
+                    resource,
+                    "-m",
+                    "comment",
+                    "--comment",
+                    marker,
+                    "-j",
+                    "RETURN",
+                )
+            )
+            completed = run(command, check=False)
+        finally:
+            run(
+                ns_command(
+                    router,
+                    firewall,
+                    "--wait",
+                    "-t",
+                    "nat",
+                    "-F",
+                    resource,
+                ),
+                check=False,
+            )
+            run(
+                ns_command(
+                    router,
+                    firewall,
+                    "--wait",
+                    "-t",
+                    "nat",
+                    "-X",
+                    resource,
+                ),
+                check=False,
+            )
+    if completed.returncode == 0 or "stale tcpcc firewall resource" not in completed.stdout:
+        raise RuntimeError(
+            f"native stale ownership guard mismatch: {completed.stdout!r}"
+        )
+    if run(
+        ns_command(router, "ip", "link", "show", "dev", tun_name),
+        check=False,
+    ).returncode == 0:
+        raise RuntimeError("stale ownership rejection leaked its temporary TUN")
+
+
 def publish_artifacts(
     output_dir: Path | None,
     sources: tuple[Path, ...],
@@ -578,6 +671,14 @@ def integration(args: argparse.Namespace) -> int:
             )
             if args.firewall_backend == "iptables":
                 command.extend(("--iptables-variant", args.iptables_variant))
+            prove_native_stale_ownership_guard(
+                router,
+                command,
+                tun_name,
+                args.firewall_backend,
+                args.iptables_variant,
+                suffix,
+            )
             event_stream = event_log.open("wb")
             diagnostic_stream = diagnostic_log.open("wb")
             tcpcc_process = subprocess.Popen(

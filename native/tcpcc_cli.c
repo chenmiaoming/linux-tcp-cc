@@ -79,7 +79,9 @@ struct tcpcc_firewall {
 	char restore_command[48];
 	char listen[INET6_ADDRSTRLEN];
 	char guest[INET6_ADDRSTRLEN];
+	char tun_name[IFNAMSIZ];
 	uint16_t port;
+	unsigned long long owner_start;
 	bool installed;
 };
 
@@ -89,6 +91,7 @@ struct tcpcc_nft_api {
 	void (*ctx_free)(void *);
 	void (*buffer_output)(void *);
 	void (*buffer_error)(void *);
+	const char *(*get_output_buffer)(void *);
 	const char *(*get_error_buffer)(void *);
 	void (*set_dry_run)(void *, bool);
 	int (*run_buffer)(void *, const char *);
@@ -447,6 +450,59 @@ fail:
 	return -1;
 }
 
+static int tcpcc_capture(char *const argv[], char *output, size_t capacity)
+{
+	int pipefd[2];
+	pid_t child;
+	size_t used = 0;
+	int status;
+
+	if (!output || capacity < 2 || pipe2(pipefd, O_CLOEXEC))
+		return -1;
+	child = fork();
+	if (child < 0) {
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return -1;
+	}
+	if (!child) {
+		if (dup2(pipefd[1], STDOUT_FILENO) < 0)
+			_exit(126);
+		close(pipefd[0]);
+		close(pipefd[1]);
+		execvp(argv[0], argv);
+		_exit(errno == ENOENT ? 127 : 126);
+	}
+	close(pipefd[1]);
+	for (;;) {
+		ssize_t count = read(pipefd[0], output + used, capacity - used - 1);
+
+		if (count < 0 && errno == EINTR)
+			continue;
+		if (count < 0) {
+			close(pipefd[0]);
+			return -1;
+		}
+		if (!count)
+			break;
+		used += (size_t)count;
+		if (used == capacity - 1) {
+			close(pipefd[0]);
+			kill(child, SIGKILL);
+			while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+				;
+			return -1;
+		}
+	}
+	close(pipefd[0]);
+	output[used] = '\0';
+	while (waitpid(child, &status, 0) < 0) {
+		if (errno != EINTR)
+			return -1;
+	}
+	return WIFEXITED(status) && !WEXITSTATUS(status) ? 0 : -1;
+}
+
 static int tcpcc_read_file(const char *path, char *buffer, size_t size)
 {
 	int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -461,6 +517,69 @@ static int tcpcc_read_file(const char *path, char *buffer, size_t size)
 	buffer[count] = '\0';
 	while (count > 0 && (buffer[count - 1] == '\n' || buffer[count - 1] == '\r'))
 		buffer[--count] = '\0';
+	return 0;
+}
+
+static int tcpcc_process_start_time(pid_t pid, unsigned long long *start_time)
+{
+	char path[64];
+	char stat_line[4096];
+	char *cursor;
+	unsigned int field;
+
+	snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+	if (tcpcc_read_file(path, stat_line, sizeof(stat_line)))
+		return -1;
+	cursor = strrchr(stat_line, ')');
+	if (!cursor)
+		return -1;
+	cursor++;
+	/* cursor begins at field 3; starttime is field 22. */
+	for (field = 3; field <= 22; field++) {
+		char *end;
+
+		while (*cursor == ' ') cursor++;
+		if (!*cursor)
+			return -1;
+		end = cursor + strcspn(cursor, " ");
+		if (field == 22) {
+			char saved = *end;
+			char *number_end;
+
+			*end = '\0';
+			errno = 0;
+			*start_time = strtoull(cursor, &number_end, 10);
+			*end = saved;
+			return errno || number_end != end || !*start_time ? -1 : 0;
+		}
+		cursor = end;
+	}
+	return -1;
+}
+
+static int tcpcc_check_ownership_text(const char *text)
+{
+	const char *cursor = text;
+	const char prefix[] = "tcpcc.owner.v1";
+
+	while ((cursor = strstr(cursor, prefix)) != NULL) {
+		long pid;
+		unsigned long long expected;
+		unsigned long long actual;
+		char tun_name[IFNAMSIZ];
+		int consumed = 0;
+
+		if (sscanf(cursor,
+			   "tcpcc.owner.v1 pid=%ld start=%llu tun=%15[A-Za-z0-9_.-]%n",
+			   &pid, &expected, tun_name, &consumed) != 3 || pid < 1 ||
+		    expected < 1 || consumed < 1 ||
+		    !tcpcc_valid_name(tun_name, IFNAMSIZ - 1, false)) {
+			return tcpcc_error("malformed tcpcc firewall ownership marker blocks startup");
+		}
+		if (tcpcc_process_start_time((pid_t)pid, &actual) || actual != expected)
+			return tcpcc_error("stale tcpcc firewall resource blocks startup; inspect and remove it explicitly");
+		cursor += consumed;
+	}
 	return 0;
 }
 
@@ -616,6 +735,7 @@ static int tcpcc_nft_load(struct tcpcc_nft_api *api)
 	TCPCC_NFT_SYMBOL(ctx_free, "nft_ctx_free");
 	TCPCC_NFT_SYMBOL(buffer_output, "nft_ctx_buffer_output");
 	TCPCC_NFT_SYMBOL(buffer_error, "nft_ctx_buffer_error");
+	TCPCC_NFT_SYMBOL(get_output_buffer, "nft_ctx_get_output_buffer");
 	TCPCC_NFT_SYMBOL(get_error_buffer, "nft_ctx_get_error_buffer");
 	TCPCC_NFT_SYMBOL(set_dry_run, "nft_ctx_set_dry_run");
 	TCPCC_NFT_SYMBOL(run_buffer, "nft_run_cmd_from_buffer");
@@ -654,6 +774,35 @@ static int tcpcc_nft_lib_run(const char *batch, bool dry_run)
 	return result ? -1 : 0;
 }
 
+static int tcpcc_nft_lib_capture(const char *command, char *output,
+				 size_t capacity)
+{
+	struct tcpcc_nft_api api;
+	const char *captured;
+	void *context;
+	int result = -1;
+
+	if (tcpcc_nft_load(&api))
+		return tcpcc_error("libnftables is unavailable or lacks the required API");
+	context = api.ctx_new(0);
+	if (!context)
+		goto close_library;
+	api.buffer_output(context);
+	api.buffer_error(context);
+	if (api.run_buffer(context, command))
+		goto close_context;
+	captured = api.get_output_buffer(context);
+	if (!captured || strlen(captured) >= capacity)
+		goto close_context;
+	strcpy(output, captured);
+	result = 0;
+close_context:
+	api.ctx_free(context);
+close_library:
+	dlclose(api.library);
+	return result;
+}
+
 static int tcpcc_nft_exec_run(const char *batch, bool dry_run, bool quiet)
 {
 	char *check[] = { "nft", "--check", "--file", "-", NULL };
@@ -680,10 +829,11 @@ static int tcpcc_firewall_nft(struct tcpcc_firewall *firewall, bool dry_run)
 		"create table %s %s\n"
 		"add chain %s %s prerouting { type nat hook prerouting priority dstnat; policy accept; }\n"
 		"add rule %s %s prerouting %s daddr %s tcp dport %u counter dnat to %s "
-		"comment \"tcpcc.owner.v1 pid=%ld start=1 tun=native\"\n",
+		"comment \"tcpcc.owner.v1 pid=%ld start=%llu tun=%s\"\n",
 		family, firewall->resource, family, firewall->resource,
 		family, firewall->resource, selector, firewall->listen,
-		firewall->port, destination, (long)getpid());
+		firewall->port, destination, (long)getpid(), firewall->owner_start,
+		firewall->tun_name);
 	if (length < 0 || length >= (int)sizeof(batch))
 		return tcpcc_error("nftables policy exceeded internal size limit");
 	if (firewall->kind == TCPCC_FIREWALL_NFT_LIB)
@@ -717,8 +867,8 @@ static int tcpcc_firewall_install_iptables(struct tcpcc_firewall *firewall)
 	else
 		snprintf(destination, sizeof(destination), "%s:%u", firewall->guest,
 			 firewall->port);
-	snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=1 tun=native",
-		 (long)getpid());
+	snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=%llu tun=%s",
+		 (long)getpid(), firewall->owner_start, firewall->tun_name);
 	if (tcpcc_run(create, NULL, false))
 		return -1;
 	if (tcpcc_run(dnat, NULL, false) || tcpcc_run(jump, NULL, false)) {
@@ -737,6 +887,8 @@ static int tcpcc_firewall_install_iptables(struct tcpcc_firewall *firewall)
 static int tcpcc_firewall_install(const struct tcpcc_cli_config *config,
 				  struct tcpcc_firewall *firewall)
 {
+	char ownership[1024 * 1024];
+	char family[4];
 	char random[13];
 
 	memset(firewall, 0, sizeof(*firewall));
@@ -747,6 +899,9 @@ static int tcpcc_firewall_install(const struct tcpcc_cli_config *config,
 	firewall->port = config->listen.port;
 	strcpy(firewall->listen, config->listen.address);
 	strcpy(firewall->guest, config->tun_guest);
+	strcpy(firewall->tun_name, config->tun_name);
+	if (tcpcc_process_start_time(getpid(), &firewall->owner_start))
+		return tcpcc_error("cannot read the native supervisor process identity");
 	if (config->firewall == TCPCC_FIREWALL_IPTABLES) {
 		snprintf(firewall->resource, sizeof(firewall->resource), "TCPCC_%s", random);
 		if (config->listen.version == 4) {
@@ -755,10 +910,35 @@ static int tcpcc_firewall_install(const struct tcpcc_cli_config *config,
 			snprintf(firewall->command, sizeof(firewall->command), "ip6tables%s",
 				 config->iptables_variant + strlen("iptables"));
 		}
+		{
+			char save_command[48];
+			char *save[] = { save_command, "-t", "nat", NULL };
+
+			snprintf(save_command, sizeof(save_command), "%s-save",
+				 firewall->command);
+			if (tcpcc_capture(save, ownership, sizeof(ownership)) ||
+			    tcpcc_check_ownership_text(ownership))
+				return tcpcc_error("iptables ownership inspection failed");
+		}
 		if (tcpcc_firewall_install_iptables(firewall))
 			return tcpcc_error("installing iptables DNAT policy failed");
 	} else {
 		snprintf(firewall->resource, sizeof(firewall->resource), "tcpcc_%s", random);
+		strcpy(family, config->listen.version == 4 ? "ip" : "ip6");
+		if (config->firewall == TCPCC_FIREWALL_NFT_LIB) {
+			char command[32];
+
+			snprintf(command, sizeof(command), "list ruleset %s\n", family);
+			if (tcpcc_nft_lib_capture(command, ownership, sizeof(ownership)) ||
+			    tcpcc_check_ownership_text(ownership))
+				return tcpcc_error("nftables ownership inspection failed");
+		} else {
+			char *list[] = { "nft", "list", "ruleset", family, NULL };
+
+			if (tcpcc_capture(list, ownership, sizeof(ownership)) ||
+			    tcpcc_check_ownership_text(ownership))
+				return tcpcc_error("nftables ownership inspection failed");
+		}
 		if (tcpcc_firewall_nft(firewall, true) ||
 		    tcpcc_firewall_nft(firewall, false))
 			return tcpcc_error("installing nftables DNAT policy failed");
@@ -798,8 +978,8 @@ static int tcpcc_firewall_close(struct tcpcc_firewall *firewall)
 		snprintf(port, sizeof(port), "%u", firewall->port);
 		snprintf(prefix, sizeof(prefix), "%s/%u", firewall->listen,
 			 firewall->version == 4 ? 32U : 128U);
-		snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=1 tun=native",
-			 (long)getpid());
+		snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=%llu tun=%s",
+			 (long)getpid(), firewall->owner_start, firewall->tun_name);
 		if (tcpcc_run(jump, NULL, true)) result = -1;
 		if (tcpcc_run(flush, NULL, true)) result = -1;
 		if (tcpcc_run(remove, NULL, true)) result = -1;
