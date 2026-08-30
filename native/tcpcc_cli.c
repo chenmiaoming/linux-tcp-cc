@@ -956,6 +956,7 @@ static void tcpcc_emit_stats(const char *event,
 	       "\"active_connections\":%u,\"backend_to_public_bytes\":%llu,"
 	       "\"bridge_start_failures\":%u,\"completed_connections\":%llu,"
 	       "\"event\":\"%s\",\"grace_period\":%.3f,"
+	       "\"last_error\":%d,"
 	       "\"max_connections\":%u,\"peak_connections\":%u,"
 	       "\"public_to_backend_bytes\":%llu,\"rejected_connections\":%llu,"
 	       "\"schema\":\"%s\",\"terminal_failures\":%u}\n",
@@ -965,7 +966,8 @@ static void tcpcc_emit_stats(const char *event,
 	       (unsigned long long)stats->backend_to_public_bytes,
 	       stats->bridge_start_failures,
 	       (unsigned long long)stats->completed_connections, event,
-	       (double)config->grace_ms / 1000.0, stats->max_connections,
+	       (double)config->grace_ms / 1000.0, stats->last_error,
+	       stats->max_connections,
 	       stats->peak_connections,
 	       (unsigned long long)stats->public_to_backend_bytes,
 	       (unsigned long long)stats->rejected_connections,

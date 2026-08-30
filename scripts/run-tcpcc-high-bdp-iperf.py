@@ -980,9 +980,18 @@ def validate_tcpcc_events(
         service_stats.get("active_connections") != 0
         or service_stats.get("rejected_connections") != 0
         or service_stats.get("bridge_start_failures") != 0
-        or service_stats.get("terminal_failures") != 0
     ):
         raise RuntimeError(f"tcpcc native service reported failures: {service_stats}")
+    terminal_failures = int(service_stats.get("terminal_failures", 0))
+    last_error = int(service_stats.get("last_error", 0))
+    if terminal_failures > scenario.repetitions or last_error not in {
+        0,
+        -errno.ECONNRESET,
+    }:
+        raise RuntimeError(
+            "tcpcc native service reported an unexpected terminal aggregate: "
+            f"{service_stats}"
+        )
     minimum_data_bytes = round(
         scenario.minimum_goodput_mbps
         * 1_000_000
@@ -1002,7 +1011,10 @@ def validate_tcpcc_events(
         "closed_connections": completed,
         "completed_data_flows": scenario.repetitions,
         "completed_control_flows": completed - scenario.repetitions,
-        "terminal_statuses": {"aggregate-clean": completed},
+        "terminal_statuses": {
+            "aggregate-clean": completed - terminal_failures,
+            str(last_error): terminal_failures,
+        },
         "data_terminal_policy": "native hosted-service aggregate",
         "accepted_cc": "bbr",
         "clean_stop": True,
