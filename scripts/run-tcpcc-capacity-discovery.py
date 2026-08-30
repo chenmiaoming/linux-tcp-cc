@@ -30,6 +30,7 @@ from tcpcc_control import (  # noqa: E402
     OP_GET_CC,
     OP_L3_ATTACH,
     OP_LISTEN,
+    OP_RECLAIM_STATS,
     OP_SERVICE_START,
     OP_SERVICE_STATS,
     OP_SERVICE_STOP,
@@ -37,8 +38,11 @@ from tcpcc_control import (  # noqa: E402
     OP_SHUTDOWN,
     OP_SOCKET,
     ControlClient,
+    ReclaimStats,
+    RECLAIM_STATE_ACTIVE,
     ServiceStats,
     decode_service_stats,
+    decode_reclaim_stats,
     encode_service_config,
 )
 
@@ -58,6 +62,9 @@ IFF_NO_PI = 0x1000
 IFF_TUN_EXCL = 0x8000
 IFREQ_SIZE = 40
 TIMEOUT = 30.0
+RECLAIM_TIMEOUT = 45.0
+RECLAIM_SAMPLE_SECONDS = 1.0
+RECLAIM_MIN_LOAD_DELTA_KIB = 16 * 1024
 PAYLOAD_BYTES = 256
 BUFFER_HIGH_WATER = re.compile(
     r"M9\.4 bridge buffer high-water ([0-9]+)/262144 bytes, current ([0-9]+)"
@@ -174,6 +181,18 @@ def create_tun(name: str) -> int:
 def service_stats(control: ControlClient, handle: int) -> ServiceStats:
     response = control.transact(OP_SERVICE_STATS, handle)
     return decode_service_stats(response.data)
+
+
+def reclaim_stats(control: ControlClient) -> ReclaimStats:
+    response = control.transact(OP_RECLAIM_STATS)
+    stats = decode_reclaim_stats(response.data)
+    if (
+        stats.state != RECLAIM_STATE_ACTIVE
+        or stats.advisory_failures
+        or stats.last_error
+    ):
+        raise RuntimeError(f"guest-free page reclaim is unhealthy: {asdict(stats)}")
+    return stats
 
 
 def start_capacity_service(
@@ -494,6 +513,9 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
     ready_sample: dict[str, object] | None = None
     post_drain_sample: dict[str, object] | None = None
     post_drain_idle_samples: list[dict[str, object]] = []
+    reclaim_samples: list[dict[str, object]] = []
+    reclaim_result: dict[str, object] | None = None
+    post_reclaim_idle_samples: list[dict[str, object]] = []
     reuse_sample: dict[str, object] | None = None
     hosted_exit_status: int | None = None
     reached = 0
@@ -517,6 +539,9 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             "idle_sample": idle_result,
             "post_drain_sample": post_drain_sample,
             "post_drain_idle_samples": post_drain_idle_samples,
+            "reclaim_samples": reclaim_samples,
+            "reclaim_result": reclaim_result,
+            "post_reclaim_idle_samples": post_reclaim_idle_samples,
             "reuse_sample": reuse_sample,
             "service": final_stats,
         }
@@ -565,6 +590,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
         ready_sample = {
             "service": asdict(ready_stats),
             "process": process_metrics(process.pid),
+            "reclaim": asdict(reclaim_stats(control)),
         }
 
         for target in args.levels:
@@ -624,6 +650,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                     "elapsed_seconds": round(time.monotonic() - stage_started, 6),
                     "service": asdict(stats),
                     "process": process_metrics(process.pid),
+                    "reclaim": asdict(reclaim_stats(control)),
                     "idle_cpu_ticks_delta": idle_result["cpu_ticks_delta"],
                 }
             )
@@ -678,6 +705,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             post_drain_sample = {
                 "service": final_stats,
                 "process": process_metrics(process.pid),
+                "reclaim": asdict(reclaim_stats(control)),
             }
 
             for window_index in range(2):
@@ -693,6 +721,92 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                             - window_before["cpu_ticks"]
                         ),
                         "process": window_after,
+                        "reclaim": asdict(reclaim_stats(control)),
+                    }
+                )
+
+            ready_anonymous = ready_sample["process"]["anonymous_kib"]
+            stage_anonymous = [
+                stage["process"]["anonymous_kib"] for stage in stages
+            ]
+            if ready_anonymous is None or any(
+                value is None for value in stage_anonymous
+            ):
+                raise RuntimeError(
+                    "anonymous RSS is required for the M10.3 reclaim gate"
+                )
+            peak_anonymous = max(stage_anonymous)
+            load_delta = peak_anonymous - ready_anonymous
+            if load_delta < RECLAIM_MIN_LOAD_DELTA_KIB:
+                raise RuntimeError(
+                    "capacity load did not create the minimum anonymous-RSS "
+                    f"delta: {load_delta} < {RECLAIM_MIN_LOAD_DELTA_KIB} KiB"
+                )
+            target_anonymous = ready_anonymous + load_delta // 2
+            pre_drain_discard = stages[-1]["reclaim"][
+                "successful_discard_bytes"
+            ]
+            reclaim_started = time.monotonic()
+            reclaim_deadline = reclaim_started + RECLAIM_TIMEOUT
+            while time.monotonic() < reclaim_deadline:
+                observed_reclaim = reclaim_stats(control)
+                observed_process = process_metrics(process.pid)
+                sample = {
+                    "elapsed_seconds": round(
+                        time.monotonic() - reclaim_started, 6
+                    ),
+                    "process": observed_process,
+                    "reclaim": asdict(observed_reclaim),
+                }
+                reclaim_samples.append(sample)
+                observed_anonymous = observed_process["anonymous_kib"]
+                if (
+                    observed_anonymous is not None
+                    and observed_anonymous <= target_anonymous
+                    and observed_reclaim.successful_discard_bytes
+                    > pre_drain_discard
+                ):
+                    reclaim_result = {
+                        "status": "passed",
+                        "ready_anonymous_kib": ready_anonymous,
+                        "peak_anonymous_kib": peak_anonymous,
+                        "load_delta_kib": load_delta,
+                        "target_anonymous_kib": target_anonymous,
+                        "observed_anonymous_kib": observed_anonymous,
+                        "recovered_load_delta_ratio": round(
+                            (peak_anonymous - observed_anonymous) / load_delta,
+                            6,
+                        ),
+                        "successful_discard_delta_bytes": (
+                            observed_reclaim.successful_discard_bytes
+                            - pre_drain_discard
+                        ),
+                        "elapsed_seconds": sample["elapsed_seconds"],
+                    }
+                    break
+                time.sleep(RECLAIM_SAMPLE_SECONDS)
+            if reclaim_result is None:
+                latest = reclaim_samples[-1] if reclaim_samples else None
+                raise RuntimeError(
+                    "guest-free page reclaim did not recover half of the "
+                    f"load-induced anonymous RSS within {RECLAIM_TIMEOUT}s: "
+                    f"target={target_anonymous} KiB latest={latest}"
+                )
+
+            for window_index in range(2):
+                window_before = process_metrics(process.pid)
+                time.sleep(0.5)
+                window_after = process_metrics(process.pid)
+                post_reclaim_idle_samples.append(
+                    {
+                        "window": window_index + 1,
+                        "seconds": 0.5,
+                        "cpu_ticks_delta": (
+                            window_after["cpu_ticks"]
+                            - window_before["cpu_ticks"]
+                        ),
+                        "process": window_after,
+                        "reclaim": asdict(reclaim_stats(control)),
                     }
                 )
 
@@ -766,11 +880,14 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 "active_service": reuse_active_stats,
                 "stopped_service": reuse_stop_stats,
                 "process": reuse_metrics,
+                "reclaim": asdict(reclaim_stats(control)),
             }
 
         if (
             post_drain_sample is None
             or len(post_drain_idle_samples) != 2
+            or reclaim_result is None
+            or len(post_reclaim_idle_samples) != 2
             or reuse_sample is None
         ):
             raise RuntimeError("hosted memory lifecycle did not complete")

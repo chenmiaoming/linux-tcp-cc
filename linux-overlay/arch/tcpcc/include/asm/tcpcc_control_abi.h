@@ -46,6 +46,7 @@ enum tcpcc_control_op {
 	TCPCC_CONTROL_SOCKET_IP,
 	TCPCC_CONTROL_BIND_IP,
 	TCPCC_CONTROL_L3_ATTACH_IP,
+	TCPCC_CONTROL_RECLAIM_STATS,
 };
 
 /* Capabilities returned by TCPCC_CONTROL_HELLO. */
@@ -53,6 +54,7 @@ enum tcpcc_control_op {
 #define TCPCC_CONTROL_FEATURE_HOSTED_SERVICE (1U << 1)
 #define TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS (1U << 2)
 #define TCPCC_CONTROL_FEATURE_IP_ENDPOINTS  (1U << 3)
+#define TCPCC_CONTROL_FEATURE_PAGE_RECLAIM  (1U << 4)
 
 /* Project values deliberately match the IP version, not Linux AF_* values. */
 #define TCPCC_CONTROL_IP_VERSION_4 4U
@@ -197,6 +199,28 @@ struct tcpcc_control_service_stats {
 	__u32 state;
 	__s32 last_error;
 	__u32 reserved[3];
+};
+
+enum tcpcc_control_reclaim_state {
+	TCPCC_CONTROL_RECLAIM_STARTING = 0,
+	TCPCC_CONTROL_RECLAIM_ACTIVE,
+	TCPCC_CONTROL_RECLAIM_UNSUPPORTED,
+	TCPCC_CONTROL_RECLAIM_FAILED,
+};
+
+/* Fixed 72-byte aggregate snapshot; counters are monotonic for one process. */
+struct tcpcc_control_reclaim_stats {
+	__u64 reported_bytes;
+	__u64 successful_discard_bytes;
+	__u64 batches;
+	__u64 ranges;
+	__u64 failed_bytes;
+	__u64 advisory_failures;
+	__u32 state;
+	__s32 last_error;
+	__u32 minimum_order;
+	__u32 maximum_range_bytes;
+	__u32 reserved[2];
 };
 
 #endif /* _ASM_TCPCC_CONTROL_ABI_H */

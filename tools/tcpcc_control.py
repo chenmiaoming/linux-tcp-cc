@@ -46,6 +46,12 @@ OP_SERVICE_STOP = 26
 OP_SOCKET_IP = 27
 OP_BIND_IP = 28
 OP_L3_ATTACH_IP = 29
+OP_RECLAIM_STATS = 30
+
+RECLAIM_STATE_STARTING = 0
+RECLAIM_STATE_ACTIVE = 1
+RECLAIM_STATE_UNSUPPORTED = 2
+RECLAIM_STATE_FAILED = 3
 
 OP_NAMES = {
     OP_SOCKET: "socket",
@@ -77,6 +83,7 @@ OP_NAMES = {
     OP_SOCKET_IP: "socket-ip",
     OP_BIND_IP: "bind-ip",
     OP_L3_ATTACH_IP: "l3-attach-ip",
+    OP_RECLAIM_STATS: "reclaim-stats",
 }
 
 REQUEST = struct.Struct("<IHHiIII256s")
@@ -84,6 +91,7 @@ RESPONSE = struct.Struct("<IHHiiI256s")
 BRIDGE_RESULT = struct.Struct("<QQQIIIIIIIiII")
 SERVICE_CONFIG = struct.Struct("<IHHII")
 SERVICE_STATS = struct.Struct("<QQQQQIIIIIIIIiIII")
+RECLAIM_STATS = struct.Struct("<QQQQQQIiIIII")
 IP_ENDPOINT = struct.Struct("<B3x16sHH")
 L3_CONFIG = struct.Struct("<B3x16sB3x")
 
@@ -152,6 +160,20 @@ class ServiceStats:
     terminal_failures: int
     state: int
     last_error: int
+
+
+@dataclass(frozen=True)
+class ReclaimStats:
+    reported_bytes: int
+    successful_discard_bytes: int
+    batches: int
+    ranges: int
+    failed_bytes: int
+    advisory_failures: int
+    state: int
+    last_error: int
+    minimum_order: int
+    maximum_range_bytes: int
 
 
 def _bounded_integer(
@@ -356,6 +378,34 @@ def decode_service_stats(data: bytes) -> ServiceStats:
             f"service stats contain positive last error {values[13]}"
         )
     return ServiceStats(*values[:14])
+
+
+def decode_reclaim_stats(data: bytes) -> ReclaimStats:
+    """Decode one aggregate guest-free page reclaim snapshot."""
+
+    if not isinstance(data, bytes) or len(data) != RECLAIM_STATS.size:
+        length = len(data) if isinstance(data, bytes) else "non-bytes"
+        raise ControlProtocolError(
+            f"reclaim stats have size {length}, expected {RECLAIM_STATS.size}"
+        )
+    values = RECLAIM_STATS.unpack(data)
+    if any(values[-2:]):
+        raise ControlProtocolError(
+            f"reclaim stats reserved fields are {values[-2:]}"
+        )
+    if values[6] > 3:
+        raise ControlProtocolError(
+            f"reclaim stats contain unknown state {values[6]}"
+        )
+    if values[7] > 0:
+        raise ControlProtocolError(
+            f"reclaim stats contain positive last error {values[7]}"
+        )
+    if values[8] > 63 or not values[9]:
+        raise ControlProtocolError(
+            "reclaim stats contain invalid range policy"
+        )
+    return ReclaimStats(*values[:10])
 
 
 def read_exact_fd(

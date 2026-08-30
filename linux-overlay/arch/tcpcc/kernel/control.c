@@ -22,6 +22,7 @@
 #include <asm/bridge.h>
 #include <asm/host.h>
 #include <asm/l3net.h>
+#include <asm/reclaim.h>
 #include <asm/service.h>
 #include <asm/tcpcc_control_abi.h>
 
@@ -918,7 +919,8 @@ static int tcpcc_control_hello(const struct tcpcc_control_request *request,
 		.feature_bits = TCPCC_CONTROL_FEATURE_BRIDGE_RESULT |
 				TCPCC_CONTROL_FEATURE_HOSTED_SERVICE |
 				TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS |
-				TCPCC_CONTROL_FEATURE_IP_ENDPOINTS,
+				TCPCC_CONTROL_FEATURE_IP_ENDPOINTS |
+				TCPCC_CONTROL_FEATURE_PAGE_RECLAIM,
 		.session_limit = TCPCC_BRIDGE_SESSION_LIMIT,
 		.bridge_buffer_limit = TCPCC_BRIDGE_BUFFER_LIMIT,
 		.bridge_total_buffer_limit = TCPCC_BRIDGE_TOTAL_BUFFER_LIMIT,
@@ -1023,6 +1025,22 @@ static int tcpcc_control_service_stop(
 	return 0;
 }
 
+static int tcpcc_control_reclaim_stats(
+				const struct tcpcc_control_request *request,
+				struct tcpcc_control_response *response)
+{
+	struct tcpcc_control_reclaim_stats stats = { };
+
+	BUILD_BUG_ON(sizeof(stats) != 72);
+	BUILD_BUG_ON(sizeof(stats) > TCPCC_CONTROL_MAX_PAYLOAD);
+	if (request->handle || request->arg0 || request->arg1 || request->length)
+		return -EINVAL;
+	tcpcc_reclaim_get_stats(&stats);
+	memcpy(response->data, &stats, sizeof(stats));
+	response->length = sizeof(stats);
+	return 0;
+}
+
 static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 				 struct tcpcc_control_response *response)
 {
@@ -1085,6 +1103,8 @@ static int tcpcc_control_execute(const struct tcpcc_control_request *request,
 		return tcpcc_control_bind_ip(request);
 	case TCPCC_CONTROL_L3_ATTACH_IP:
 		return tcpcc_control_l3_attach_ip(request, response);
+	case TCPCC_CONTROL_RECLAIM_STATS:
+		return tcpcc_control_reclaim_stats(request, response);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -1167,6 +1187,7 @@ static int __init tcpcc_control_selftest(void)
 	BUILD_BUG_ON(sizeof(struct tcpcc_control_hello) != 88);
 	BUILD_BUG_ON(sizeof(struct tcpcc_control_service_config) != 16);
 	BUILD_BUG_ON(sizeof(struct tcpcc_control_service_stats) != 88);
+	BUILD_BUG_ON(sizeof(struct tcpcc_control_reclaim_stats) != 72);
 
 	init_completion(&tcpcc_control_request_ready);
 	init_completion(&tcpcc_control_finished);

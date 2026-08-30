@@ -13,6 +13,7 @@
 #define TCPCC_HOST_NR_WRITE           1
 #define TCPCC_HOST_NR_CLOSE           3
 #define TCPCC_HOST_NR_MMAP            9
+#define TCPCC_HOST_NR_MADVISE        28
 #define TCPCC_HOST_NR_SOCKET          41
 #define TCPCC_HOST_NR_CONNECT         42
 #define TCPCC_HOST_NR_SENDTO          44
@@ -360,6 +361,19 @@ void *__init tcpcc_host_map_anon(size_t len)
 		return NULL;
 
 	return (void *)ret;
+}
+
+int tcpcc_host_discard_pages(void *address, size_t len)
+{
+	long ret;
+
+	do {
+		ret = tcpcc_host_syscall3(TCPCC_HOST_NR_MADVISE,
+					 (long)address, (long)len,
+					 TCPCC_HOST_MADV_DONTNEED);
+	} while (ret == -TCPCC_HOST_EINTR);
+
+	return ret < 0 ? (int)ret : 0;
 }
 
 u64 tcpcc_host_monotonic_ns(void)

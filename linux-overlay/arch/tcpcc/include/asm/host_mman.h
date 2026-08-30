@@ -7,6 +7,9 @@
 #define TCPCC_HOST_MAP_ANONYMOUS		0x20
 #define TCPCC_HOST_MAP_NORESERVE	0x4000
 
+/* Linux x86-64 host madvise(2) advice used for guest-free pages. */
+#define TCPCC_HOST_MADV_DONTNEED	4
+
 #define TCPCC_HOST_MAP_ANON_FLAGS	(TCPCC_HOST_MAP_PRIVATE | \
 					 TCPCC_HOST_MAP_ANONYMOUS | \
 					 TCPCC_HOST_MAP_NORESERVE)

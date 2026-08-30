@@ -1,11 +1,11 @@
-# M10 Hosted Memory Lifecycle and Demand-Backed Reservation
+# M10 Hosted Memory Lifecycle, Demand-Backed Reservation, and Reclaim
 
 M10.1 measures the complete memory lifecycle of the single hosted `vmlinux`,
-and M10.2 makes its host commit-accounting intent explicit. Anonymous mappings
-were already demand-paged: host resident memory (RSS) grows with pages actually
-touched by the guest rather than with the configured guest-memory capacity.
-Returning guest-free pages to the host is separate M10.3 work and is not
-implemented here.
+M10.2 makes its host commit-accounting intent explicit, and M10.3 returns pages
+that the guest buddy allocator has proved free to the host. Anonymous mappings
+remain demand-paged: host resident memory (RSS) grows with pages actually
+touched by the guest rather than with the configured guest-memory capacity,
+and can now fall again after a workload spike.
 
 ## Memory Dimensions and Separation of Concerns
 
@@ -42,6 +42,7 @@ compile-time contract test so the production call and its test cannot silently
 use different flag definitions.
 
 Key invariants:
+
 - The arena mapping is private, anonymous, contiguous, and read/write.
 - `MAP_NORESERVE` suppresses reservation accounting when the host permits
   overcommit (`vm.overcommit_memory=0` or `1`). Linux deliberately ignores the
@@ -50,6 +51,77 @@ Key invariants:
 - No eager prefaulting (`MAP_POPULATE`) or arena-wide zeroing is performed.
 - Host physical pages are faulted in lazily on demand when the hosted kernel
   allocates and writes to them.
+
+## M10.3: Safe Batched Guest-Free Page Reclaim
+
+`CONFIG_PAGE_REPORTING` is the ownership boundary. Its delayed work isolates
+pages from the buddy free lists before invoking the tcpcc provider, and puts
+them back only after the provider returns. The provider therefore never
+infers page ownership from host RSS, access recency, bridge counters, or TCP
+state. PFN zero and every reserved or allocated page are absent from the buddy
+free lists and cannot reach the callback; tcpcc also checks every supplied PFN
+against the managed arena before crossing the host boundary.
+
+The reporting provider in `arch/tcpcc/kernel/reclaim.c` has these properties:
+
+- reporting starts two seconds after a qualifying free event through the
+  generic freezable workqueue, so host syscalls run in sleepable process
+  context rather than IRQ, softirq, spinlock, or allocator atomic context;
+- the minimum reporting order is 3 (32 KiB), avoiding an advisory call for
+  every order-0 page;
+- each generic batch contains at most 32 entries; tcpcc sorts those entries by
+  guest PFN, coalesces adjacent ranges, and caps each host advisory call at
+  16 MiB;
+- the provider calls `madvise(MADV_DONTNEED)` only on ranges isolated by page
+  reporting. For a private anonymous host mapping, a later guest access faults
+  in a zero-filled page, preserving allocator isolation and normal Linux page
+  reuse semantics;
+- the generic `PageReported` bit suppresses repeat discard of an unchanged
+  free block and is cleared by the buddy allocator when that block is
+  allocated again;
+- `EINTR` is retried inside the host wrapper. Any other advisory error is
+  recorded once and asynchronously unregisters the provider. `ENOSYS` and
+  `EINVAL` are classified as unsupported; other failures are classified as
+  failed. In every case memory remains valid guest RAM and TCP service
+  continues without a retry loop.
+
+The architecture selects exactly one additional production symbol,
+`CONFIG_PAGE_REPORTING`. The existing CI ceilings remain unchanged at 112
+enabled symbols, a 3.25 MiB `vmlinux`, and no `.eh_frame`; M10.3 does not raise
+those gates.
+
+The append-only `RECLAIM_STATS` control operation exposes monotonic aggregate
+counters rather than per-page or per-flow events:
+
+- bytes supplied by page reporting;
+- bytes successfully discarded by the host;
+- callback batches and bounded host ranges;
+- bytes in the failed callback, advisory failure count, last error, and state;
+- configured minimum order and maximum host range size.
+
+These counters distinguish a successful host discard from an RSS fluctuation.
+They do not claim that all guest TCP objects have reached their terminal state.
+
+### Reclaim CI Gate
+
+The 512 MiB / 16,384-flow lifecycle job retains the M10.1 samples and adds a
+bounded 45-second reclaim observation after synchronous bridge teardown. It
+requires all of the following:
+
+1. the load grows anonymous RSS by at least 16 MiB over the ready sample;
+2. successful discard bytes increase after the final active-flow sample;
+3. anonymous RSS falls to at most the ready value plus half of the measured
+   load-induced delta;
+4. two post-reclaim idle samples are recorded;
+5. 64 fresh bidirectional IPv4 flows pass through a new listener in the same
+   process, while IPv6 public-endpoint CI executes a second verified flow after
+   crossing the generic page-reporting delay.
+
+The report publishes every one-second reclaim sample, its computed target,
+discard delta, elapsed time, and recovered-delta ratio. The ratio is tied to
+the same process's ready and peak samples rather than an exact runner-specific
+RSS number. The gate does not require RSS to return exactly to boot level:
+TCP timers, orphaned sockets, allocator metadata, and caches may remain live.
 
 ## M10.1: Complete Memory Lifecycle Measurement
 
@@ -68,14 +140,18 @@ records host memory telemetry across five distinct lifecycle phases:
    handshakes would not naturally finish inside a short CI timeout; it does not
    stop or restart the hosted kernel process.
 4. **`post_drain_idle_samples`**: Captured across two bounded idle windows (0.5
-   seconds each) to establish the pre-reclaim residency and quiescent-CPU
-   baseline for M10.3.
+   seconds each) to preserve the immediate post-bridge residency and CPU
+   observation introduced by M10.1.
 5. **`reuse_sample`**: Starts a fresh listener and service on the dedicated
    lifecycle-test port 18501 inside the same hosted kernel, then executes 64
    bidirectional flows with payload verification. A distinct port avoids making
    this memory test depend on TCP's previous-connection port reuse timing. It
    proves that the runtime remains reusable after the capacity service is fully
-   torn down; it does not claim that host pages have already been discarded.
+   torn down. Under M10.3 it runs after the bounded reclaim gate.
+
+M10.3 appends `reclaim_samples`, `reclaim_result`, and
+`post_reclaim_idle_samples`; it does not rename or reinterpret the earlier
+schema fields.
 
 ### Process Telemetry Metrics
 
@@ -119,14 +195,30 @@ The first successful M10.1 capacity artifact made this distinction visible:
   the second service nevertheless completed its 64-flow reuse probe.
 
 These samples are the immediate post-bridge baseline, not a reclaim-success
-threshold. M10.3 must distinguish at least these phases:
+threshold. The M10.3 implementation distinguishes these phases:
 
 1. all bridge sessions reaped;
 2. bounded TCP orphan/close-state quiescence;
 3. guest-free pages reported and discarded by the host;
 4. a fresh traffic pass proving safe reuse.
 
-Reclaim gates must not require the page reporter to discard memory still owned
-by TCP timers or orphaned sockets. The M10.3 CI design should add longer bounded
-quiescence observations and report orphan-pressure evidence separately before
-setting an RSS-reduction ratio from the resulting artifacts.
+The reclaim gate never requires the page reporter to discard memory still
+owned by TCP timers or orphaned sockets: such pages cannot be isolated from a
+buddy free list. The bounded observation reports the guest log alongside RSS
+and reclaim counters so orphan pressure remains visible separately.
+
+## Capacity, Host Policy, and Online Growth
+
+Reclaim changes residency, not guest-visible capacity. `--memory-mib=N` still
+sets the contiguous guest arena and buddy allocator ceiling; it does not
+reserve or eagerly consume `N` MiB of host RAM. The default remains 128 MiB and
+`--max-connections=0` remains unlimited admission. A host cgroup, address-space
+rlimit, strict overcommit policy, or physical memory pressure can still make a
+host mapping or later page fault fail independently of the project admission
+policy.
+
+An advisory reclaim failure never converts into a connection limit and never
+invalidates already mapped RAM. True one-way online growth is separate M10.4
+work because it would change the guest allocator's capacity and likely the
+current `FLATMEM`/contiguous direct-map model; `MADV_DONTNEED` deliberately does
+neither.

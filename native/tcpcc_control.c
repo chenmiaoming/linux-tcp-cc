@@ -28,6 +28,8 @@ _Static_assert(sizeof(struct tcpcc_control_service_config) == 16,
 	       "tcpcc service-config ABI drift");
 _Static_assert(sizeof(struct tcpcc_control_service_stats) == 88,
 	       "tcpcc service-stats ABI drift");
+_Static_assert(sizeof(struct tcpcc_control_reclaim_stats) == 72,
+	       "tcpcc reclaim-stats ABI drift");
 _Static_assert(sizeof(struct tcpcc_control_ip_address) == 20,
 	       "tcpcc IP-address ABI drift");
 _Static_assert(sizeof(struct tcpcc_control_ip_endpoint) == 24,

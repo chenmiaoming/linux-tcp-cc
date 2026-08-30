@@ -266,7 +266,7 @@ jobs:
           sudo -n sysctl -w net.ipv4.ip_local_port_range="1024 65535"
           chmod u+x .build/tcpcc-bootstrap-out/vmlinux
 
-      - name: Discover idle and active connection capacity
+      - name: Prove capacity, post-spike reclaim, and safe reuse
         run: |
           sudo -n python3 scripts/run-tcpcc-capacity-discovery.py \
             --integration \

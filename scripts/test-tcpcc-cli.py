@@ -62,6 +62,7 @@ from tcpcc_control import (  # noqa: E402
     OP_SOCKET_IP,
     REQUEST,
     RESPONSE,
+    RECLAIM_STATS,
     SERVICE_CONFIG,
     SERVICE_STATS,
     VERSION,
@@ -71,6 +72,7 @@ from tcpcc_control import (  # noqa: E402
     ControlResponse,
     decode_bridge_result,
     decode_response,
+    decode_reclaim_stats,
     decode_service_stats,
     encode_request,
     encode_ip_endpoint,
@@ -291,6 +293,35 @@ class ControlCodecTests(unittest.TestCase):
         values[13] = 1
         with self.assertRaisesRegex(ControlProtocolError, "positive"):
             decode_service_stats(SERVICE_STATS.pack(*values))
+
+    def test_reclaim_stats_have_fixed_layout_and_strict_fields(self) -> None:
+        raw = RECLAIM_STATS.pack(
+            64 * 1024 * 1024,
+            48 * 1024 * 1024,
+            17,
+            31,
+            0,
+            0,
+            1,
+            0,
+            3,
+            16 * 1024 * 1024,
+            0,
+            0,
+        )
+        stats = decode_reclaim_stats(raw)
+        self.assertEqual(stats.successful_discard_bytes, 48 * 1024 * 1024)
+        self.assertEqual(stats.state, 1)
+        self.assertEqual(stats.minimum_order, 3)
+
+        values = list(RECLAIM_STATS.unpack(raw))
+        values[-1] = 1
+        with self.assertRaisesRegex(ControlProtocolError, "reserved"):
+            decode_reclaim_stats(RECLAIM_STATS.pack(*values))
+        values[-1] = 0
+        values[6] = 4
+        with self.assertRaisesRegex(ControlProtocolError, "unknown state"):
+            decode_reclaim_stats(RECLAIM_STATS.pack(*values))
 
 
 class ParserTests(unittest.TestCase):

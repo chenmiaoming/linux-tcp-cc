@@ -24,6 +24,8 @@ static void test_hosted_mmap_contract(void)
 		       "host MAP_ANONYMOUS ABI changed");
 	_Static_assert(TCPCC_HOST_MAP_NORESERVE == 0x4000,
 		       "host MAP_NORESERVE ABI changed");
+	_Static_assert(TCPCC_HOST_MADV_DONTNEED == 4,
+		       "host MADV_DONTNEED ABI changed");
 	_Static_assert(TCPCC_HOST_MAP_ANON_FLAGS == 0x4022,
 		       "host anonymous arena must remain private and no-reserve");
 }
