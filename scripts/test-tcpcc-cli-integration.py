@@ -260,6 +260,7 @@ def run(
     *,
     check: bool = True,
     timeout: float = TIMEOUT,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         command,
@@ -268,6 +269,7 @@ def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         timeout=timeout,
+        input=input_text,
     )
     if check and completed.returncode != 0:
         raise RuntimeError(
@@ -464,18 +466,10 @@ def prove_native_stale_ownership_guard(
         try:
             run(ns_command(router, "nft", "add", "chain", "ip", resource, "owned"))
             run(
-                ns_command(
-                    router,
-                    "nft",
-                    "add",
-                    "rule",
-                    "ip",
-                    resource,
-                    "owned",
-                    "counter",
-                    "comment",
-                    marker,
-                )
+                ns_command(router, "nft", "--file", "-"),
+                input_text=(
+                    f'add rule ip {resource} owned counter comment "{marker}"\n'
+                ),
             )
             completed = run(command, check=False)
         finally:

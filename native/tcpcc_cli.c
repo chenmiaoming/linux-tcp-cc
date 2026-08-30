@@ -97,6 +97,8 @@ struct tcpcc_nft_api {
 	int (*run_buffer)(void *, const char *);
 };
 
+static int tcpcc_nft_load(struct tcpcc_nft_api *api);
+
 static void tcpcc_usage(FILE *stream)
 {
 	fprintf(stream,
@@ -599,6 +601,50 @@ static bool tcpcc_word_present(const char *words, const char *wanted)
 	return false;
 }
 
+static bool tcpcc_executable_on_path(const char *name)
+{
+	const char *path = getenv("PATH");
+	char *copy;
+	char *cursor;
+	char *save = NULL;
+	bool found = false;
+
+	if (strchr(name, '/'))
+		return access(name, X_OK) == 0;
+	if (!path)
+		return false;
+	copy = strdup(path);
+	if (!copy)
+		return false;
+	for (cursor = strtok_r(copy, ":", &save); cursor;
+	     cursor = strtok_r(NULL, ":", &save)) {
+		char candidate[4096];
+
+		if (snprintf(candidate, sizeof(candidate), "%s/%s",
+			     cursor[0] ? cursor : ".", name) < (int)sizeof(candidate) &&
+		    access(candidate, X_OK) == 0) {
+			found = true;
+			break;
+		}
+	}
+	free(copy);
+	return found;
+}
+
+static bool tcpcc_has_net_admin(void)
+{
+	char status[8192];
+	char *effective;
+	unsigned long long mask;
+
+	if (tcpcc_read_file("/proc/self/status", status, sizeof(status)))
+		return false;
+	effective = strstr(status, "CapEff:");
+	if (!effective || sscanf(effective, "CapEff:%llx", &mask) != 1)
+		return false;
+	return (mask & (1ULL << 12)) != 0;
+}
+
 static int tcpcc_validate_kernel(const char *path)
 {
 	Elf64_Ehdr header;
@@ -640,13 +686,14 @@ static int tcpcc_validate_kernel(const char *path)
 static int tcpcc_preflight(const struct tcpcc_cli_config *config)
 {
 	char value[4096];
+	char firewall_command[48];
 	const char *forwarding = config->listen.version == 4 ?
 		"/proc/sys/net/ipv4/ip_forward" :
 		"/proc/sys/net/ipv6/conf/all/forwarding";
 	struct stat tun;
 
-	if (geteuid() != 0)
-		return tcpcc_error("CAP_NET_ADMIN/root is required");
+	if (!tcpcc_has_net_admin())
+		return tcpcc_error("CAP_NET_ADMIN is required");
 	if (stat("/dev/net/tun", &tun) || !S_ISCHR(tun.st_mode) ||
 	    access("/dev/net/tun", R_OK | W_OK))
 		return tcpcc_error("/dev/net/tun must be a readable and writable character device");
@@ -660,6 +707,30 @@ static int tcpcc_preflight(const struct tcpcc_cli_config *config)
 	if (tcpcc_read_file("/proc/sys/net/ipv4/tcp_available_congestion_control",
 			    value, sizeof(value)) || !tcpcc_word_present(value, config->cc))
 		return tcpcc_error("requested congestion control is not available on the host");
+	if (!tcpcc_executable_on_path("ip"))
+		return tcpcc_error("ip executable is required on PATH");
+	if (config->firewall == TCPCC_FIREWALL_NFT_EXEC &&
+	    !tcpcc_executable_on_path("nft"))
+		return tcpcc_error("nft executable is required on PATH");
+	if (config->firewall == TCPCC_FIREWALL_NFT_LIB) {
+		struct tcpcc_nft_api api;
+
+		if (tcpcc_nft_load(&api))
+			return tcpcc_error("libnftables is required by the selected backend");
+		dlclose(api.library);
+	}
+	if (config->firewall == TCPCC_FIREWALL_IPTABLES) {
+		if (config->listen.version == 4)
+			strcpy(firewall_command, config->iptables_variant);
+		else
+			snprintf(firewall_command, sizeof(firewall_command), "ip6tables%s",
+				 config->iptables_variant + strlen("iptables"));
+		if (!tcpcc_executable_on_path(firewall_command))
+			return tcpcc_error("selected iptables executable is required on PATH");
+		snprintf(value, sizeof(value), "%s-save", firewall_command);
+		if (!tcpcc_executable_on_path(value))
+			return tcpcc_error("selected iptables-save executable is required on PATH");
+	}
 	return tcpcc_validate_kernel(config->kernel);
 }
 
