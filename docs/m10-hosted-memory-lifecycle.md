@@ -86,9 +86,14 @@ The reporting provider in `arch/tcpcc/kernel/reclaim.c` has these properties:
   continues without a retry loop.
 
 The architecture selects exactly one additional production symbol,
-`CONFIG_PAGE_REPORTING`. The existing CI ceilings remain unchanged at 112
-enabled symbols, a 3.25 MiB `vmlinux`, and no `.eh_frame`; M10.3 does not raise
-those gates.
+`CONFIG_PAGE_REPORTING`. At M10.3 the CI ceilings remained at 112 enabled
+symbols, a 3.25 MiB `vmlinux`, and no `.eh_frame`; M10.3 did not raise those
+gates.
+
+The later `CONFIG_BASE_SMALL=y` production trim deliberately raises only the
+symbol-count ceiling to 113: the extra enabled symbol selects smaller core
+data structures. The 3.25 MiB executable ceiling and `.eh_frame` rejection
+remain unchanged and continue to guard the actual image footprint.
 
 The append-only `RECLAIM_STATS` control operation exposes monotonic aggregate
 counters rather than per-page or per-flow events:

@@ -1,0 +1,122 @@
+name: Release package
+
+on:
+  workflow_run:
+    workflows:
+      - TCPCC hosted bootstrap
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == '6.18.y' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout the exact validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Resolve immutable release identity
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$VALIDATED_SHA"
+          source upstream/linux.env
+          test "$LINUX_TAG" = "v$LINUX_VERSION"
+          echo "tag=$LINUX_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$LINUX_VERSION" >> "$GITHUB_OUTPUT"
+
+          if gh release view "$LINUX_TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "$LINUX_TAG is already published; release tags are immutable." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if git ls-remote --exit-code origin "refs/tags/$LINUX_TAG" >/dev/null 2>&1; then
+            echo "tag $LINUX_TAG exists without a GitHub Release" >&2
+            exit 1
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Download the validated hosted image
+        if: steps.release.outputs.skip == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: tcpcc-m85-vmlinux
+          path: .build/tcpcc-bootstrap-out
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Build and test the native C supervisor
+        if: steps.release.outputs.skip == 'false'
+        run: |
+          make native-build
+          make native-check
+          chmod 0755 .build/tcpcc-bootstrap-out/vmlinux
+
+      - name: Build the normalized release archive
+        if: steps.release.outputs.skip == 'false'
+        run: |
+          bash -n scripts/package-release.sh
+          VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
+            scripts/package-release.sh
+
+      - name: Validate the packaged installed layout
+        if: steps.release.outputs.skip == 'false'
+        run: |
+          archive=$(find .build/release -maxdepth 1 -name '*.tar.xz' -print -quit)
+          test -n "$archive"
+          extract_root=$(mktemp -d)
+          tar -xJf "$archive" -C "$extract_root"
+          package_root=$(find "$extract_root" -mindepth 1 -maxdepth 1 -type d -print -quit)
+          test -x "$package_root/bin/tcpcc"
+          test -x "$package_root/libexec/tcpcc/vmlinux"
+          "$package_root/bin/tcpcc" --help >/dev/null
+          test ! -e "$package_root/lib/tcpcc"
+          test ! -e "$package_root/bin/python"
+
+      - name: Publish the immutable GitHub Release
+        if: steps.release.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          VALIDATED_SHA: ${{ github.event.workflow_run.head_sha }}
+          VALIDATION_RUN: ${{ github.event.workflow_run.html_url }}
+        run: |
+          notes=$(mktemp)
+          cat > "$notes" <<EOF
+          tcpcc built from upstream Linux $RELEASE_TAG for the 6.18.y LTS product
+          branch. The installed service is a native C executable plus the hosted
+          vmlinux and has no Python runtime dependency.
+
+          Validation: $VALIDATION_RUN
+
+          Download the linux-x86_64-glibc archive and verify it with the
+          attached SHA-256 file. Installation and exact upstream source provenance
+          are included inside the archive.
+          EOF
+
+          gh release create "$RELEASE_TAG" \
+            .build/release/*.tar.xz \
+            .build/release/*.tar.xz.sha256 \
+            .build/release/*.manifest.env \
+            --target "$VALIDATED_SHA" \
+            --title "tcpcc $RELEASE_VERSION" \
+            --notes-file "$notes"

@@ -7,12 +7,14 @@ on:
     paths:
       - '.github/workflows/tcpcc-bootstrap.yml'
       - '.github/workflows/tcpcc-link.yml'
+      - '.github/workflows/release.yml'
       - 'benchmarks/m7/**'
       - 'benchmarks/m8/**'
       - 'linux-overlay/**'
       - 'Makefile'
       - 'patches/**'
       - 'scripts/prepare-linux.sh'
+      - 'scripts/package-release.sh'
       - 'scripts/validate-tcpcc-link.sh'
       - 'scripts/validate-tcpcc-bootstrap.sh'
       - 'scripts/validate-tcpcc-tun.sh'
@@ -113,6 +115,18 @@ jobs:
           test "$(dd if=.build/m85-install-root/usr/local/bin/tcpcc bs=1 count=4 2>/dev/null)" = "$(printf '\177ELF')"
           test ! -e .build/m85-install-root/usr/local/lib/tcpcc
 
+      - name: Exercise the normalized Release package layout
+        run: |
+          bash -n scripts/package-release.sh
+          VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
+            OUTPUT_DIR=.build/release-candidate \
+            scripts/package-release.sh
+          archive=$(find .build/release-candidate -maxdepth 1 -name '*.tar.xz' -print -quit)
+          test -n "$archive"
+          tar -tJf "$archive" | grep -F '/bin/tcpcc'
+          tar -tJf "$archive" | grep -F '/libexec/tcpcc/vmlinux'
+          (cd .build/release-candidate && sha256sum --check *.tar.xz.sha256)
+
       - name: Execute hosted M6.3 lossless delayed-path milestone
         run: bash scripts/validate-tcpcc-long-fat.sh
 
@@ -133,6 +147,13 @@ jobs:
         with:
           name: tcpcc-m85-vmlinux
           path: .build/tcpcc-bootstrap-out/vmlinux
+          if-no-files-found: error
+
+      - name: Upload Release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-release-candidate
+          path: .build/release-candidate
           if-no-files-found: error
 
       - name: Upload bootstrap diagnostics

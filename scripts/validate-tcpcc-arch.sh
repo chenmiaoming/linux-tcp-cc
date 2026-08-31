@@ -20,8 +20,10 @@ grep -E '^(CONFIG_(TCPCC|64BIT|MMU|SMP|COREDUMP|COMPAT|NR_CPUS|PREEMPT|FLATMEM|G
 required=(
   CONFIG_TCPCC=y
   CONFIG_64BIT=y
+  CONFIG_BASE_SMALL=y
   CONFIG_NR_CPUS=1
   CONFIG_THREAD_INFO_IN_TASK=y
+  CONFIG_TINY_RCU=y
 )
 for opt in "${required[@]}"; do
   if ! grep -qx "$opt" "$OUT/.config"; then
