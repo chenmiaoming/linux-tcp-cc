@@ -168,6 +168,21 @@ class QdiscParserTests(unittest.TestCase):
             )
 
 
+class PingParserTests(unittest.TestCase):
+    def test_median_resists_a_delayed_runner_sample(self) -> None:
+        output = """\
+64 bytes from 10.203.0.2: time=200.1 ms
+64 bytes from 10.203.0.2: time=200.3 ms
+64 bytes from 10.203.0.2: time=900.0 ms
+rtt min/avg/max/mdev = 200.100/433.467/900.000/329.935 ms
+"""
+        result = benchmark.parse_ping_output(output)
+
+        self.assertEqual(result["samples_received"], 3)
+        self.assertEqual(result["median_ms"], 200.3)
+        self.assertEqual(result["average_ms"], 433.467)
+
+
 class SummaryTests(unittest.TestCase):
     @staticmethod
     def runs(*values: float) -> list[dict[str, object]]:

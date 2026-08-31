@@ -74,8 +74,12 @@ Goodput, retransmissions, and all cross-path ratios are observations rather
 than merge gates. At symmetric 10% random loss, short shared-runner samples are
 too variable for a stable ranking threshold. CI still fails if a measurement
 cannot complete, a requested congestion-control algorithm is not actually in
-use, the configured RTT/loss/rate contract drifts, endpoint `fq` drops packets,
+use, the configured qdisc delay/loss/rate contract drifts, endpoint `fq` drops packets,
 or either TCPCC instance fails to shut down and remove its resources.
+
+Twenty ICMP samples record min/average/median/max RTT. The median is an
+observation rather than a gate because runner scheduling and severe loss can
+produce large delayed outliers; the exact qdisc delay remains a hard gate.
 
 Goodput is end-to-end and directly comparable across all four paths. iperf's
 native retransmit count belongs to the public WAN sender. On a TCPCC path,
