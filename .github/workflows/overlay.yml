@@ -22,10 +22,14 @@ jobs:
 
       - name: Validate shell scripts
         run: |
+          bash -n scripts/check-portability-boundary.sh
           bash -n scripts/fetch-linux.sh
           bash -n scripts/verify-protected.sh
           bash -n scripts/prepare-linux.sh
           bash -n scripts/validate-net-config.sh
+
+      - name: Enforce the kernel compatibility boundary
+        run: bash scripts/check-portability-boundary.sh
 
       - name: Prepare Linux tree and validate config
         run: bash scripts/validate-net-config.sh

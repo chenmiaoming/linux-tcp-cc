@@ -25,6 +25,11 @@ native C binary and hosted `vmlinux` as an immutable GitHub Release. See
 
 The long-term maintenance target is to keep project-specific changes concentrated in the userspace architecture, host runtime, packet netdevice, build/configuration, and control/API layers.
 
+Direct use of version-sensitive networking internals is centralized in the
+TCPCC compatibility layer, and a weekly mainline canary detects API drift
+before the next LTS migration. See [`docs/porting.md`](docs/porting.md) for the
+dependency map and porting procedure.
+
 The following upstream implementation files are treated as protected source and should remain unmodified:
 
 - `net/ipv4/tcp_bbr.c`
@@ -45,12 +50,10 @@ M8's target product is a TUN-backed inbound server TCP front end, described in
 Its native CUBIC/BBR versus tcpcc BBR high-BDP iperf gate is documented in
 [`docs/m8-high-bdp-iperf.md`](docs/m8-high-bdp-iperf.md).
 
-M9 is migrating the installed runtime from Python to a native C supervisor and
-a single-owner, event-driven hosted bridge. The process boundary, capacity
-model, and staged CI gates are described in
-[`docs/m9-native-event-runtime.md`](docs/m9-native-event-runtime.md). The
-existing Python command remains the supported entry point until those parity
-gates pass.
+M9 migrated the installed runtime from Python to a native C supervisor and a
+single-owner, event-driven hosted bridge. The process boundary, capacity model,
+and CI gates are described in
+[`docs/m9-native-event-runtime.md`](docs/m9-native-event-runtime.md).
 
 ## Server-ingress command
 
