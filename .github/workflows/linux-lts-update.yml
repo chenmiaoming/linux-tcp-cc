@@ -116,7 +116,7 @@ jobs:
             tcpcc-arch.yml
             tcpcc-link.yml
             tcpcc-bootstrap.yml
-            m7-native.yml
+            # The parity workflow builds the pristine native reference itself.
             m7-lossless-parity.yml
             m8-host-lifecycle.yml
             m9-native-runtime.yml

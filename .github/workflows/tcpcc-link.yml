@@ -12,9 +12,6 @@ on:
       - 'scripts/validate-tcpcc-link.sh'
       - 'upstream/**'
       - 'protected/**'
-  push:
-    branches:
-      - 6.18.y
   workflow_dispatch:
 
 permissions:

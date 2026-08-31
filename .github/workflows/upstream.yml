@@ -4,9 +4,13 @@ on:
   pull_request:
     branches:
       - 6.18.y
-  push:
-    branches:
-      - 6.18.y
+    paths:
+      - '.github/workflows/upstream.yml'
+      - 'scripts/check-linux-lts.sh'
+      - 'scripts/fetch-linux.sh'
+      - 'scripts/update-linux-lts.sh'
+      - 'upstream/**'
+      - 'protected/**'
   workflow_dispatch:
 
 permissions:

@@ -47,7 +47,7 @@ The initial roadmap is tracked in GitHub issues M0 through M8. Early milestones 
 
 M8's target product is a TUN-backed inbound server TCP front end, described in
 [`docs/m8-server-ingress-design.md`](docs/m8-server-ingress-design.md).
-Its native CUBIC/BBR versus tcpcc BBR high-BDP iperf gate is documented in
+Its weekly four-way native/TCPCC CUBIC/BBR transoceanic experiment is documented in
 [`docs/m8-high-bdp-iperf.md`](docs/m8-high-bdp-iperf.md).
 
 M9 migrated the installed runtime from Python to a native C supervisor and a

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Compare native CUBIC/BBR and tcpcc BBR with reverse iperf3."""
+"""Compare native and tcpcc CUBIC/BBR with reverse iperf3."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SCENARIO = ROOT / "benchmarks/m8/iperf-high-bdp-loss-v1.json"
+DEFAULT_SCENARIO = ROOT / "benchmarks/m8/iperf-transoceanic-extreme-v1.json"
 
 SERVER_ADDRESS = "10.203.0.2"
 SERVER_PREFIX = 24
@@ -35,12 +35,26 @@ CLIENT_PREFIX = 24
 CLIENT_NETWORK = "10.203.1.0/24"
 WAN_CLIENT_ADDRESS = "10.203.1.1"
 NATIVE_PORT = 46001
-TCPCC_PUBLIC_PORT = 46002
+TCPCC_BBR_PUBLIC_PORT = 46002
 TCPCC_BACKEND_PORT = 46003
-TCPCC_TUN_HOST_ADDRESS = "198.18.0.1"
-TCPCC_TUN_GUEST_ADDRESS = "198.18.0.2"
+TCPCC_CUBIC_PUBLIC_PORT = 46004
 
-CASES = ("native_cubic", "native_bbr", "tcpcc_bbr")
+CASES = ("native_cubic", "native_bbr", "tcpcc_cubic", "tcpcc_bbr")
+CASE_CC = {
+    "native_cubic": "cubic",
+    "native_bbr": "bbr",
+    "tcpcc_cubic": "cubic",
+    "tcpcc_bbr": "bbr",
+}
+TCPCC_CASES = ("tcpcc_cubic", "tcpcc_bbr")
+TCPCC_PUBLIC_PORTS = {
+    "tcpcc_cubic": TCPCC_CUBIC_PUBLIC_PORT,
+    "tcpcc_bbr": TCPCC_BBR_PUBLIC_PORT,
+}
+TCPCC_TUN_ADDRESSES = {
+    "tcpcc_cubic": ("198.19.0.1", "198.19.0.2"),
+    "tcpcc_bbr": ("198.18.0.1", "198.18.0.2"),
+}
 PING_RTT = re.compile(
     r"(?:rtt|round-trip) min/avg/max/(?:mdev|stddev) = "
     r"([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+) ms"
@@ -63,6 +77,7 @@ class Scenario:
     minimum_goodput_mbps: float
     tcpcc_to_native_bbr_min_ratio: float
     tcpcc_to_native_bbr_max_ratio: float
+    performance_is_observational: bool
 
     @property
     def rtt_ms(self) -> int:
@@ -119,6 +134,13 @@ def parse_scenario(value: Any) -> Scenario:
         raise ValueError(
             "acceptance.bbr_over_cubic_is_observational must be true"
         )
+    performance_is_observational = acceptance.get(
+        "performance_is_observational", False
+    )
+    if not isinstance(performance_is_observational, bool):
+        raise ValueError(
+            "acceptance.performance_is_observational must be boolean"
+        )
 
     scenario = Scenario(
         raw=document,
@@ -141,7 +163,7 @@ def parse_scenario(value: Any) -> Scenario:
                 network.get("random_loss_percent"),
                 "network.random_loss_percent",
                 0.001,
-                5,
+                30,
             )
         ),
         netem_limit_packets=int(
@@ -216,6 +238,7 @@ def parse_scenario(value: Any) -> Scenario:
                 10,
             )
         ),
+        performance_is_observational=performance_is_observational,
     )
     if (
         scenario.tcpcc_to_native_bbr_min_ratio
@@ -341,18 +364,22 @@ def summarize_measurements(
             min(goodputs) >= scenario.minimum_goodput_mbps,
             min(goodputs),
             f">= {scenario.minimum_goodput_mbps} Mbps",
+            gate=not scenario.performance_is_observational,
         )
 
     if all(case in summaries for case in CASES):
-        cubic = summaries["native_cubic"]["median_goodput_mbps"]
+        native_cubic = summaries["native_cubic"]["median_goodput_mbps"]
         native_bbr = summaries["native_bbr"]["median_goodput_mbps"]
+        tcpcc_cubic = summaries["tcpcc_cubic"]["median_goodput_mbps"]
         tcpcc_bbr = summaries["tcpcc_bbr"]["median_goodput_mbps"]
-        native_bbr_over_cubic = native_bbr / cubic
-        tcpcc_bbr_over_cubic = tcpcc_bbr / cubic
+        native_bbr_over_cubic = native_bbr / native_cubic
+        tcpcc_bbr_over_cubic = tcpcc_bbr / tcpcc_cubic
+        tcpcc_to_native_cubic = tcpcc_cubic / native_cubic
         tcpcc_to_native_bbr = tcpcc_bbr / native_bbr
         summaries["comparisons"] = {
             "native_bbr_over_native_cubic": native_bbr_over_cubic,
-            "tcpcc_bbr_over_native_cubic": tcpcc_bbr_over_cubic,
+            "tcpcc_bbr_over_tcpcc_cubic": tcpcc_bbr_over_cubic,
+            "tcpcc_cubic_over_native_cubic": tcpcc_to_native_cubic,
             "tcpcc_bbr_over_native_bbr": tcpcc_to_native_bbr,
         }
         add_check(
@@ -365,6 +392,7 @@ def summarize_measurements(
                 "minimum": scenario.tcpcc_to_native_bbr_min_ratio,
                 "maximum": scenario.tcpcc_to_native_bbr_max_ratio,
             },
+            gate=not scenario.performance_is_observational,
         )
         add_check(
             "native_bbr_over_cubic_observation",
@@ -374,9 +402,16 @@ def summarize_measurements(
             gate=False,
         )
         add_check(
-            "tcpcc_bbr_over_cubic_observation",
+            "tcpcc_bbr_over_tcpcc_cubic_observation",
             tcpcc_bbr_over_cubic >= 1,
             tcpcc_bbr_over_cubic,
+            ">= 1 (observation only)",
+            gate=False,
+        )
+        add_check(
+            "tcpcc_cubic_over_native_cubic_observation",
+            tcpcc_to_native_cubic >= 1,
+            tcpcc_to_native_cubic,
             ">= 1 (observation only)",
             gate=False,
         )
@@ -893,8 +928,8 @@ def run_iperf_measurement(
 ) -> dict[str, Any]:
     if case not in CASES:
         raise ValueError(f"unknown iperf case {case}")
-    public_port = TCPCC_PUBLIC_PORT if case == "tcpcc_bbr" else NATIVE_PORT
-    cc_name = "cubic" if case == "native_cubic" else "bbr"
+    public_port = TCPCC_PUBLIC_PORTS.get(case, NATIVE_PORT)
+    cc_name = CASE_CC[case]
     command = ns_command(
         names["client_ns"],
         "iperf3",
@@ -948,14 +983,17 @@ def run_iperf_measurement(
 def validate_tcpcc_events(
     events: list[dict[str, Any]],
     scenario: Scenario,
+    expected_cc: str,
 ) -> dict[str, Any]:
     ready = next((event for event in events if event.get("event") == "ready"), None)
     stopped = next(
         (event for event in events if event.get("event") == "stopped"),
         None,
     )
-    if ready is None or ready.get("cc") != "bbr":
-        raise RuntimeError("tcpcc readiness did not prove BBR")
+    if ready is None or ready.get("cc") != expected_cc:
+        raise RuntimeError(
+            f"tcpcc readiness did not prove {expected_cc}"
+        )
     if stopped is None or stopped.get("clean") is not True:
         raise RuntimeError("tcpcc did not report a clean stop")
     if any(
@@ -1016,7 +1054,7 @@ def validate_tcpcc_events(
             str(last_error): terminal_failures,
         },
         "data_terminal_policy": "native hosted-service aggregate",
-        "accepted_cc": "bbr",
+        "accepted_cc": expected_cc,
         "clean_stop": True,
     }
 
@@ -1082,6 +1120,64 @@ def collect_environment(names: dict[str, str], kernel: Path) -> dict[str, Any]:
     }
 
 
+def start_tcpcc_case(
+    names: dict[str, str],
+    kernel: Path,
+    output_dir: Path,
+    case: str,
+) -> tuple[subprocess.Popen[bytes], Path, dict[str, Any]]:
+    cc_name = CASE_CC[case]
+    public_port = TCPCC_PUBLIC_PORTS[case]
+    tun_host, tun_guest = TCPCC_TUN_ADDRESSES[case]
+    event_path = output_dir / f"{case}-events.jsonl"
+    diagnostic_path = output_dir / f"{case}.log"
+
+    run(
+        ns_command(
+            names["server_ns"],
+            "sysctl",
+            "-q",
+            "-w",
+            f"net.ipv4.tcp_congestion_control={cc_name}",
+        )
+    )
+    event_stream = event_path.open("wb")
+    diagnostic_stream = diagnostic_path.open("wb")
+    try:
+        process = subprocess.Popen(
+            ns_command(
+                names["server_ns"],
+                str(ROOT / "tcpcc"),
+                "--listen",
+                f"{SERVER_ADDRESS}:{public_port}",
+                "--backend",
+                f"127.0.0.1:{TCPCC_BACKEND_PORT}",
+                "--cc",
+                cc_name,
+                "--kernel",
+                str(kernel),
+                "--firewall-backend",
+                "nft-lib",
+                "--tun-name",
+                names[f"tun_{cc_name}"],
+                "--tun-host-address",
+                tun_host,
+                "--tun-guest-address",
+                tun_guest,
+                "--shutdown-grace-period",
+                "5",
+            ),
+            stdout=event_stream,
+            stderr=diagnostic_stream,
+            start_new_session=True,
+        )
+    finally:
+        event_stream.close()
+        diagnostic_stream.close()
+    ready = wait_tcpcc_ready(event_path, process)
+    return process, event_path, ready
+
+
 def benchmark(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         raise PermissionError("--integration requires root")
@@ -1104,15 +1200,15 @@ def benchmark(args: argparse.Namespace) -> int:
         "wan_server_dev": f"tws{suffix}",
         "wan_client_dev": f"twc{suffix}",
         "client_dev": f"tc{suffix}",
-        "tun_name": f"tb{suffix}",
+        "tun_cubic": f"tcu{suffix}",
+        "tun_bbr": f"tbb{suffix}",
     }
     namespaces: list[str] = []
     native_server: subprocess.Popen[bytes] | None = None
     backend_server: subprocess.Popen[bytes] | None = None
-    tcpcc_process: subprocess.Popen[bytes] | None = None
-    tcpcc_ready: dict[str, Any] | None = None
-    event_path = output_dir / "tcpcc-events.jsonl"
-    diagnostic_path = output_dir / "tcpcc.log"
+    tcpcc_processes: dict[str, subprocess.Popen[bytes]] = {}
+    tcpcc_event_paths: dict[str, Path] = {}
+    tcpcc_ready: dict[str, dict[str, Any]] = {}
     measurements: dict[str, list[dict[str, Any]]] = {
         case: [] for case in CASES
     }
@@ -1157,38 +1253,26 @@ def benchmark(args: argparse.Namespace) -> int:
         )
         wait_listener(names["server_ns"], TCPCC_BACKEND_PORT, backend_server)
 
-        event_stream = event_path.open("wb")
-        diagnostic_stream = diagnostic_path.open("wb")
-        try:
-            tcpcc_process = subprocess.Popen(
-                ns_command(
-                    names["server_ns"],
-                    str(ROOT / "tcpcc"),
-                    "--listen",
-                    f"{SERVER_ADDRESS}:{TCPCC_PUBLIC_PORT}",
-                    "--backend",
-                    f"127.0.0.1:{TCPCC_BACKEND_PORT}",
-                    "--cc",
-                    "bbr",
-                    "--kernel",
-                    str(kernel),
-                    "--firewall-backend",
-                    "nft-lib",
-                    "--tun-name",
-                    names["tun_name"],
-                    "--max-connections",
-                    "8",
-                    "--shutdown-grace-period",
-                    "5",
-                ),
-                stdout=event_stream,
-                stderr=diagnostic_stream,
-                start_new_session=True,
+        # The C supervisor verifies the host default at startup. Start each
+        # independent hosted stack under the matching default, then restore BBR
+        # before measurements. The public sockets themselves retain the
+        # explicitly selected algorithm.
+        for case in ("tcpcc_bbr", "tcpcc_cubic"):
+            process, event_path, ready = start_tcpcc_case(
+                names, kernel, output_dir, case
             )
-        finally:
-            event_stream.close()
-            diagnostic_stream.close()
-        tcpcc_ready = wait_tcpcc_ready(event_path, tcpcc_process)
+            tcpcc_processes[case] = process
+            tcpcc_event_paths[case] = event_path
+            tcpcc_ready[case] = ready
+        run(
+            ns_command(
+                names["server_ns"],
+                "sysctl",
+                "-q",
+                "-w",
+                "net.ipv4.tcp_congestion_control=bbr",
+            )
+        )
 
         for round_index in range(scenario.repetitions):
             order = CASES[round_index:] + CASES[:round_index]
@@ -1204,48 +1288,62 @@ def benchmark(args: argparse.Namespace) -> int:
                 measurements[case].append(measurement)
                 time.sleep(scenario.settle_seconds)
 
-        tcpcc_process.send_signal(signal.SIGTERM)
-        tcpcc_status = tcpcc_process.wait(timeout=20)
-        if tcpcc_status != 0:
-            raise RuntimeError(f"tcpcc exited with status {tcpcc_status}")
+        for case in TCPCC_CASES:
+            tcpcc_processes[case].send_signal(signal.SIGTERM)
+        for case in TCPCC_CASES:
+            tcpcc_status = tcpcc_processes[case].wait(timeout=20)
+            if tcpcc_status != 0:
+                raise RuntimeError(
+                    f"{case} tcpcc exited with status {tcpcc_status}"
+                )
         write_text(output_dir / "qdisc-after.txt", qdisc_report(names))
         qdisc = collect_qdisc_observations(names, scenario)
-        events = read_events(event_path)
-        tcpcc_contract = validate_tcpcc_events(events, scenario)
-        assert_tcpcc_resources_removed(names, tcpcc_contract["ready"])
+        tcpcc_contracts: dict[str, dict[str, Any]] = {}
+        for case in TCPCC_CASES:
+            events = read_events(tcpcc_event_paths[case])
+            contract = validate_tcpcc_events(
+                events, scenario, expected_cc=CASE_CC[case]
+            )
+            assert_tcpcc_resources_removed(names, contract["ready"])
+            tcpcc_contracts[case] = contract
 
         summaries, checks, passed = summarize_measurements(
             measurements,
             scenario,
         )
-        checks.extend(
-            (
-                {
-                    "name": "observed_rtt_reflects_scenario",
-                    "gate": True,
-                    "passed": True,
-                    "observed": ping["average_ms"],
-                    "expected": {
-                        "configured_rtt_ms": scenario.rtt_ms,
-                        "tolerance": "70%-150%",
-                    },
+        checks.append(
+            {
+                "name": "observed_rtt_reflects_scenario",
+                "gate": True,
+                "passed": True,
+                "observed": ping["average_ms"],
+                "expected": {
+                    "configured_rtt_ms": scenario.rtt_ms,
+                    "tolerance": "70%-150%",
                 },
-                {
-                    "name": "tcpcc_public_connections_inherited_bbr",
-                    "gate": True,
-                    "passed": tcpcc_contract["accepted_cc"] == "bbr",
-                    "observed": tcpcc_contract["accepted_cc"],
-                    "expected": "bbr",
-                },
-                {
-                    "name": "tcpcc_clean_shutdown",
-                    "gate": True,
-                    "passed": tcpcc_contract["clean_stop"] is True,
-                    "observed": tcpcc_contract["clean_stop"],
-                    "expected": True,
-                },
-            )
+            }
         )
+        for case in TCPCC_CASES:
+            expected_cc = CASE_CC[case]
+            contract = tcpcc_contracts[case]
+            checks.extend(
+                (
+                    {
+                        "name": f"{case}_public_connections_inherited_cc",
+                        "gate": True,
+                        "passed": contract["accepted_cc"] == expected_cc,
+                        "observed": contract["accepted_cc"],
+                        "expected": expected_cc,
+                    },
+                    {
+                        "name": f"{case}_clean_shutdown",
+                        "gate": True,
+                        "passed": contract["clean_stop"] is True,
+                        "observed": contract["clean_stop"],
+                        "expected": True,
+                    },
+                )
+            )
         for direction in ("ack_direction", "data_direction"):
             observed_loss = qdisc[direction]["observed_drop_percent"]
             checks.append(
@@ -1291,7 +1389,7 @@ def benchmark(args: argparse.Namespace) -> int:
             "qdisc": qdisc,
             "measurements": measurements,
             "summaries": summaries,
-            "tcpcc_runtime": tcpcc_contract,
+            "tcpcc_runtime": tcpcc_contracts,
             "checks": checks,
             "passed": passed,
         }
@@ -1304,7 +1402,8 @@ def benchmark(args: argparse.Namespace) -> int:
             raise RuntimeError("high-BDP iperf acceptance checks failed")
         return 0
     finally:
-        stop_process(tcpcc_process)
+        for process in tcpcc_processes.values():
+            stop_process(process)
         stop_process(backend_server)
         stop_process(native_server)
         for namespace in reversed(namespaces):

@@ -4,9 +4,17 @@ on:
   pull_request:
     branches:
       - 6.18.y
-  push:
-    branches:
-      - 6.18.y
+    paths:
+      - '.github/workflows/overlay.yml'
+      - 'linux-overlay/**'
+      - 'patches/**'
+      - 'scripts/check-portability-boundary.sh'
+      - 'scripts/fetch-linux.sh'
+      - 'scripts/prepare-linux.sh'
+      - 'scripts/validate-net-config.sh'
+      - 'scripts/verify-protected.sh'
+      - 'upstream/**'
+      - 'protected/**'
   workflow_dispatch:
 
 permissions:

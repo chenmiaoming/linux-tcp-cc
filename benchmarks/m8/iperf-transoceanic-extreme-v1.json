@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "scenario_id": "transoceanic-1g-200ms-loss10-v1",
+  "description": "Four-way single-stream comparison through a symmetric 1 Gbit/s, 200 ms RTT path with 10% independent random loss in each direction.",
+  "network": {
+    "rate_mbps": 1000,
+    "one_way_delay_ms": 100,
+    "random_loss_percent": 10,
+    "netem_limit_packets": 40000,
+    "mtu": 1500
+  },
+  "iperf": {
+    "duration_seconds": 15,
+    "omit_seconds": 5,
+    "parallel_streams": 1,
+    "repetitions": 3,
+    "settle_seconds": 1
+  },
+  "acceptance": {
+    "minimum_goodput_mbps": 0.01,
+    "tcpcc_to_native_bbr_min_ratio": 0.01,
+    "tcpcc_to_native_bbr_max_ratio": 10,
+    "bbr_over_cubic_is_observational": true,
+    "performance_is_observational": true
+  }
+}
