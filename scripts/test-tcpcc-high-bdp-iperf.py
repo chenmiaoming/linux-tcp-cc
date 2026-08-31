@@ -230,7 +230,7 @@ class SummaryTests(unittest.TestCase):
             "backend_loopback_sender",
         )
         observations = [check for check in checks if not check["gate"]]
-        self.assertEqual(len(observations), 8)
+        self.assertEqual(len(observations), 10)
 
     def test_tcpcc_native_bbr_ratio_is_a_gate(self) -> None:
         document = copy.deepcopy(scenario_document())
