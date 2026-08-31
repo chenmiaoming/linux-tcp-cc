@@ -11,6 +11,7 @@
 #include <asm/host.h>
 #include <asm/irq_regs.h>
 #include <asm/ptrace.h>
+#include <asm/tcpcc_compat.h>
 
 #define TCPCC_CLOCK_HZ              NSEC_PER_SEC
 #define TCPCC_TIMER_MIN_DELTA_NS    1000UL
@@ -141,11 +142,11 @@ static void __init tcpcc_timer_selftest(void)
 	clock_start = ktime_get_ns();
 	for (dispatches = 0;
 	     dispatches < TCPCC_TIMER_MAX_DISPATCHES &&
-	     !hrtimer_is_hres_active(&timer);
+	     !tcpcc_compat_hrtimer_is_highres();
 	     dispatches++)
 		tcpcc_timer_dispatch();
 
-	if (!hrtimer_is_hres_active(&timer))
+	if (!tcpcc_compat_hrtimer_is_highres())
 		panic("tcpcc: Linux hrtimer core did not enter high-resolution mode");
 
 	clock_end = ktime_get_ns();

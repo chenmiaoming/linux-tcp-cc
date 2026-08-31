@@ -1,0 +1,57 @@
+name: Next-kernel portability canary
+
+on:
+  pull_request:
+    branches:
+      - 6.18.y
+    paths:
+      - '.github/workflows/next-kernel-canary.yml'
+      - 'scripts/validate-next-kernel.sh'
+      - 'scripts/check-portability-boundary.sh'
+      - 'linux-overlay/**'
+      - 'patches/**'
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  next-kernel-vmlinux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex build-essential libelf-dev libssl-dev
+
+      - name: Validate portability scripts
+        run: |
+          bash -n scripts/check-portability-boundary.sh
+          bash -n scripts/validate-next-kernel.sh
+          bash scripts/check-portability-boundary.sh
+
+      - name: Link against current upstream mainline
+        run: bash scripts/validate-next-kernel.sh
+
+      - name: Upload next-kernel diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-kernel-portability-${{ github.run_id }}
+          path: |
+            .build/next-kernel.env
+            .build/next-kernel-vmlinux.log
+            .build/next-kernel-out/.config
+            .build/next-kernel-out/vmlinux
+          include-hidden-files: true
+          if-no-files-found: warn

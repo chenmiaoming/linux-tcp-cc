@@ -14,6 +14,8 @@
 #include <linux/uio.h>
 #include <net/net_namespace.h>
 
+#include <asm/tcpcc_compat.h>
+
 #define TCPCC_LOOPBACK_TEST_ROUNDS  16
 #define TCPCC_LOOPBACK_PAYLOAD_SIZE (64U * 1024U)
 #define TCPCC_LOOPBACK_BACKLOG      8
@@ -100,7 +102,7 @@ static int tcpcc_loopback_client(void *arg)
 	if (ret)
 		goto out;
 
-	ret = kernel_connect(sock, (struct sockaddr *)&peer, sizeof(peer), 0);
+	ret = tcpcc_compat_kernel_connect(sock, &peer, sizeof(peer), 0);
 	if (ret)
 		goto out_release;
 
@@ -234,7 +236,7 @@ static int __init tcpcc_loopback_tcp_selftest(void)
 	if (ret)
 		panic("tcpcc: M4.1 listener socket creation failed: %d", ret);
 
-	ret = kernel_bind(listener, (struct sockaddr *)&addr, sizeof(addr));
+	ret = tcpcc_compat_kernel_bind(listener, &addr, sizeof(addr));
 	if (ret)
 		panic("tcpcc: M4.1 loopback bind failed: %d", ret);
 

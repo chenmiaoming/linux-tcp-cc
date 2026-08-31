@@ -8,6 +8,7 @@
 #include <asm/host.h>
 #include <asm/page.h>
 #include <asm/sections.h>
+#include <asm/tcpcc_compat.h>
 
 #define TCPCC_MEMORY_MIB              (1024UL * 1024UL)
 #define TCPCC_DEFAULT_MEMORY_MIB      128UL
@@ -18,14 +19,8 @@ unsigned long tcpcc_physmem;
 unsigned long tcpcc_physmem_size;
 unsigned long tcpcc_host_initial_stack;
 
-/* Generic NOMMU/block helpers require a page-sized, page-aligned zero page. */
-unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)]
-	__aligned(PAGE_SIZE);
-
 static void __init tcpcc_paging_init(void)
 {
-	unsigned long max_zone_pfn[MAX_NR_ZONES] = { 0 };
-
 	/*
 	 * PFN zero is reserved as a guard and because memblock uses physical
 	 * address zero as its allocation-failure sentinel.  All managed pages are
@@ -37,9 +32,7 @@ static void __init tcpcc_paging_init(void)
 	min_low_pfn = 1;
 	max_pfn = max_low_pfn = tcpcc_physmem_size >> PAGE_SHIFT;
 	high_memory = (void *)(tcpcc_physmem + tcpcc_physmem_size);
-
-	max_zone_pfn[ZONE_NORMAL] = max_low_pfn;
-	free_area_init(max_zone_pfn);
+	tcpcc_compat_memory_init();
 }
 
 static unsigned long __init tcpcc_host_memory_size(void)

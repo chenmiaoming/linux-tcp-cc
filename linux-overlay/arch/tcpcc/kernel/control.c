@@ -24,6 +24,7 @@
 #include <asm/l3net.h>
 #include <asm/reclaim.h>
 #include <asm/service.h>
+#include <asm/tcpcc_compat.h>
 #include <asm/tcpcc_control_abi.h>
 
 #define TCPCC_CONTROL_IRQ          2
@@ -216,7 +217,7 @@ static int tcpcc_control_bind(const struct tcpcc_control_request *request)
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = htonl(request->arg0);
 	addr.sin_port = htons((u16)request->arg1);
-	return kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+	return tcpcc_compat_kernel_bind(sock, &addr, sizeof(addr));
 }
 
 static int tcpcc_control_bind_ip(const struct tcpcc_control_request *request)
@@ -249,7 +250,7 @@ static int tcpcc_control_bind_ip(const struct tcpcc_control_request *request)
 			return -EINVAL;
 		memcpy(&addr.sin_addr, endpoint.address.bytes,
 		       sizeof(addr.sin_addr));
-		return kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+		return tcpcc_compat_kernel_bind(sock, &addr, sizeof(addr));
 	}
 	if (endpoint.address.version == TCPCC_CONTROL_IP_VERSION_6) {
 		struct sockaddr_in6 addr = {
@@ -261,7 +262,7 @@ static int tcpcc_control_bind_ip(const struct tcpcc_control_request *request)
 			return -EINVAL;
 		memcpy(&addr.sin6_addr, endpoint.address.bytes,
 		       sizeof(addr.sin6_addr));
-		return kernel_bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+		return tcpcc_compat_kernel_bind(sock, &addr, sizeof(addr));
 	}
 	return -EAFNOSUPPORT;
 }
@@ -291,7 +292,7 @@ static int tcpcc_control_connect(const struct tcpcc_control_request *request)
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = htonl(request->arg0);
 	addr.sin_port = htons((u16)request->arg1);
-	return kernel_connect(sock, (struct sockaddr *)&addr, sizeof(addr), 0);
+	return tcpcc_compat_kernel_connect(sock, &addr, sizeof(addr), 0);
 }
 
 static int tcpcc_control_accept_flags(

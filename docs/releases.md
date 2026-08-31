@@ -79,9 +79,11 @@ share/doc/tcpcc/SOURCE.md
 
 The archive root is relocatable. Extracting it beneath `/usr/local` gives the
 same layout as `make install`, and the native command discovers
-`../libexec/tcpcc/vmlinux` relative to `/proc/self/exe`. Releases are currently
-built on the `ubuntu-22.04` GitHub image and are labelled `glibc` rather than
-claiming compatibility with every Linux libc.
+`../libexec/tcpcc/vmlinux` relative to `/proc/self/exe`. Releases are built on
+GitHub's current `ubuntu-latest` image and are labelled `glibc` rather than
+claiming compatibility with every Linux libc. The native CI matrix still
+includes Ubuntu 22.04 as a compile/runtime compatibility check; that older
+runner does not produce release artifacts.
 
 `RELEASE.env` records the tcpcc commit, upstream Linux tag/commit, target, and
 SHA-256 hashes of both executables. The Release also attaches the manifest and

@@ -2,6 +2,8 @@
 #ifndef _ASM_TCPCC_PGTABLE_H
 #define _ASM_TCPCC_PGTABLE_H
 
+#include <linux/version.h>
+
 /*
  * Initial tcpcc bring-up is NOMMU: Linux virtual addresses are hosted process
  * addresses and there is no guest page-table walk. This follows the current
@@ -25,9 +27,11 @@
 
 #define swapper_pg_dir ((pgd_t *)0)
 
-/* setup.c provides one page-sized, page-aligned shared zero page. */
+/* Linux before 7.3 requires NOMMU architectures to provide the zero page. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
 extern unsigned long empty_zero_page[];
 #define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
+#endif
 
 /* No separate vmalloc/kmap address space exists in the NOMMU hosted model. */
 #define VMALLOC_START 0UL
