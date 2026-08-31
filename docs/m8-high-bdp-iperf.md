@@ -71,6 +71,10 @@ configuration. Linux derives its automatic per-socket `tcp_wmem` ceiling from
 available RAM (up to the normal 4-MiB cap), so this A/B distinguishes a
 memory-derived send-buffer ceiling from bridge, TUN, or congestion-control
 logic. The larger arena is diagnostic and does not change the CLI default.
+TCPCC restores that 4-MiB autotuning ceiling even for the 128-MiB arena; this
+does not allocate 4 MiB per connection. Buffers grow only when a flow needs
+them, while Linux's aggregate `tcp_mem` pressure thresholds continue to bound
+the shared arena.
 
 The native paths use the GitHub runner kernel and report its release. tcpcc uses
 the pinned hosted Linux image built by the prerequisite CI job. Consequently,

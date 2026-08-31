@@ -17,6 +17,30 @@
 #include <net/sch_generic.h>
 #include <asm/tcpcc_compat.h>
 
+#define TCPCC_TCP_WMEM_MAX (4U * 1024U * 1024U)
+
+void tcpcc_compat_configure_tcp_wmem(void)
+{
+	int old_max = READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[2]);
+	int new_max = max_t(int, old_max, TCPCC_TCP_WMEM_MAX);
+
+	/*
+	 * tcp_init() normally caps tcp_wmem[2] at 4 MiB, but also limits it
+	 * to roughly 1/128 of free RAM.  TCPCC's deliberately small 128-MiB
+	 * arena therefore leaves a public BBR sender with only about 1 MiB,
+	 * even when most of the arena is free.  On a 200-ms path the skb
+	 * accounting overhead and BBR's 3*cwnd provisioning turn that policy
+	 * into a throughput ceiling.
+	 *
+	 * Restore the ordinary upstream ceiling without allocating memory.
+	 * Socket buffers still grow on demand and the existing tcp_mem pressure
+	 * thresholds continue to arbitrate the shared 128-MiB arena.
+	 */
+	WRITE_ONCE(init_net.ipv4.sysctl_tcp_wmem[2], new_max);
+	pr_notice("tcpcc: TCP send-buffer ceiling %d -> %d bytes (on-demand, tcp_mem-governed)\n",
+		  old_max, new_max);
+}
+
 int tcpcc_compat_configure_ipv4(struct net_device *dev, u32 address,
 				u32 prefix_len)
 {

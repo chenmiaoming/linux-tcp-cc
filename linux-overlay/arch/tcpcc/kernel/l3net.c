@@ -400,6 +400,9 @@ static int tcpcc_l3_attach_config(
 		return -EAFNOSUPPORT;
 	}
 
+	/* No public socket exists yet; establish its lazy autotuning ceiling. */
+	tcpcc_compat_configure_tcp_wmem();
+
 	ret = tcpcc_host_set_nonblock(host_fd);
 	if (ret)
 		return ret;
