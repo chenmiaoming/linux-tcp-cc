@@ -30,7 +30,14 @@ concurrency:
 
 jobs:
   native-runtime:
-    runs-on: ubuntu-latest
+    name: native-runtime (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
       - name: Checkout linux-tcp-cc
