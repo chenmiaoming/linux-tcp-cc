@@ -32,6 +32,20 @@ if ! grep -Fqx 'obj-y += net.o compat.o l3net.o bridge.o service.o control.o' \
   failed=1
 fi
 
+while IFS= read -r match; do
+  file="${match%%:*}"
+  if [[ "$file" != "$ARCH/kernel/compat_mm.c" ]]; then
+    echo "unstable API free_area_init escaped memory compatibility boundary: $match" >&2
+    failed=1
+  fi
+done < <(grep -Rns --include='*.c' --include='*.h' \
+  -w free_area_init "$ARCH" || true)
+
+if ! grep -Fq 'compat_mm.o' "$ARCH/kernel/Makefile"; then
+  echo "tcpcc memory compatibility implementation is absent from Kbuild" >&2
+  failed=1
+fi
+
 if (( failed )); then
   exit 1
 fi

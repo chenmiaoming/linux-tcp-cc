@@ -33,6 +33,11 @@ contract changes, adapt `compat.c` first and keep the L3 data plane and control
 ABI unchanged. `scripts/check-portability-boundary.sh` prevents the contained
 API calls from spreading back into architecture consumers.
 
+`arch/tcpcc/kernel/compat_mm.c` similarly owns the page allocator bootstrap and
+shared zero-page transition. Linux before 7.3 calls `free_area_init()` from the
+architecture and supplies its zero page there; Linux 7.3 calls the allocator
+from generic initialization and asks the architecture only for zone limits.
+
 The remaining high-risk internal dependencies are intentionally recorded for
 future compatibility-layer work:
 

@@ -2,15 +2,7 @@
 #ifndef _ASM_TCPCC_PAGE_H
 #define _ASM_TCPCC_PAGE_H
 
-#ifndef PAGE_SHIFT
-#define PAGE_SHIFT 12
-#endif
-#ifndef PAGE_SIZE
-#define PAGE_SIZE (1UL << PAGE_SHIFT)
-#endif
-#ifndef PAGE_MASK
-#define PAGE_MASK (~(PAGE_SIZE - 1))
-#endif
+#include <vdso/page.h>
 #define ARCH_PFN_OFFSET 0UL
 
 #ifndef __ASSEMBLY__
