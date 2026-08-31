@@ -26,9 +26,6 @@ on:
       - 'tools/m7-native-tcp-probe.c'
       - 'upstream/**'
       - 'protected/**'
-  push:
-    branches:
-      - 6.18.y
   workflow_dispatch:
 
 permissions:

@@ -1,6 +1,6 @@
-# M8 high-BDP lossy iperf comparison
+# Transoceanic extreme-network comparison
 
-This gate compares the shipped tcpcc server-ingress path with ordinary native
+This CI experiment compares the shipped tcpcc server-ingress path with ordinary native
 Linux TCP under the same emulated bottleneck. It measures delivered application
 goodput rather than treating an end-of-flow TCP telemetry snapshot as a
 throughput benchmark.
@@ -12,9 +12,10 @@ bulk-data sender, which makes its congestion-control algorithm the one under
 test:
 
 ```text
-native CUBIC sender ----\
-native BBR sender -------+--> bottleneck router --> iperf3 client
-tcpcc public BBR sender -/
+native CUBIC sender -----\
+native BBR sender --------+--> bottleneck router --> iperf3 client
+tcpcc public CUBIC sender -+
+tcpcc public BBR sender --/
 ```
 
 A normal forward iperf test would measure the client namespace's congestion
@@ -23,7 +24,7 @@ control and would not test the algorithm selected by `tcpcc --cc`.
 For tcpcc, the iperf server remains an ordinary loopback backend. Its TCP
 connection ends at the bridge and is not the measured public connection. The
 `tcpcc.runtime.v1` events must independently prove that every accepted public
-socket inherited BBR.
+socket inherited the selected CUBIC or BBR algorithm.
 
 ## Network contract
 
@@ -36,31 +37,32 @@ server namespace -- veth -- bottleneck namespace -- veth -- client namespace
 
 The bottleneck applies the same policy in each direction:
 
-- 50 Mbit/s rate;
-- 50 ms one-way delay, for an expected 100 ms RTT;
-- 0.1% independent random packet loss;
+- 1,000 Mbit/s rate;
+- 100 ms one-way delay, for an expected 200 ms RTT;
+- 10% independent random packet loss in each direction;
 - MTU 1500;
-- 20,000-packet queue limit.
+- 40,000-packet queue limit.
 
-The resulting configured path BDP is 625,000 bytes. Endpoint offloads are
+The resulting configured path BDP is 25,000,000 bytes. Endpoint offloads are
 disabled so netem loss is applied to ordinary packets rather than large veth
 GSO aggregates. Endpoint `fq` remains intact so native and hosted BBR can use
 socket pacing before packets enter the separate bottleneck.
 
 The checked-in contract is
-[`benchmarks/m8/iperf-high-bdp-loss-v1.json`](../benchmarks/m8/iperf-high-bdp-loss-v1.json).
+[`benchmarks/m8/iperf-transoceanic-extreme-v1.json`](../benchmarks/m8/iperf-transoceanic-extreme-v1.json).
 Changing a network parameter, duration, repetition count, or acceptance bound
 therefore produces a reviewable scenario change.
 
 ## Repetitions and results
 
-The three paths are run three times in a rotating Latin-square order. Each
-measurement has a two-second omitted warm-up followed by ten reported seconds.
+The four paths are run three times in rotating order. Each measurement has a
+five-second omitted warm-up followed by fifteen reported seconds.
 The report retains every raw iperf JSON document and computes the median
 delivered goodput and retransmissions for:
 
 - native CUBIC;
 - native BBR;
+- tcpcc public-side CUBIC; and
 - tcpcc public-side BBR.
 
 The native paths use the GitHub runner kernel and report its release. tcpcc uses
@@ -68,12 +70,22 @@ the pinned hosted Linux image built by the prerequisite CI job. Consequently,
 BBR-over-CUBIC ratios are prominent observations but are not semantic parity
 claims between two identical kernels.
 
-The v1 hard performance bound requires tcpcc BBR median goodput to remain from
-0.5 through 1.5 times native BBR. This deliberately broad shared-runner band
-catches a major runtime/data-path regression without promising identical
-timing between different kernels. Each individual run must also deliver at
-least 1 Mbit/s. Both netem directions must record loss near the configured
-order of magnitude, while endpoint `fq` must not drop packets.
+Goodput, retransmissions, and all cross-path ratios are observations rather
+than merge gates. At symmetric 10% random loss, short shared-runner samples are
+too variable for a stable ranking threshold. CI still fails if a measurement
+cannot complete, a requested congestion-control algorithm is not actually in
+use, the configured qdisc delay/loss/rate contract drifts, endpoint `fq` drops packets,
+or either TCPCC instance fails to shut down and remove its resources.
+
+Twenty ICMP samples record min/average/median/max RTT. The median is an
+observation rather than a gate because runner scheduling and severe loss can
+produce large delayed outliers; the exact qdisc delay remains a hard gate.
+
+Goodput is end-to-end and directly comparable across all four paths. iperf's
+native retransmit count belongs to the public WAN sender. On a TCPCC path,
+iperf sees the ordinary backend loopback sender instead; the hosted public
+socket's retransmit counter is not currently exported. The report labels this
+scope explicitly, and TCPCC/native retransmit totals must not be compared.
 
 iperf3 normally closes its reverse data socket abortively after a successful
 measurement. A completed tcpcc data flow may therefore end with clean EOF or
@@ -89,11 +101,11 @@ TUN, BBR, nftables, iproute2, ethtool, and iperf3:
 sudo python3 scripts/run-tcpcc-high-bdp-iperf.py \
   --integration \
   --kernel .build/tcpcc-bootstrap-out/vmlinux \
-  --scenario-file benchmarks/m8/iperf-high-bdp-loss-v1.json \
-  --output-dir .build/m8-high-bdp
+  --scenario-file benchmarks/m8/iperf-transoceanic-extreme-v1.json \
+  --output-dir .build/transoceanic-extreme
 ```
 
-GitHub Actions publishes the complete directory as
-`tcpcc-m85-high-bdp-iperf`, including `report.json`, all nine raw iperf JSON
-documents, tcpcc events and diagnostics, ping output, topology state, and
-before/after qdisc counters.
+GitHub Actions runs the experiment weekly, on manual request, and when its own
+contract changes. It publishes the complete directory for 30 days, including
+`report.json`, all twelve raw iperf JSON documents, both TCPCC event streams and
+diagnostics, ping output, topology state, and before/after qdisc counters.

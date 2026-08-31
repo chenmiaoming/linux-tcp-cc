@@ -1,0 +1,130 @@
+name: Transoceanic network benchmark
+
+on:
+  pull_request:
+    branches:
+      - 6.18.y
+    paths:
+      - '.github/workflows/network-extremes.yml'
+      - 'benchmarks/m8/iperf-transoceanic-extreme-v1.json'
+      - 'docs/m8-high-bdp-iperf.md'
+      - 'scripts/run-tcpcc-high-bdp-iperf.py'
+      - 'scripts/test-tcpcc-high-bdp-iperf.py'
+  schedule:
+    - cron: '37 5 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  transoceanic-comparison:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Install build and network dependencies
+        run: |
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends \
+              bc \
+              bison \
+              build-essential \
+              ethtool \
+              flex \
+              iperf3 \
+              iproute2 \
+              iputils-ping \
+              libelf-dev \
+              libnftables1 \
+              libssl-dev \
+              nftables \
+              procps \
+              strace
+
+      - name: Validate benchmark contracts
+        run: |
+          python3 -m py_compile scripts/run-tcpcc-high-bdp-iperf.py
+          python3 -m py_compile scripts/test-tcpcc-high-bdp-iperf.py
+          python3 -m json.tool \
+            benchmarks/m8/iperf-transoceanic-extreme-v1.json >/dev/null
+          python3 scripts/test-tcpcc-high-bdp-iperf.py
+
+      - name: Build and validate the hosted image
+        run: bash scripts/validate-tcpcc-bootstrap.sh
+
+      - name: Prepare privileged network prerequisites
+        run: |
+          sudo -n modprobe tun || true
+          sudo -n modprobe tcp_bbr || true
+          sudo -n modprobe nf_tables || true
+          sudo -n modprobe nf_nat || true
+          sudo -n modprobe nf_conntrack || true
+          test -c /dev/net/tun
+          sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
+          make native-build
+          chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
+
+      - name: Compare native and TCPCC CUBIC and BBR
+        run: |
+          sudo -n env GITHUB_SHA="$GITHUB_SHA" \
+            python3 scripts/run-tcpcc-high-bdp-iperf.py \
+              --integration \
+              --kernel .build/tcpcc-bootstrap-out/vmlinux \
+              --scenario-file \
+                benchmarks/m8/iperf-transoceanic-extreme-v1.json \
+              --output-dir .build/transoceanic-extreme
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          if [[ ! -s .build/transoceanic-extreme/report.json ]]; then
+            echo 'No complete benchmark report was produced.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          report = json.loads(
+              Path('.build/transoceanic-extreme/report.json').read_text()
+          )
+          print('## 1 Gbit/s, 200 ms RTT, symmetric 10% loss')
+          print()
+          print('| path | median goodput (Mbit/s) | min | max | iperf retransmits* |')
+          print('| --- | ---: | ---: | ---: | ---: |')
+          for case in ('native_cubic', 'native_bbr', 'tcpcc_cubic', 'tcpcc_bbr'):
+              item = report['summaries'][case]
+              print(
+                  f"| {case} | {item['median_goodput_mbps']:.3f} | "
+                  f"{item['minimum_goodput_mbps']:.3f} | "
+                  f"{item['maximum_goodput_mbps']:.3f} | "
+                  f"{item['median_retransmits']:.0f} |"
+              )
+          print()
+          print('Ratios:')
+          for name, value in report['summaries']['comparisons'].items():
+              print(f'- `{name}`: {value:.3f}x')
+          print()
+          print(
+              '* Native retransmits describe the public WAN sender. TCPCC '
+              'retransmits describe the iperf backend loopback sender; the '
+              'hosted public-socket retransmit counter is not exported yet.'
+          )
+          PY
+
+      - name: Upload complete benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-transoceanic-extreme-${{ github.run_id }}
+          path: .build/transoceanic-extreme
+          if-no-files-found: warn
+          retention-days: 30

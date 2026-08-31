@@ -25,7 +25,7 @@ SPEC.loader.exec_module(benchmark)
 
 def scenario_document() -> dict[str, object]:
     return json.loads(
-        (ROOT / "benchmarks/m8/iperf-high-bdp-loss-v1.json").read_text(
+        (ROOT / "benchmarks/m8/iperf-transoceanic-extreme-v1.json").read_text(
             encoding="utf-8"
         )
     )
@@ -68,9 +68,10 @@ class ScenarioTests(unittest.TestCase):
     def test_checked_scenario_derives_rtt_and_bdp(self) -> None:
         scenario = benchmark.parse_scenario(scenario_document())
 
-        self.assertEqual(scenario.rtt_ms, 100)
-        self.assertEqual(scenario.bdp_bytes, 625_000)
+        self.assertEqual(scenario.rtt_ms, 200)
+        self.assertEqual(scenario.bdp_bytes, 25_000_000)
         self.assertEqual(scenario.repetitions, 3)
+        self.assertTrue(scenario.performance_is_observational)
         self.assertGreater(
             scenario.netem_limit_packets * scenario.mtu,
             2 * scenario.bdp_bytes,
@@ -122,13 +123,13 @@ class QdiscParserTests(unittest.TestCase):
                     "kind": "netem",
                     "root": True,
                     "options": {
-                        "limit": 20000,
-                        "delay": {"delay": 0.05},
-                        "loss-random": {"loss": 0.001},
-                        "rate": {"rate": 6_250_000},
+                        "limit": 40000,
+                        "delay": {"delay": 0.1},
+                        "loss-random": {"loss": 0.1},
+                        "rate": {"rate": 125_000_000},
                     },
                     "bytes": 10_000_000,
-                    "packets": 99_900,
+                    "packets": 900,
                     "drops": 100,
                     "overlimits": 0,
                     "backlog": 0,
@@ -139,7 +140,7 @@ class QdiscParserTests(unittest.TestCase):
         )
 
         self.assertEqual(result["drops"], 100)
-        self.assertEqual(result["observed_drop_percent"], 0.1)
+        self.assertEqual(result["observed_drop_percent"], 10)
 
     def test_netem_configuration_drift_is_rejected(self) -> None:
         scenario = benchmark.parse_scenario(scenario_document())
@@ -150,10 +151,10 @@ class QdiscParserTests(unittest.TestCase):
                         "kind": "netem",
                         "root": True,
                         "options": {
-                            "limit": 20000,
+                            "limit": 40000,
                             "delay": {"delay": 0.025},
-                            "loss-random": {"loss": 0.001},
-                            "rate": {"rate": 6_250_000},
+                            "loss-random": {"loss": 0.1},
+                            "rate": {"rate": 125_000_000},
                         },
                         "bytes": 0,
                         "packets": 0,
@@ -165,6 +166,21 @@ class QdiscParserTests(unittest.TestCase):
                 expected_kind="netem",
                 scenario=scenario,
             )
+
+
+class PingParserTests(unittest.TestCase):
+    def test_median_resists_a_delayed_runner_sample(self) -> None:
+        output = """\
+64 bytes from 10.203.0.2: time=200.1 ms
+64 bytes from 10.203.0.2: time=200.3 ms
+64 bytes from 10.203.0.2: time=900.0 ms
+rtt min/avg/max/mdev = 200.100/433.467/900.000/329.935 ms
+"""
+        result = benchmark.parse_ping_output(output)
+
+        self.assertEqual(result["samples_received"], 3)
+        self.assertEqual(result["median_ms"], 200.3)
+        self.assertEqual(result["average_ms"], 433.467)
 
 
 class SummaryTests(unittest.TestCase):
@@ -181,6 +197,7 @@ class SummaryTests(unittest.TestCase):
             {
                 "native_cubic": self.runs(9, 10, 11),
                 "native_bbr": self.runs(39, 40, 41),
+                "tcpcc_cubic": self.runs(8, 9, 10),
                 "tcpcc_bbr": self.runs(35, 36, 37),
             },
             scenario,
@@ -199,19 +216,35 @@ class SummaryTests(unittest.TestCase):
             summaries["comparisons"]["tcpcc_bbr_over_native_bbr"],
             0.9,
         )
+        self.assertEqual(
+            summaries["comparisons"]["tcpcc_bbr_over_tcpcc_cubic"],
+            4,
+        )
+        self.assertEqual(
+            summaries["native_bbr"]["iperf_retransmit_scope"],
+            "public_wan_sender",
+        )
+        self.assertEqual(
+            summaries["tcpcc_bbr"]["iperf_retransmit_scope"],
+            "backend_loopback_sender",
+        )
         observations = [check for check in checks if not check["gate"]]
-        self.assertEqual(len(observations), 2)
+        self.assertEqual(len(observations), 8)
 
     def test_tcpcc_native_bbr_ratio_is_a_gate(self) -> None:
         document = copy.deepcopy(scenario_document())
         document["acceptance"][  # type: ignore[index]
             "tcpcc_to_native_bbr_min_ratio"
         ] = 0.8
+        document["acceptance"][  # type: ignore[index]
+            "performance_is_observational"
+        ] = False
         scenario = benchmark.parse_scenario(document)
         _summaries, checks, passed = benchmark.summarize_measurements(
             {
                 "native_cubic": self.runs(9, 10, 11),
                 "native_bbr": self.runs(39, 40, 41),
+                "tcpcc_cubic": self.runs(9, 10, 11),
                 "tcpcc_bbr": self.runs(19, 20, 21),
             },
             scenario,
@@ -228,9 +261,9 @@ class SummaryTests(unittest.TestCase):
 
 class TcpccEventTests(unittest.TestCase):
     @staticmethod
-    def events(data_status: int) -> list[dict[str, object]]:
+    def events(data_status: int, cc: str = "bbr") -> list[dict[str, object]]:
         return [
-            {"event": "ready", "cc": "bbr"},
+            {"event": "ready", "cc": cc},
             {
                 "event": "service-stats",
                 "accepted_connections": 6,
@@ -251,11 +284,19 @@ class TcpccEventTests(unittest.TestCase):
         result = benchmark.validate_tcpcc_events(
             self.events(-errno.ECONNRESET),
             scenario,
+            expected_cc="bbr",
         )
 
         self.assertEqual(result["completed_data_flows"], 3)
         self.assertEqual(result["completed_control_flows"], 3)
         self.assertEqual(result["terminal_statuses"][str(-errno.ECONNRESET)], 3)
+
+        cubic = benchmark.validate_tcpcc_events(
+            self.events(0, cc="cubic"),
+            scenario,
+            expected_cc="cubic",
+        )
+        self.assertEqual(cubic["accepted_cc"], "cubic")
 
     def test_cancellation_is_not_accepted_as_iperf_teardown(self) -> None:
         scenario = benchmark.parse_scenario(scenario_document())
@@ -263,6 +304,7 @@ class TcpccEventTests(unittest.TestCase):
             benchmark.validate_tcpcc_events(
                 self.events(-errno.ECANCELED),
                 scenario,
+                expected_cc="bbr",
             )
 
 

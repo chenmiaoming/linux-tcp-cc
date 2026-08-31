@@ -16,9 +16,6 @@ on:
       - 'linux-overlay/arch/tcpcc/kernel/control.c'
       - 'linux-overlay/arch/tcpcc/kernel/service.c'
       - 'tools/tcpcc_control.py'
-  push:
-    branches:
-      - 6.18.y
   workflow_dispatch:
 
 permissions:

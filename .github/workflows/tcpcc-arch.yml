@@ -11,9 +11,6 @@ on:
       - 'scripts/validate-tcpcc-arch.sh'
       - 'upstream/**'
       - 'protected/**'
-  push:
-    branches:
-      - 6.18.y
   workflow_dispatch:
 
 permissions:

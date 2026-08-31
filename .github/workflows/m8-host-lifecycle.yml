@@ -20,9 +20,6 @@ on:
       - 'tools/tcpcc_cli.py'
       - 'tools/tcpcc_control.py'
       - 'tools/tcpcc_host.py'
-  push:
-    branches:
-      - 6.18.y
   workflow_dispatch:
 
 permissions:
