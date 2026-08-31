@@ -683,6 +683,29 @@ static int tcpcc_validate_kernel(const char *path)
 	return 0;
 }
 
+static int tcpcc_iptables_command(const struct tcpcc_cli_config *config,
+				  char *command, size_t command_size)
+{
+	const char *selected = config->iptables_variant;
+	size_t length;
+
+	if (config->listen.version == 6) {
+		if (!strcmp(config->iptables_variant, "iptables"))
+			selected = "ip6tables";
+		else if (!strcmp(config->iptables_variant, "iptables-nft"))
+			selected = "ip6tables-nft";
+		else if (!strcmp(config->iptables_variant, "iptables-legacy"))
+			selected = "ip6tables-legacy";
+		else
+			return -1;
+	}
+	length = strlen(selected);
+	if (length >= command_size)
+		return -1;
+	memcpy(command, selected, length + 1);
+	return 0;
+}
+
 static int tcpcc_preflight(const struct tcpcc_cli_config *config)
 {
 	char value[4096];
@@ -720,11 +743,9 @@ static int tcpcc_preflight(const struct tcpcc_cli_config *config)
 		dlclose(api.library);
 	}
 	if (config->firewall == TCPCC_FIREWALL_IPTABLES) {
-		if (config->listen.version == 4)
-			strcpy(firewall_command, config->iptables_variant);
-		else
-			snprintf(firewall_command, sizeof(firewall_command), "ip6tables%s",
-				 config->iptables_variant + strlen("iptables"));
+		if (tcpcc_iptables_command(config, firewall_command,
+					    sizeof(firewall_command)))
+			return tcpcc_error("invalid iptables executable selection");
 		if (!tcpcc_executable_on_path(firewall_command))
 			return tcpcc_error("selected iptables executable is required on PATH");
 		snprintf(value, sizeof(value), "%s-save", firewall_command);
@@ -975,12 +996,9 @@ static int tcpcc_firewall_install(const struct tcpcc_cli_config *config,
 		return tcpcc_error("cannot read the native supervisor process identity");
 	if (config->firewall == TCPCC_FIREWALL_IPTABLES) {
 		snprintf(firewall->resource, sizeof(firewall->resource), "TCPCC_%s", random);
-		if (config->listen.version == 4) {
-			strcpy(firewall->command, config->iptables_variant);
-		} else {
-			snprintf(firewall->command, sizeof(firewall->command), "ip6tables%s",
-				 config->iptables_variant + strlen("iptables"));
-		}
+		if (tcpcc_iptables_command(config, firewall->command,
+					    sizeof(firewall->command)))
+			return tcpcc_error("invalid iptables executable selection");
 		{
 			char save_command[48];
 			char *save[] = { save_command, "-t", "nat", NULL };
