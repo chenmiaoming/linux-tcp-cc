@@ -83,6 +83,8 @@ int tcpcc_host_runtime_event_poll(struct tcpcc_host_event *event);
 int tcpcc_host_runtime_event_set_notifier(void (*notify)(void *), void *data);
 void tcpcc_host_runtime_event_clear_notifier(void (*notify)(void *),
 					     void *data);
+/* Valid only while handling the matching generic host IRQ. */
+u32 tcpcc_host_irq_events(unsigned int irq);
 
 /*
  * Linux idle entry point. M3.4 waits on the host event multiplexer and routes

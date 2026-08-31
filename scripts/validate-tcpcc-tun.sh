@@ -74,7 +74,8 @@ grep -F 'tcpcc: M8.2.5 session ' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.2.6 session ' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M8.5 session ' "$BOOT_LOG" >/dev/null
 grep -F ' cancel requested' "$BOOT_LOG" >/dev/null
-grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" |
+  grep -F 'event-driven TX backpressure' >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$BOOT_LOG" >/dev/null
 grep -F 'Kernel panic - not syncing: tcpcc: M5.1 reached hosted L3 netdevice boundary after packet-fd validation' \

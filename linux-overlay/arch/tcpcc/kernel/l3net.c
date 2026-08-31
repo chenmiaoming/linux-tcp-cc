@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/completion.h>
+#include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/if_arp.h>
 #include <linux/interrupt.h>
@@ -8,7 +9,6 @@
 #include <linux/irq.h>
 #include <linux/kthread.h>
 #include <linux/netdevice.h>
-#include <linux/sched.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
@@ -33,11 +33,13 @@ struct tcpcc_l3_priv {
 	struct sk_buff_head tx_queue;
 	struct completion rx_ready;
 	struct completion tx_ready;
+	struct completion tx_writable;
 	struct task_struct *rx_task;
 	struct task_struct *tx_task;
 	spinlock_t stats_lock;
 	struct tcpcc_l3_stats stats;
 	int host_fd;
+	bool shutting_down;
 	bool event_registered;
 	bool irq_registered;
 };
@@ -185,7 +187,7 @@ static int tcpcc_l3_rx_thread(void *arg)
 
 	for (;;) {
 		wait_for_completion(&priv->rx_ready);
-		if (kthread_should_stop())
+		if (kthread_should_stop() || READ_ONCE(priv->shutting_down))
 			break;
 
 		for (;;) {
@@ -212,6 +214,32 @@ static int tcpcc_l3_rx_thread(void *arg)
 	return 0;
 }
 
+static int tcpcc_l3_wait_writable(struct tcpcc_l3_priv *priv)
+{
+	int ret;
+
+	/*
+	 * EPOLLOUT is level-ready most of the time, so only arm it after real
+	 * TUN backpressure. Reinitializing is safe on the single vCPU: host
+	 * readiness can only be dispatched after this thread blocks.
+	 */
+	reinit_completion(&priv->tx_writable);
+	ret = tcpcc_host_event_mod_mask(
+		priv->host_fd, TCPCC_HOST_EVENT_IRQ_BASE + TCPCC_L3_IRQ,
+		TCPCC_HOST_EVENT_READABLE | TCPCC_HOST_EVENT_WRITABLE, true);
+	if (ret)
+		return ret;
+
+	wait_for_completion(&priv->tx_writable);
+	if (kthread_should_stop() || READ_ONCE(priv->shutting_down))
+		return -ECANCELED;
+
+	/* Avoid a permanent writable wake storm on the normally writable TUN. */
+	return tcpcc_host_event_mod_mask(
+		priv->host_fd, TCPCC_HOST_EVENT_IRQ_BASE + TCPCC_L3_IRQ,
+		TCPCC_HOST_EVENT_READABLE, true);
+}
+
 static int tcpcc_l3_tx_thread(void *arg)
 {
 	struct tcpcc_l3_priv *priv = arg;
@@ -220,7 +248,7 @@ static int tcpcc_l3_tx_thread(void *arg)
 		struct sk_buff *skb;
 
 		wait_for_completion(&priv->tx_ready);
-		if (kthread_should_stop())
+		if (kthread_should_stop() || READ_ONCE(priv->shutting_down))
 			break;
 
 		while ((skb = skb_dequeue(&priv->tx_queue)) != NULL) {
@@ -231,9 +259,13 @@ static int tcpcc_l3_tx_thread(void *arg)
 							  skb->len);
 				if (ret != -TCPCC_HOST_EAGAIN)
 					break;
-				if (kthread_should_stop())
+				if (kthread_should_stop() ||
+				    READ_ONCE(priv->shutting_down))
 					break;
-				schedule_timeout_uninterruptible(1);
+
+				ret = tcpcc_l3_wait_writable(priv);
+				if (ret)
+					break;
 			}
 
 			if (ret == skb->len)
@@ -258,10 +290,17 @@ static int tcpcc_l3_tx_thread(void *arg)
 static irqreturn_t tcpcc_l3_irq_handler(int irq, void *dev_id)
 {
 	struct tcpcc_l3_priv *priv = dev_id;
+	u32 events;
 
 	if (!in_hardirq())
 		return IRQ_NONE;
-	complete(&priv->rx_ready);
+	events = tcpcc_host_irq_events(irq);
+	if (events & (TCPCC_HOST_EVENT_READABLE |
+		      TCPCC_HOST_EVENT_HANGUP | TCPCC_HOST_EVENT_ERROR))
+		complete(&priv->rx_ready);
+	if (events & (TCPCC_HOST_EVENT_WRITABLE |
+		      TCPCC_HOST_EVENT_HANGUP | TCPCC_HOST_EVENT_ERROR))
+		complete(&priv->tx_writable);
 	return IRQ_HANDLED;
 }
 
@@ -358,6 +397,7 @@ static void tcpcc_l3_setup(struct net_device *dev)
 	skb_queue_head_init(&priv->tx_queue);
 	init_completion(&priv->rx_ready);
 	init_completion(&priv->tx_ready);
+	init_completion(&priv->tx_writable);
 	spin_lock_init(&priv->stats_lock);
 }
 
@@ -470,7 +510,8 @@ static int tcpcc_l3_attach_config(
 		goto err_teardown;
 
 	*ifindex = dev->ifindex;
-	pr_notice("tcpcc: M5.1 L3 netdevice %s attached to host fd %d, mtu %u\n",
+	pr_notice("tcpcc: M5.1 L3 netdevice %s attached to host fd %d, mtu %u, "
+		  "event-driven TX backpressure\n",
 		  dev->name, host_fd, dev->mtu);
 	return 0;
 
@@ -545,6 +586,7 @@ void tcpcc_l3_teardown(void)
 	if (!dev)
 		return;
 	priv = netdev_priv(dev);
+	WRITE_ONCE(priv->shutting_down, true);
 
 	if (priv->event_registered) {
 		(void)tcpcc_host_event_del(priv->host_fd);
@@ -564,6 +606,7 @@ void tcpcc_l3_teardown(void)
 	}
 	if (priv->tx_task) {
 		complete(&priv->tx_ready);
+		complete(&priv->tx_writable);
 		kthread_stop(priv->tx_task);
 		priv->tx_task = NULL;
 	}

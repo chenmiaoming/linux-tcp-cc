@@ -89,7 +89,8 @@ grep -F 'tcpcc: M4.1 loopback TCP stress passed (16 rounds, 65536 bytes each dir
 grep -F 'tcpcc: M4.2 host control bridge ready on stdin/stdout' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M4.2 host control bridge passed native loopback TCP and Reno/CUBIC control' \
   "$BOOT_LOG" >/dev/null
-grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M5.1 L3 netdevice tcpcc' "$BOOT_LOG" |
+  grep -F 'event-driven TX backpressure' >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: TCP send-buffer ceiling ' "$BOOT_LOG" |
   grep -F -- '-> 4194304 bytes (on-demand, tcp_mem-governed)' >/dev/null

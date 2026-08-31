@@ -40,6 +40,14 @@ The TUN fd is passed once to `L3_ATTACH`. Packet ingress and egress then remain
 between the host kernel's TUN implementation and the hosted network stack;
 they never traverse the supervisor's event loop.
 
+The hosted TUN adapter is readiness-driven in both directions. It normally
+registers only edge-triggered read readiness. If a nonblocking packet write
+actually returns `EAGAIN`, it temporarily adds write readiness to the same
+epoll registration, sleeps until the host reports the TUN writable, then
+removes write interest before retrying. It does not run a timer-based retry,
+and it does not leave `EPOLLOUT` permanently armed (which would wake continuously
+for the normally writable TUN fd).
+
 ## Single-owner event model
 
 The final steady-state service has two single-owner loops separated by the
