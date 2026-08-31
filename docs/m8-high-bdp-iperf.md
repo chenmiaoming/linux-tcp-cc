@@ -55,26 +55,22 @@ therefore produces a reviewable scenario change.
 
 ## Repetitions and results
 
-The five paths are run three times in rotating order. Each measurement has a
+The four paths are run three times in rotating order. Each measurement has a
 five-second omitted warm-up followed by fifteen reported seconds.
 The report retains every raw iperf JSON document and computes the median
 delivered goodput and retransmissions for:
 
 - native CUBIC;
 - native BBR;
-- tcpcc public-side CUBIC;
-- tcpcc public-side BBR with the default 128-MiB hosted arena; and
-- tcpcc public-side BBR with a 512-MiB hosted arena.
+- tcpcc public-side CUBIC; and
+- tcpcc public-side BBR.
 
-The two TCPCC BBR cases run on the same runner with otherwise identical
-configuration. Linux derives its automatic per-socket `tcp_wmem` ceiling from
-available RAM (up to the normal 4-MiB cap), so this A/B distinguishes a
-memory-derived send-buffer ceiling from bridge, TUN, or congestion-control
-logic. The larger arena is diagnostic and does not change the CLI default.
-TCPCC restores that 4-MiB autotuning ceiling even for the 128-MiB arena; this
-does not allocate 4 MiB per connection. Buffers grow only when a flow needs
-them, while Linux's aggregate `tcp_mem` pressure thresholds continue to bound
-the shared arena.
+Linux normally derives its automatic per-socket `tcp_wmem` ceiling from
+available RAM, up to 4 MiB. That policy reduced a 128-MiB hosted arena to about
+1 MiB and throttled BBR on this 200-ms path. TCPCC restores the ordinary 4-MiB
+autotuning ceiling without allocating 4 MiB per connection: buffers grow only
+when a flow needs them, while Linux's aggregate `tcp_mem` pressure thresholds
+continue to govern the shared arena.
 
 The native paths use the GitHub runner kernel and report its release. tcpcc uses
 the pinned hosted Linux image built by the prerequisite CI job. Consequently,
@@ -92,7 +88,7 @@ Twenty ICMP samples record min/average/median/max RTT. The median is an
 observation rather than a gate because runner scheduling and severe loss can
 produce large delayed outliers; the exact qdisc delay remains a hard gate.
 
-Goodput is end-to-end and directly comparable across all five paths. iperf's
+Goodput is end-to-end and directly comparable across all four paths. iperf's
 native retransmit count belongs to the public WAN sender. On a TCPCC path,
 iperf sees the ordinary backend loopback sender instead; the hosted public
 socket's retransmit counter is not currently exported. The report labels this
@@ -116,6 +112,10 @@ sudo python3 scripts/run-tcpcc-high-bdp-iperf.py \
   --packet-trace \
   --output-dir .build/transoceanic-extreme
 ```
+
+`--packet-trace` is optional and retains only the first 160 bytes of each
+public packet for sequence/pacing diagnosis. Scheduled and pull-request runs
+leave it disabled; a manual workflow dispatch can enable it.
 
 GitHub Actions runs the experiment weekly, on manual request, and when its own
 contract changes. It publishes the complete directory for 30 days, including

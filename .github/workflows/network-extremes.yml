@@ -13,6 +13,12 @@ on:
   schedule:
     - cron: '37 5 * * 2'
   workflow_dispatch:
+    inputs:
+      packet_trace:
+        description: Capture public TCP headers for diagnosis
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -75,13 +81,17 @@ jobs:
 
       - name: Compare native and TCPCC CUBIC and BBR
         run: |
+          trace_args=()
+          if [[ '${{ inputs.packet_trace }}' == 'true' ]]; then
+            trace_args+=(--packet-trace)
+          fi
           sudo -n env GITHUB_SHA="$GITHUB_SHA" \
             python3 scripts/run-tcpcc-high-bdp-iperf.py \
               --integration \
               --kernel .build/tcpcc-bootstrap-out/vmlinux \
               --scenario-file \
                 benchmarks/m8/iperf-transoceanic-extreme-v1.json \
-              --packet-trace \
+              "${trace_args[@]}" \
               --output-dir .build/transoceanic-extreme
 
       - name: Publish benchmark summary
@@ -102,13 +112,7 @@ jobs:
           print()
           print('| path | median goodput (Mbit/s) | min | max | iperf retransmits* |')
           print('| --- | ---: | ---: | ---: | ---: |')
-          for case in (
-              'native_cubic',
-              'native_bbr',
-              'tcpcc_cubic',
-              'tcpcc_bbr',
-              'tcpcc_bbr_512',
-          ):
+          for case in ('native_cubic', 'native_bbr', 'tcpcc_cubic', 'tcpcc_bbr'):
               item = report['summaries'][case]
               print(
                   f"| {case} | {item['median_goodput_mbps']:.3f} | "

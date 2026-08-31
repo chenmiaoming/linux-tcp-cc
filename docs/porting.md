@@ -25,6 +25,7 @@ recovery, and fq remain protected upstream sources rather than project forks.
 - IPv4 FIB table creation and route insertion;
 - the patched IPv6 address helper;
 - IPv6 route insertion; and
+- the `init_net.ipv4.sysctl_tcp_wmem` autotuning ceiling; and
 - root-qdisc inspection under RTNL.
 
 `l3net.c` calls only the project-level operations declared by

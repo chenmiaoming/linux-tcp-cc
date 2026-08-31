@@ -199,7 +199,6 @@ class SummaryTests(unittest.TestCase):
                 "native_bbr": self.runs(39, 40, 41),
                 "tcpcc_cubic": self.runs(8, 9, 10),
                 "tcpcc_bbr": self.runs(35, 36, 37),
-                "tcpcc_bbr_512": self.runs(39, 40, 41),
             },
             scenario,
         )
@@ -230,7 +229,7 @@ class SummaryTests(unittest.TestCase):
             "backend_loopback_sender",
         )
         observations = [check for check in checks if not check["gate"]]
-        self.assertEqual(len(observations), 10)
+        self.assertEqual(len(observations), 8)
 
     def test_tcpcc_native_bbr_ratio_is_a_gate(self) -> None:
         document = copy.deepcopy(scenario_document())
@@ -247,7 +246,6 @@ class SummaryTests(unittest.TestCase):
                 "native_bbr": self.runs(39, 40, 41),
                 "tcpcc_cubic": self.runs(9, 10, 11),
                 "tcpcc_bbr": self.runs(19, 20, 21),
-                "tcpcc_bbr_512": self.runs(39, 40, 41),
             },
             scenario,
         )
