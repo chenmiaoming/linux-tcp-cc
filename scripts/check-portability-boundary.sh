@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARCH="$ROOT/linux-overlay/arch/tcpcc"
 COMPAT="$ARCH/kernel/compat.c"
+SOCKET_COMPAT="$ARCH/kernel/compat_socket.c"
 
 symbols=(
   addrconf_add_dev_addr
@@ -26,9 +27,27 @@ for symbol in "${symbols[@]}"; do
     -w "$symbol" "$ARCH" || true)
 done
 
-if ! grep -Fqx 'obj-y += net.o compat.o l3net.o bridge.o service.o control.o' \
+if ! grep -Fqx \
+  'obj-y += net.o compat.o compat_socket.o l3net.o bridge.o service.o control.o' \
   "$ARCH/kernel/Makefile"; then
   echo "tcpcc compatibility implementation is absent from Kbuild" >&2
+  failed=1
+fi
+
+socket_symbols=(kernel_bind kernel_connect)
+for symbol in "${socket_symbols[@]}"; do
+  while IFS= read -r match; do
+    file="${match%%:*}"
+    if [[ "$file" != "$SOCKET_COMPAT" ]]; then
+      echo "unstable API $symbol escaped socket compatibility boundary: $match" >&2
+      failed=1
+    fi
+  done < <(grep -Rns --include='*.c' --include='*.h' \
+    -w "$symbol" "$ARCH" || true)
+done
+
+if ! grep -Fq 'compat_socket.o' "$ARCH/kernel/Makefile"; then
+  echo "tcpcc socket compatibility implementation is absent from Kbuild" >&2
   failed=1
 fi
 
@@ -60,4 +79,4 @@ fi
 if (( failed )); then
   exit 1
 fi
-echo "TCPCC unstable networking APIs are contained in kernel/compat.c"
+echo "TCPCC unstable APIs are contained in their compatibility units"

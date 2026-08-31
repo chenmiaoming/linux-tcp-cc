@@ -40,6 +40,10 @@ from generic initialization and asks the architecture only for zone limits.
 `arch/tcpcc/kernel/compat_time.c` owns the high-resolution timer readiness
 probe; the port relies on the public timer resolution rather than the
 `hrtimer_is_hres_active()` helper removed in Linux 7.3.
+`arch/tcpcc/kernel/compat_socket.c` owns kernel bind/connect address typing;
+Linux 7.3 changed those two helpers from `sockaddr` to `sockaddr_unsized`, while
+the control and data-plane callers continue to pass their concrete IPv4 or IPv6
+address structures through a stable project interface.
 
 The remaining high-risk internal dependencies are intentionally recorded for
 future compatibility-layer work:
@@ -78,6 +82,7 @@ A green canary proves compile/link compatibility only. Release eligibility
 still requires the pinned, signed LTS tag and the complete hosted runtime CI.
 
 The first canary against Linux 7.3-rc1 found the generic page-size and zero-page
-transition. TCPCC now selects the generic 4 KiB page-size capability, avoids
-redefining page constants supplied by the core, and retains its architecture
-zero page only for kernels older than 7.3.
+transition, allocator bootstrap ownership, high-resolution timer probe removal,
+and kernel bind/connect address-type change. The corresponding architecture
+contracts now live behind narrow compatibility units rather than version checks
+spread through the data plane.

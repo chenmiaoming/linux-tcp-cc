@@ -6,6 +6,7 @@
 
 struct in6_addr;
 struct net_device;
+struct socket;
 
 /*
  * Keep direct use of unstable networking internals behind this boundary.
@@ -22,5 +23,8 @@ int tcpcc_compat_add_default_route_ipv6(struct net_device *dev,
 int tcpcc_compat_validate_fq_qdisc(struct net_device *dev);
 void tcpcc_compat_memory_init(void);
 bool tcpcc_compat_hrtimer_is_highres(void);
+int tcpcc_compat_kernel_bind(struct socket *sock, void *addr, int addrlen);
+int tcpcc_compat_kernel_connect(struct socket *sock, void *addr, int addrlen,
+				int flags);
 
 #endif /* _ASM_TCPCC_COMPAT_H */
