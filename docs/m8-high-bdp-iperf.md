@@ -55,15 +55,22 @@ therefore produces a reviewable scenario change.
 
 ## Repetitions and results
 
-The four paths are run three times in rotating order. Each measurement has a
+The five paths are run three times in rotating order. Each measurement has a
 five-second omitted warm-up followed by fifteen reported seconds.
 The report retains every raw iperf JSON document and computes the median
 delivered goodput and retransmissions for:
 
 - native CUBIC;
 - native BBR;
-- tcpcc public-side CUBIC; and
-- tcpcc public-side BBR.
+- tcpcc public-side CUBIC;
+- tcpcc public-side BBR with the default 128-MiB hosted arena; and
+- tcpcc public-side BBR with a 512-MiB hosted arena.
+
+The two TCPCC BBR cases run on the same runner with otherwise identical
+configuration. Linux derives its automatic per-socket `tcp_wmem` ceiling from
+available RAM (up to the normal 4-MiB cap), so this A/B distinguishes a
+memory-derived send-buffer ceiling from bridge, TUN, or congestion-control
+logic. The larger arena is diagnostic and does not change the CLI default.
 
 The native paths use the GitHub runner kernel and report its release. tcpcc uses
 the pinned hosted Linux image built by the prerequisite CI job. Consequently,
@@ -81,16 +88,16 @@ Twenty ICMP samples record min/average/median/max RTT. The median is an
 observation rather than a gate because runner scheduling and severe loss can
 produce large delayed outliers; the exact qdisc delay remains a hard gate.
 
-Goodput is end-to-end and directly comparable across all four paths. iperf's
+Goodput is end-to-end and directly comparable across all five paths. iperf's
 native retransmit count belongs to the public WAN sender. On a TCPCC path,
 iperf sees the ordinary backend loopback sender instead; the hosted public
 socket's retransmit counter is not currently exported. The report labels this
 scope explicitly, and TCPCC/native retransmit totals must not be compared.
 
 iperf3 normally closes its reverse data socket abortively after a successful
-measurement. A completed tcpcc data flow may therefore end with clean EOF or
-`ECONNRESET`; the control flow must close cleanly, and cancellation or another
-terminal errno is always a failure.
+measurement. A completed tcpcc data flow may therefore end with clean EOF,
+`EPIPE`, or `ECONNRESET`; the control flow must close cleanly, and cancellation
+or another terminal errno is always a failure.
 
 ## Running the gate
 

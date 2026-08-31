@@ -102,7 +102,13 @@ jobs:
           print()
           print('| path | median goodput (Mbit/s) | min | max | iperf retransmits* |')
           print('| --- | ---: | ---: | ---: | ---: |')
-          for case in ('native_cubic', 'native_bbr', 'tcpcc_cubic', 'tcpcc_bbr'):
+          for case in (
+              'native_cubic',
+              'native_bbr',
+              'tcpcc_cubic',
+              'tcpcc_bbr',
+              'tcpcc_bbr_512',
+          ):
               item = report['summaries'][case]
               print(
                   f"| {case} | {item['median_goodput_mbps']:.3f} | "

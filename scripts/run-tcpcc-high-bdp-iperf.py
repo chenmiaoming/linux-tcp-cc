@@ -38,22 +38,37 @@ NATIVE_PORT = 46001
 TCPCC_BBR_PUBLIC_PORT = 46002
 TCPCC_BACKEND_PORT = 46003
 TCPCC_CUBIC_PUBLIC_PORT = 46004
+TCPCC_BBR_512_PUBLIC_PORT = 46005
 
-CASES = ("native_cubic", "native_bbr", "tcpcc_cubic", "tcpcc_bbr")
+CASES = (
+    "native_cubic",
+    "native_bbr",
+    "tcpcc_cubic",
+    "tcpcc_bbr",
+    "tcpcc_bbr_512",
+)
 CASE_CC = {
     "native_cubic": "cubic",
     "native_bbr": "bbr",
     "tcpcc_cubic": "cubic",
     "tcpcc_bbr": "bbr",
+    "tcpcc_bbr_512": "bbr",
 }
-TCPCC_CASES = ("tcpcc_cubic", "tcpcc_bbr")
+TCPCC_CASES = ("tcpcc_cubic", "tcpcc_bbr", "tcpcc_bbr_512")
 TCPCC_PUBLIC_PORTS = {
     "tcpcc_cubic": TCPCC_CUBIC_PUBLIC_PORT,
     "tcpcc_bbr": TCPCC_BBR_PUBLIC_PORT,
+    "tcpcc_bbr_512": TCPCC_BBR_512_PUBLIC_PORT,
 }
 TCPCC_TUN_ADDRESSES = {
     "tcpcc_cubic": ("198.19.0.1", "198.19.0.2"),
     "tcpcc_bbr": ("198.18.0.1", "198.18.0.2"),
+    "tcpcc_bbr_512": ("198.20.0.1", "198.20.0.2"),
+}
+TCPCC_MEMORY_MIB = {
+    "tcpcc_cubic": 128,
+    "tcpcc_bbr": 128,
+    "tcpcc_bbr_512": 512,
 }
 PING_RTT = re.compile(
     r"(?:rtt|round-trip) min/avg/max/(?:mdev|stddev) = "
@@ -378,6 +393,7 @@ def summarize_measurements(
         native_bbr = summaries["native_bbr"]["median_goodput_mbps"]
         tcpcc_cubic = summaries["tcpcc_cubic"]["median_goodput_mbps"]
         tcpcc_bbr = summaries["tcpcc_bbr"]["median_goodput_mbps"]
+        tcpcc_bbr_512 = summaries["tcpcc_bbr_512"]["median_goodput_mbps"]
         native_bbr_over_cubic = native_bbr / native_cubic
         tcpcc_bbr_over_cubic = tcpcc_bbr / tcpcc_cubic
         tcpcc_to_native_cubic = tcpcc_cubic / native_cubic
@@ -387,6 +403,9 @@ def summarize_measurements(
             "tcpcc_bbr_over_tcpcc_cubic": tcpcc_bbr_over_cubic,
             "tcpcc_cubic_over_native_cubic": tcpcc_to_native_cubic,
             "tcpcc_bbr_over_native_bbr": tcpcc_to_native_bbr,
+            "tcpcc_bbr_512_over_tcpcc_bbr_128": (
+                tcpcc_bbr_512 / tcpcc_bbr
+            ),
         }
         add_check(
             "tcpcc_to_native_bbr_ratio",
@@ -418,6 +437,13 @@ def summarize_measurements(
             "tcpcc_cubic_over_native_cubic_observation",
             tcpcc_to_native_cubic >= 1,
             tcpcc_to_native_cubic,
+            ">= 1 (observation only)",
+            gate=False,
+        )
+        add_check(
+            "tcpcc_bbr_512_over_128_memory_observation",
+            tcpcc_bbr_512 / tcpcc_bbr >= 1,
+            tcpcc_bbr_512 / tcpcc_bbr,
             ">= 1 (observation only)",
             gate=False,
         )
@@ -1083,6 +1109,7 @@ def validate_tcpcc_events(
     events: list[dict[str, Any]],
     scenario: Scenario,
     expected_cc: str,
+    expected_memory_mib: int,
 ) -> dict[str, Any]:
     ready = next((event for event in events if event.get("event") == "ready"), None)
     stopped = next(
@@ -1092,6 +1119,10 @@ def validate_tcpcc_events(
     if ready is None or ready.get("cc") != expected_cc:
         raise RuntimeError(
             f"tcpcc readiness did not prove {expected_cc}"
+        )
+    if ready.get("hosted_memory_mib") != expected_memory_mib:
+        raise RuntimeError(
+            "tcpcc readiness did not prove the requested hosted memory"
         )
     if stopped is None or stopped.get("clean") is not True:
         raise RuntimeError("tcpcc did not report a clean stop")
@@ -1123,6 +1154,7 @@ def validate_tcpcc_events(
     last_error = int(service_stats.get("last_error", 0))
     if terminal_failures > scenario.repetitions or last_error not in {
         0,
+        -errno.EPIPE,
         -errno.ECONNRESET,
     }:
         raise RuntimeError(
@@ -1154,6 +1186,7 @@ def validate_tcpcc_events(
         },
         "data_terminal_policy": "native hosted-service aggregate",
         "accepted_cc": expected_cc,
+        "hosted_memory_mib": expected_memory_mib,
         "clean_stop": True,
     }
 
@@ -1253,12 +1286,14 @@ def start_tcpcc_case(
                 f"127.0.0.1:{TCPCC_BACKEND_PORT}",
                 "--cc",
                 cc_name,
+                "--memory-mib",
+                str(TCPCC_MEMORY_MIB[case]),
                 "--kernel",
                 str(kernel),
                 "--firewall-backend",
                 "nft-lib",
                 "--tun-name",
-                names[f"tun_{cc_name}"],
+                names[f"tun_{case}"],
                 "--tun-host-address",
                 tun_host,
                 "--tun-guest-address",
@@ -1302,8 +1337,9 @@ def benchmark(args: argparse.Namespace) -> int:
         "wan_server_dev": f"tws{suffix}",
         "wan_client_dev": f"twc{suffix}",
         "client_dev": f"tc{suffix}",
-        "tun_cubic": f"tcu{suffix}",
-        "tun_bbr": f"tbb{suffix}",
+        "tun_tcpcc_cubic": f"tcu{suffix}",
+        "tun_tcpcc_bbr": f"tbb{suffix}",
+        "tun_tcpcc_bbr_512": f"tbm{suffix}",
     }
     namespaces: list[str] = []
     native_server: subprocess.Popen[bytes] | None = None
@@ -1359,7 +1395,7 @@ def benchmark(args: argparse.Namespace) -> int:
         # independent hosted stack under the matching default, then restore BBR
         # before measurements. The public sockets themselves retain the
         # explicitly selected algorithm.
-        for case in ("tcpcc_bbr", "tcpcc_cubic"):
+        for case in TCPCC_CASES:
             process, event_path, ready = start_tcpcc_case(
                 names, kernel, output_dir, case
             )
@@ -1405,7 +1441,10 @@ def benchmark(args: argparse.Namespace) -> int:
         for case in TCPCC_CASES:
             events = read_events(tcpcc_event_paths[case])
             contract = validate_tcpcc_events(
-                events, scenario, expected_cc=CASE_CC[case]
+                events,
+                scenario,
+                expected_cc=CASE_CC[case],
+                expected_memory_mib=TCPCC_MEMORY_MIB[case],
             )
             assert_tcpcc_resources_removed(names, contract["ready"])
             tcpcc_contracts[case] = contract
