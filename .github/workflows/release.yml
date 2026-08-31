@@ -30,7 +30,22 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
+      - name: Require an upstream Linux pin change
+        id: trigger
+        env:
+          VALIDATED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$VALIDATED_SHA"
+          parent=$(git rev-parse HEAD^)
+          result=$(bash scripts/check-release-trigger.sh "$parent" HEAD)
+          echo "$result"
+          if [[ "$result" == 'release_eligible=false' ]]; then
+            echo "No upstream/linux.env change; ordinary project commits do not publish Releases." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Resolve immutable release identity
+        if: steps.trigger.outputs.eligible == 'true'
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,7 +70,9 @@ jobs:
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Download the validated hosted image
-        if: steps.release.outputs.skip == 'false'
+        if: >-
+          steps.trigger.outputs.eligible == 'true' &&
+          steps.release.outputs.skip == 'false'
         uses: actions/download-artifact@v4
         with:
           name: tcpcc-m85-vmlinux
@@ -64,21 +81,27 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
 
       - name: Build and test the native C supervisor
-        if: steps.release.outputs.skip == 'false'
+        if: >-
+          steps.trigger.outputs.eligible == 'true' &&
+          steps.release.outputs.skip == 'false'
         run: |
           make native-build
           make native-check
           chmod 0755 .build/tcpcc-bootstrap-out/vmlinux
 
       - name: Build the normalized release archive
-        if: steps.release.outputs.skip == 'false'
+        if: >-
+          steps.trigger.outputs.eligible == 'true' &&
+          steps.release.outputs.skip == 'false'
         run: |
           bash -n scripts/package-release.sh
           VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
             scripts/package-release.sh
 
       - name: Validate the packaged installed layout
-        if: steps.release.outputs.skip == 'false'
+        if: >-
+          steps.trigger.outputs.eligible == 'true' &&
+          steps.release.outputs.skip == 'false'
         run: |
           archive=$(find .build/release -maxdepth 1 -name '*.tar.xz' -print -quit)
           test -n "$archive"
@@ -92,7 +115,9 @@ jobs:
           test ! -e "$package_root/bin/python"
 
       - name: Publish the immutable GitHub Release
-        if: steps.release.outputs.skip == 'false'
+        if: >-
+          steps.trigger.outputs.eligible == 'true' &&
+          steps.release.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
