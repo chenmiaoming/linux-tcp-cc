@@ -21,5 +21,6 @@ int tcpcc_compat_add_default_route_ipv6(struct net_device *dev,
 					  const struct in6_addr *address);
 int tcpcc_compat_validate_fq_qdisc(struct net_device *dev);
 void tcpcc_compat_memory_init(void);
+bool tcpcc_compat_hrtimer_is_highres(void);
 
 #endif /* _ASM_TCPCC_COMPAT_H */

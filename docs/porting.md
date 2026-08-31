@@ -37,6 +37,9 @@ API calls from spreading back into architecture consumers.
 shared zero-page transition. Linux before 7.3 calls `free_area_init()` from the
 architecture and supplies its zero page there; Linux 7.3 calls the allocator
 from generic initialization and asks the architecture only for zone limits.
+`arch/tcpcc/kernel/compat_time.c` owns the high-resolution timer readiness
+probe; the port relies on the public timer resolution rather than the
+`hrtimer_is_hres_active()` helper removed in Linux 7.3.
 
 The remaining high-risk internal dependencies are intentionally recorded for
 future compatibility-layer work:

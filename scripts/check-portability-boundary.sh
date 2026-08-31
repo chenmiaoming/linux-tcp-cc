@@ -46,6 +46,17 @@ if ! grep -Fq 'compat_mm.o' "$ARCH/kernel/Makefile"; then
   failed=1
 fi
 
+if grep -Rns --include='*.c' --include='*.h' -w hrtimer_is_hres_active \
+  "$ARCH"; then
+  echo "removed hrtimer_is_hres_active API escaped time compatibility boundary" >&2
+  failed=1
+fi
+
+if ! grep -Fq 'compat_time.o' "$ARCH/kernel/Makefile"; then
+  echo "tcpcc time compatibility implementation is absent from Kbuild" >&2
+  failed=1
+fi
+
 if (( failed )); then
   exit 1
 fi
