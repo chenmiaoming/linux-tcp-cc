@@ -95,6 +95,11 @@ symbol-count ceiling to 113: the extra enabled symbol selects smaller core
 data structures. The 3.25 MiB executable ceiling and `.eh_frame` rejection
 remain unchanged and continue to guard the actual image footprint.
 
+The portability layer later made the generic 4 KiB page-size contract explicit
+with `HAVE_PAGE_SIZE_4KB` and `PAGE_SIZE_4KB`, raising the mechanical ceiling to
+115 without adding runtime functionality. The image-size ceiling remains
+unchanged.
+
 The append-only `RECLAIM_STATS` control operation exposes monotonic aggregate
 counters rather than per-page or per-flow events:
 

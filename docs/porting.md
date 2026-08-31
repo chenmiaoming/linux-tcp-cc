@@ -68,3 +68,8 @@ log. Triage failures in this order:
 
 A green canary proves compile/link compatibility only. Release eligibility
 still requires the pinned, signed LTS tag and the complete hosted runtime CI.
+
+The first canary against Linux 7.3-rc1 found the generic page-size and zero-page
+transition. TCPCC now selects the generic 4 KiB page-size capability, avoids
+redefining page constants supplied by the core, and retains its architecture
+zero page only for kernels older than 7.3.

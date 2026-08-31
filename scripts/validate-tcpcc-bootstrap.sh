@@ -18,6 +18,7 @@ LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
 
 grep -Fx 'CONFIG_HIGH_RES_TIMERS=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_BASE_SMALL=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_PAGE_SIZE_4KB=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_TINY_RCU=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_NET=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_INET=y' "$OUT/.config" >/dev/null

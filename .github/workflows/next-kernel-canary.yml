@@ -53,4 +53,5 @@ jobs:
             .build/next-kernel-vmlinux.log
             .build/next-kernel-out/.config
             .build/next-kernel-out/vmlinux
+          include-hidden-files: true
           if-no-files-found: warn

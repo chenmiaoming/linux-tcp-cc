@@ -5,6 +5,7 @@
 #include <linux/mm.h>
 #include <linux/printk.h>
 #include <linux/string.h>
+#include <linux/version.h>
 #include <asm/host.h>
 #include <asm/page.h>
 #include <asm/sections.h>
@@ -18,9 +19,11 @@ unsigned long tcpcc_physmem;
 unsigned long tcpcc_physmem_size;
 unsigned long tcpcc_host_initial_stack;
 
-/* Generic NOMMU/block helpers require a page-sized, page-aligned zero page. */
+/* Linux 7.3 moved the shared zero page into generic MM initialization. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 3, 0)
 unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)]
 	__aligned(PAGE_SIZE);
+#endif
 
 static void __init tcpcc_paging_init(void)
 {
