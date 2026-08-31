@@ -351,13 +351,14 @@ jobs:
             --integration \
             --kernel .build/tcpcc-bootstrap-out/vmlinux \
             --memory-mib 128 \
-            --levels 64,1024,4096 \
-            --minimum 4096 \
+            --levels 64,1024,4096,8192 \
+            --minimum 8192 \
             --active-connections 64 \
             --active-rounds 128 \
             --cpu-quota-percent "${{ matrix.cpu_quota_percent }}" \
             --cpu-idle-seconds 30 \
             --max-idle-cpu-percent 1 \
+            --max-idle-host-wakeups-per-second 5 \
             --output ".build/m11-cpu-${{ matrix.cpu_quota_percent }}/report.json" \
             --boot-log ".build/m11-cpu-${{ matrix.cpu_quota_percent }}/vmlinux.log"
 

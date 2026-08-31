@@ -162,6 +162,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--cpu-idle-seconds", type=float, default=0.25)
     parser.add_argument("--max-idle-cpu-percent", type=float)
+    parser.add_argument("--max-idle-host-wakeups-per-second", type=float)
     parser.add_argument("--cpu-quota-percent", type=int)
     return parser.parse_args()
 
@@ -546,13 +547,40 @@ def idle_observation(pid: int, seconds: float) -> dict[str, object]:
     }
     clock_ticks = int(os.sysconf("SC_CLK_TCK"))
     cpu_percent = deltas["cpu_ticks"] * 100.0 / (clock_ticks * elapsed)
+    host_wakeups_per_second = max(
+        deltas["read_syscalls"], deltas["voluntary_context_switches"]
+    ) / elapsed
     return {
         "seconds": round(elapsed, 6),
         "cpu_percent_one_core": round(cpu_percent, 6),
+        "host_wakeups_per_second": round(host_wakeups_per_second, 6),
         "deltas": deltas,
         "before": before,
         "after": after,
     }
+
+
+def enforce_idle_limits(
+    label: str, observation: dict[str, object], args: argparse.Namespace
+) -> None:
+    cpu_percent = float(observation["cpu_percent_one_core"])
+    if (
+        args.max_idle_cpu_percent is not None
+        and cpu_percent > args.max_idle_cpu_percent
+    ):
+        raise RuntimeError(
+            f"{label} idle CPU exceeded ceiling: {cpu_percent}% > "
+            f"{args.max_idle_cpu_percent}%"
+        )
+    wakeups = float(observation["host_wakeups_per_second"])
+    if (
+        args.max_idle_host_wakeups_per_second is not None
+        and wakeups > args.max_idle_host_wakeups_per_second
+    ):
+        raise RuntimeError(
+            f"{label} idle host wakeups exceeded ceiling: {wakeups}/s > "
+            f"{args.max_idle_host_wakeups_per_second}/s"
+        )
 
 
 def process_metric_deltas(
@@ -790,16 +818,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             "reclaim": asdict(reclaim_stats(control)),
             "idle": idle_observation(process.pid, args.cpu_idle_seconds),
         }
-        if (
-            args.max_idle_cpu_percent is not None
-            and ready_sample["idle"]["cpu_percent_one_core"]
-            > args.max_idle_cpu_percent
-        ):
-            raise RuntimeError(
-                "ready idle CPU exceeded ceiling: "
-                f"{ready_sample['idle']['cpu_percent_one_core']}% > "
-                f"{args.max_idle_cpu_percent}%"
-            )
+        enforce_idle_limits("ready", ready_sample["idle"], args)
 
         for target in args.levels:
             stage_started = time.monotonic()
@@ -886,16 +905,9 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 "process": observation["after"],
                 **observation,
             }
-            if (
-                target == args.levels[-1]
-                and args.max_idle_cpu_percent is not None
-                and observation["cpu_percent_one_core"]
-                > args.max_idle_cpu_percent
-            ):
-                raise RuntimeError(
-                    f"{target}-connection idle CPU exceeded ceiling: "
-                    f"{observation['cpu_percent_one_core']}% > "
-                    f"{args.max_idle_cpu_percent}%"
+            if target == args.levels[-1]:
+                enforce_idle_limits(
+                    f"{target}-connection", observation, args
                 )
             stages.append(
                 {
@@ -1413,6 +1425,13 @@ def main() -> int:
             )
         )
         or (
+            args.max_idle_host_wakeups_per_second is not None
+            and (
+                args.max_idle_host_wakeups_per_second < 0.0
+                or args.max_idle_host_wakeups_per_second > 1000.0
+            )
+        )
+        or (
             args.cpu_quota_percent is not None
             and (
                 args.cpu_quota_percent < 1
@@ -1428,7 +1447,8 @@ def main() -> int:
     ):
         raise SystemExit(
             "memory must be at least 128 MiB; connection, stability-round, "
-            "stability-drift, CPU, and public-port bounds must be valid"
+            "stability-drift, CPU, idle-wakeup, and public-port bounds must "
+            "be valid"
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.boot_log.parent.mkdir(parents=True, exist_ok=True)

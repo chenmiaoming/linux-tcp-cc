@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import errno
 import io
 import json
@@ -1092,6 +1093,24 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
         )
         self.assertEqual(observed["deltas"]["read_syscalls"], 15)
         self.assertEqual(observed["cpu_percent_one_core"], 7.5)
+        self.assertEqual(observed["host_wakeups_per_second"], 7.5)
+
+    def test_idle_limits_reject_periodic_host_wakeups(self) -> None:
+        args = argparse.Namespace(
+            max_idle_cpu_percent=1.0,
+            max_idle_host_wakeups_per_second=5.0,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "idle host wakeups exceeded ceiling"
+        ):
+            self.mod.enforce_idle_limits(
+                "ready",
+                {
+                    "cpu_percent_one_core": 0.3,
+                    "host_wakeups_per_second": 100.0,
+                },
+                args,
+            )
 
     def test_process_metrics_fallback_without_smaps_rollup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

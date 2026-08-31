@@ -17,6 +17,10 @@ LINUX_SRC="$SRC" TCPCC_LINK_OUT="$OUT" \
   bash "$ROOT/scripts/validate-tcpcc-link.sh"
 
 grep -Fx 'CONFIG_HIGH_RES_TIMERS=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_NO_HZ_IDLE=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_NO_HZ_COMMON=y' "$OUT/.config" >/dev/null
+grep -Fx 'CONFIG_TICK_ONESHOT=y' "$OUT/.config" >/dev/null
+grep -Fx '# CONFIG_HZ_PERIODIC is not set' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_BASE_SMALL=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_PAGE_SIZE_4KB=y' "$OUT/.config" >/dev/null
 grep -Fx 'CONFIG_TINY_RCU=y' "$OUT/.config" >/dev/null

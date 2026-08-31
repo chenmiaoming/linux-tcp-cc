@@ -25,6 +25,9 @@ required=(
   CONFIG_NR_CPUS=1
   CONFIG_THREAD_INFO_IN_TASK=y
   CONFIG_TINY_RCU=y
+  CONFIG_NO_HZ_IDLE=y
+  CONFIG_NO_HZ_COMMON=y
+  CONFIG_TICK_ONESHOT=y
 )
 for opt in "${required[@]}"; do
   if ! grep -qx "$opt" "$OUT/.config"; then
@@ -43,6 +46,10 @@ if grep -qx 'CONFIG_MMU=y' "$OUT/.config"; then
 fi
 if grep -qx 'CONFIG_GENERIC_ATOMIC64=y' "$OUT/.config"; then
   echo "64-bit tcpcc must provide atomic64 primitives instead of GENERIC_ATOMIC64" >&2
+  exit 1
+fi
+if grep -qx 'CONFIG_HZ_PERIODIC=y' "$OUT/.config"; then
+  echo "tcpcc idle must disarm the periodic host timer" >&2
   exit 1
 fi
 

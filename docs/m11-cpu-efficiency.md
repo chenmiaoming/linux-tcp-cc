@@ -11,13 +11,18 @@ The capacity driver records process CPU ticks, voluntary and involuntary
 context switches, read/write syscall counts, host I/O bytes, RSS, threads, and
 file descriptors. Its active probe reports CPU seconds per GiB for repeated
 small bidirectional transfers. Long idle observations run both before public
-flows and with the maximum requested connection stage established.
+flows and with the maximum requested connection stage established. The larger
+of host read syscalls and voluntary context switches is reported as a
+conservative host-wakeup proxy; it catches a timer-driven loop even when that
+loop happens to use little CPU.
 
 The `M11 CPU efficiency` CI matrix places only the hosted `vmlinux` in a cgroup
 v2 leaf with 25% or 50% of one CPU. Each case boots with the 128-MiB default,
-holds 4,096 connections, runs 128 small-packet rounds over 64 active flows, and
+holds 8,192 connections, runs 128 small-packet rounds over 64 active flows, and
 observes both zero-flow and loaded idle periods for 30 seconds. Each idle period
-must average no more than 1% of one core. Raw JSON and the hosted log remain
+must average no more than 1% of one core and no more than five host wakeups per
+second. The 8,192-flow stage also gives the shared M10 lifecycle gate enough
+load to prove meaningful post-spike reclaim. Raw JSON and the hosted log remain
 artifacts so later optimizations can compare CPU, context switches, syscalls,
 and throughput without replacing evidence with one synthetic score.
 
@@ -55,6 +60,13 @@ The shutdown path first marks the adapter stopping, removes host readiness,
 disables its IRQ, stops the netdevice queue, wakes the one packet pump, and then
 reaps queued packets. The final log reports RX/TX packets, pump rounds, IRQ and
 queue wakeups, writable waits, and budget yields.
+
+The production config also uses `CONFIG_NO_HZ_IDLE=y`. The hosted architecture
+already supplies a one-shot clockevent and enters its blocking epoll dispatcher
+from `arch_cpu_idle()`, so the generic idle-dynticks code can disarm the former
+100 Hz scheduler tick while no work is runnable. CI explicitly rejects
+`CONFIG_HZ_PERIODIC=y` and the long-idle wakeup ceiling prevents that polling
+behavior from returning unnoticed.
 
 ## Release independence
 
