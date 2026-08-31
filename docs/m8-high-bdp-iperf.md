@@ -77,6 +77,12 @@ cannot complete, a requested congestion-control algorithm is not actually in
 use, the configured RTT/loss/rate contract drifts, endpoint `fq` drops packets,
 or either TCPCC instance fails to shut down and remove its resources.
 
+Goodput is end-to-end and directly comparable across all four paths. iperf's
+native retransmit count belongs to the public WAN sender. On a TCPCC path,
+iperf sees the ordinary backend loopback sender instead; the hosted public
+socket's retransmit counter is not currently exported. The report labels this
+scope explicitly, and TCPCC/native retransmit totals must not be compared.
+
 iperf3 normally closes its reverse data socket abortively after a successful
 measurement. A completed tcpcc data flow may therefore end with clean EOF or
 `ECONNRESET`; the control flow must close cleanly, and cancellation or another

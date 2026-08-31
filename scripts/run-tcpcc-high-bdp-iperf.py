@@ -358,6 +358,11 @@ def summarize_measurements(
             "maximum_goodput_mbps": max(goodputs),
             "median_retransmits": statistics.median(retransmits),
             "total_retransmits": sum(retransmits),
+            "iperf_retransmit_scope": (
+                "backend_loopback_sender"
+                if case in TCPCC_CASES
+                else "public_wan_sender"
+            ),
         }
         add_check(
             f"{case}_minimum_goodput",
@@ -1383,6 +1388,14 @@ def benchmark(args: argparse.Namespace) -> int:
             "derived_network": {
                 "configured_rtt_ms": scenario.rtt_ms,
                 "configured_bdp_bytes": scenario.bdp_bytes,
+            },
+            "measurement_semantics": {
+                "goodput": "end-to-end application bytes delivered",
+                "native_retransmits": "iperf public WAN sender",
+                "tcpcc_retransmits": (
+                    "iperf backend loopback sender; hosted public-socket "
+                    "retransmits are not currently exported"
+                ),
             },
             "environment": environment,
             "ping": ping,

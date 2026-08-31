@@ -205,6 +205,14 @@ class SummaryTests(unittest.TestCase):
             summaries["comparisons"]["tcpcc_bbr_over_tcpcc_cubic"],
             4,
         )
+        self.assertEqual(
+            summaries["native_bbr"]["iperf_retransmit_scope"],
+            "public_wan_sender",
+        )
+        self.assertEqual(
+            summaries["tcpcc_bbr"]["iperf_retransmit_scope"],
+            "backend_loopback_sender",
+        )
         observations = [check for check in checks if not check["gate"]]
         self.assertEqual(len(observations), 8)
 

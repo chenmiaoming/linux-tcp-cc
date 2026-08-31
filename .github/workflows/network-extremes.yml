@@ -98,7 +98,7 @@ jobs:
           )
           print('## 1 Gbit/s, 200 ms RTT, symmetric 10% loss')
           print()
-          print('| path | median goodput (Mbit/s) | min | max | median retransmits |')
+          print('| path | median goodput (Mbit/s) | min | max | iperf retransmits* |')
           print('| --- | ---: | ---: | ---: | ---: |')
           for case in ('native_cubic', 'native_bbr', 'tcpcc_cubic', 'tcpcc_bbr'):
               item = report['summaries'][case]
@@ -112,6 +112,12 @@ jobs:
           print('Ratios:')
           for name, value in report['summaries']['comparisons'].items():
               print(f'- `{name}`: {value:.3f}x')
+          print()
+          print(
+              '* Native retransmits describe the public WAN sender. TCPCC '
+              'retransmits describe the iperf backend loopback sender; the '
+              'hosted public-socket retransmit counter is not exported yet.'
+          )
           PY
 
       - name: Upload complete benchmark evidence
