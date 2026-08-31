@@ -55,6 +55,10 @@ single-owner, event-driven hosted bridge. The process boundary, capacity model,
 and CI gates are described in
 [`docs/m9-native-event-runtime.md`](docs/m9-native-event-runtime.md).
 
+M11 coalesces packet wakeups, combines TUN RX/TX into one budgeted event pump,
+and validates idle and small-packet CPU under 25% and 50% cgroup CPU quotas.
+See [`docs/m11-cpu-efficiency.md`](docs/m11-cpu-efficiency.md).
+
 ## Server-ingress command
 
 Build and validate the hosted kernel, then install the native C command and

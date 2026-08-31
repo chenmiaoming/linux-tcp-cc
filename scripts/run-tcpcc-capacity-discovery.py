@@ -74,6 +74,22 @@ BUFFER_HIGH_WATER = re.compile(
     r"M9\.4 bridge buffer high-water ([0-9]+)/262144 bytes, current ([0-9]+)"
 )
 HOST_MEMORY = re.compile(r"tcpcc: M3\.1 host RAM ([0-9]+) MiB at")
+L3_PUMP = re.compile(
+    r"tcpcc: M11 L3 pump "
+    r"rx_packets=([0-9]+) tx_packets=([0-9]+) tx_dropped=([0-9]+) "
+    r"rounds=([0-9]+) empty=([0-9]+) rx_irq=([0-9]+) "
+    r"tx_wake=([0-9]+) writable_irq=([0-9]+) eagain=([0-9]+) "
+    r"arms=([0-9]+) rx_budget=([0-9]+) tx_budget=([0-9]+)"
+)
+PROCESS_DELTA_FIELDS = (
+    "cpu_ticks",
+    "voluntary_context_switches",
+    "nonvoluntary_context_switches",
+    "read_syscalls",
+    "write_syscalls",
+    "read_bytes",
+    "write_bytes",
+)
 
 
 def ensure_driver_fd_capacity(connections: int) -> tuple[int, int]:
@@ -130,6 +146,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--minimum", type=int, default=16384)
     parser.add_argument("--active-connections", type=int, default=64)
+    parser.add_argument("--active-rounds", type=int, default=1)
     parser.add_argument(
         "--stability-rounds", type=int, default=DEFAULT_STABILITY_ROUNDS
     )
@@ -143,6 +160,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_STABILITY_DRIFT_KIB,
     )
+    parser.add_argument("--cpu-idle-seconds", type=float, default=0.25)
+    parser.add_argument("--max-idle-cpu-percent", type=float)
+    parser.add_argument("--cpu-quota-percent", type=int)
     return parser.parse_args()
 
 
@@ -425,7 +445,14 @@ def process_metrics(pid: int) -> dict[str, object]:
         key, separator, raw = line.partition(":")
         if separator:
             cleaned_key = key.strip()
-            if cleaned_key in {"VmRSS", "VmSize", "RssAnon", "Threads"}:
+            if cleaned_key in {
+                "VmRSS",
+                "VmSize",
+                "RssAnon",
+                "Threads",
+                "voluntary_ctxt_switches",
+                "nonvoluntary_ctxt_switches",
+            }:
                 status_values[cleaned_key] = int(raw.strip().split()[0])
     missing_status = {"VmRSS", "VmSize", "Threads"} - status_values.keys()
     if missing_status:
@@ -465,6 +492,14 @@ def process_metrics(pid: int) -> dict[str, object]:
     cpu_ticks = int(fields[11]) + int(fields[12])
 
     host_fds = len(list(Path(f"/proc/{pid}/fd").iterdir()))
+    io_values: dict[str, int] = {}
+    for line in Path(f"/proc/{pid}/io").read_text().splitlines():
+        key, separator, raw = line.partition(":")
+        if separator and key in {"syscr", "syscw", "read_bytes", "write_bytes"}:
+            io_values[key] = int(raw.strip())
+    missing_io = {"syscr", "syscw", "read_bytes", "write_bytes"} - io_values.keys()
+    if missing_io:
+        raise RuntimeError(f"/proc/{pid}/io is missing {sorted(missing_io)}")
 
     rss_kib = rollup_values.get("Rss", status_values.get("VmRSS", 0))
     virtual_kib = status_values.get("VmSize", 0)
@@ -484,9 +519,85 @@ def process_metrics(pid: int) -> dict[str, object]:
         "threads": threads,
         "host_fds": host_fds,
         "cpu_ticks": cpu_ticks,
+        "voluntary_context_switches": status_values.get(
+            "voluntary_ctxt_switches", 0
+        ),
+        "nonvoluntary_context_switches": status_values.get(
+            "nonvoluntary_ctxt_switches", 0
+        ),
+        "read_syscalls": io_values["syscr"],
+        "write_syscalls": io_values["syscw"],
+        "read_bytes": io_values["read_bytes"],
+        "write_bytes": io_values["write_bytes"],
         "smaps_rollup_available": rollup_available,
         "rss_source": "smaps_rollup" if rollup_available else "status",
     }
+
+
+def idle_observation(pid: int, seconds: float) -> dict[str, object]:
+    before = process_metrics(pid)
+    started = time.monotonic()
+    time.sleep(seconds)
+    elapsed = time.monotonic() - started
+    after = process_metrics(pid)
+    deltas = {
+        field: int(after[field]) - int(before[field])
+        for field in PROCESS_DELTA_FIELDS
+    }
+    clock_ticks = int(os.sysconf("SC_CLK_TCK"))
+    cpu_percent = deltas["cpu_ticks"] * 100.0 / (clock_ticks * elapsed)
+    return {
+        "seconds": round(elapsed, 6),
+        "cpu_percent_one_core": round(cpu_percent, 6),
+        "deltas": deltas,
+        "before": before,
+        "after": after,
+    }
+
+
+def process_metric_deltas(
+    before: dict[str, object], after: dict[str, object]
+) -> dict[str, int]:
+    return {
+        field: int(after[field]) - int(before[field])
+        for field in PROCESS_DELTA_FIELDS
+    }
+
+
+def place_in_cpu_cgroup(pid: int, quota_percent: int) -> Path:
+    cgroup = Path("/sys/fs/cgroup") / f"tcpcc-m11-{pid}"
+    cgroup.mkdir()
+    try:
+        cpu_max = cgroup / "cpu.max"
+        if not cpu_max.exists():
+            raise RuntimeError("cgroup v2 cpu.max is unavailable")
+        period = 100000
+        quota = max(1000, period * quota_percent // 100)
+        cpu_max.write_text(f"{quota} {period}\n", encoding="ascii")
+        (cgroup / "cgroup.procs").write_text(f"{pid}\n", encoding="ascii")
+    except BaseException:
+        cgroup.rmdir()
+        raise
+    return cgroup
+
+
+def remove_cpu_cgroup(cgroup: Path | None) -> None:
+    if cgroup is None:
+        return
+    try:
+        cgroup.rmdir()
+    except FileNotFoundError:
+        pass
+
+
+def cpu_cgroup_stats(cgroup: Path | None) -> dict[str, int] | None:
+    if cgroup is None:
+        return None
+    values: dict[str, int] = {}
+    for line in (cgroup / "cpu.stat").read_text().splitlines():
+        key, raw = line.split()
+        values[key] = int(raw)
+    return values
 
 
 def close_socket(connection: socket.socket) -> None:
@@ -564,6 +675,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
     tun_name = f"tcpcap{os.getpid():x}"[:15]
     tun_fd = create_tun(tun_name)
     process: subprocess.Popen[bytes] | None = None
+    cpu_cgroup: Path | None = None
     control: ControlClient | None = None
     service_handle: int | None = None
     backend_listener: socket.socket | None = None
@@ -595,6 +707,12 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             "encoding_limit": BRIDGE_SESSION_LIMIT,
             "admission_limit": 0,
             "hosted_memory_mib": args.memory_mib,
+            "cpu_configuration": {
+                "quota_percent": args.cpu_quota_percent,
+                "idle_seconds": args.cpu_idle_seconds,
+                "max_idle_cpu_percent": args.max_idle_cpu_percent,
+            },
+            "cpu_cgroup": cpu_cgroup_stats(cpu_cgroup),
             "minimum_required": args.minimum,
             "levels": list(args.levels),
             "reached_connections": reached,
@@ -637,6 +755,10 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             bufsize=0,
             start_new_session=True,
         )
+        if args.cpu_quota_percent is not None:
+            cpu_cgroup = place_in_cpu_cgroup(
+                process.pid, args.cpu_quota_percent
+            )
         os.close(tun_fd)
         tun_fd = -1
         if process.stdin is None or process.stdout is None:
@@ -666,7 +788,18 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             "service": asdict(ready_stats),
             "process": process_metrics(process.pid),
             "reclaim": asdict(reclaim_stats(control)),
+            "idle": idle_observation(process.pid, args.cpu_idle_seconds),
         }
+        if (
+            args.max_idle_cpu_percent is not None
+            and ready_sample["idle"]["cpu_percent_one_core"]
+            > args.max_idle_cpu_percent
+        ):
+            raise RuntimeError(
+                "ready idle CPU exceeded ceiling: "
+                f"{ready_sample['idle']['cpu_percent_one_core']}% > "
+                f"{args.max_idle_cpu_percent}%"
+            )
 
         for target in args.levels:
             stage_started = time.monotonic()
@@ -702,23 +835,68 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 break
             last_successful = target
             if active_result is None and target >= args.active_connections:
-                active_result = active_probe(
-                    clients, backends, args.active_connections
+                active_before = process_metrics(process.pid)
+                active_started = time.monotonic()
+                for _round in range(args.active_rounds):
+                    active_probe(clients, backends, args.active_connections)
+                active_elapsed = time.monotonic() - active_started
+                active_after = process_metrics(process.pid)
+                active_deltas = process_metric_deltas(
+                    active_before, active_after
                 )
+                active_bytes = (
+                    args.active_connections
+                    * PAYLOAD_BYTES
+                    * args.active_rounds
+                    * 2
+                )
+                active_cpu_seconds = (
+                    active_deltas["cpu_ticks"]
+                    / int(os.sysconf("SC_CLK_TCK"))
+                )
+                active_result = {
+                    "status": "passed",
+                    "connections": args.active_connections,
+                    "rounds": args.active_rounds,
+                    "payload_bytes_each_direction": PAYLOAD_BYTES,
+                    "payload_bytes_each_direction_per_round": PAYLOAD_BYTES,
+                    "total_bidirectional_bytes": active_bytes,
+                    "elapsed_seconds": round(active_elapsed, 6),
+                    "process_deltas": active_deltas,
+                    "cpu_seconds": round(active_cpu_seconds, 6),
+                    "cpu_seconds_per_gib": round(
+                        active_cpu_seconds * (1024 ** 3) / active_bytes, 6
+                    ),
+                }
                 expected_active_bytes = (
-                    args.active_connections * PAYLOAD_BYTES
+                    args.active_connections
+                    * PAYLOAD_BYTES
+                    * args.active_rounds
                 )
-            idle_before = process_metrics(process.pid)
-            time.sleep(0.25)
-            idle_after = process_metrics(process.pid)
+            idle_seconds = (
+                args.cpu_idle_seconds
+                if target == args.levels[-1]
+                else 0.25
+            )
+            observation = idle_observation(process.pid, idle_seconds)
             idle_result = {
                 "connections": target,
-                "seconds": 0.25,
-                "cpu_ticks_delta": (
-                    idle_after["cpu_ticks"] - idle_before["cpu_ticks"]
-                ),
-                "process": idle_after,
+                "seconds": observation["seconds"],
+                "cpu_ticks_delta": observation["deltas"]["cpu_ticks"],
+                "process": observation["after"],
+                **observation,
             }
+            if (
+                target == args.levels[-1]
+                and args.max_idle_cpu_percent is not None
+                and observation["cpu_percent_one_core"]
+                > args.max_idle_cpu_percent
+            ):
+                raise RuntimeError(
+                    f"{target}-connection idle CPU exceeded ceiling: "
+                    f"{observation['cpu_percent_one_core']}% > "
+                    f"{args.max_idle_cpu_percent}%"
+                )
             stages.append(
                 {
                     "target": target,
@@ -726,7 +904,10 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                     "service": asdict(stats),
                     "process": process_metrics(process.pid),
                     "reclaim": asdict(reclaim_stats(control)),
-                    "idle_cpu_ticks_delta": idle_result["cpu_ticks_delta"],
+                    "idle": idle_result,
+                    "idle_cpu_ticks_delta": idle_result["deltas"][
+                        "cpu_ticks"
+                    ],
                 }
             )
 
@@ -1196,6 +1377,8 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
             except BaseException:
                 pass
         stop_process(process)
+        remove_cpu_cgroup(cpu_cgroup)
+        cpu_cgroup = None
         if backend_listener is not None:
             backend_listener.close()
         if tun_fd >= 0:
@@ -1213,11 +1396,29 @@ def main() -> int:
         or args.memory_mib < 128
         or args.active_connections < 1
         or args.active_connections > args.minimum
+        or args.active_rounds < 1
+        or args.active_rounds > 1024
         or args.stability_rounds < 0
         or args.stability_rounds > 32
         or args.stability_connections < 1
         or args.stability_connections > BRIDGE_SESSION_LIMIT
         or args.stability_drift_kib < 0
+        or args.cpu_idle_seconds < 0.1
+        or args.cpu_idle_seconds > 60.0
+        or (
+            args.max_idle_cpu_percent is not None
+            and (
+                args.max_idle_cpu_percent < 0.0
+                or args.max_idle_cpu_percent > 100.0
+            )
+        )
+        or (
+            args.cpu_quota_percent is not None
+            and (
+                args.cpu_quota_percent < 1
+                or args.cpu_quota_percent > 100
+            )
+        )
         or STABILITY_PUBLIC_PORT_BASE + max(args.stability_rounds - 1, 0)
         > 65535
         or (
@@ -1227,7 +1428,7 @@ def main() -> int:
     ):
         raise SystemExit(
             "memory must be at least 128 MiB; connection, stability-round, "
-            "stability-drift, and public-port bounds must be valid"
+            "stability-drift, CPU, and public-port bounds must be valid"
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.boot_log.parent.mkdir(parents=True, exist_ok=True)
@@ -1265,6 +1466,43 @@ def main() -> int:
         report["buffer_current_bytes_at_shutdown"] = (
             int(buffer_matches[-1][1]) if buffer_matches else None
         )
+        pump_matches = L3_PUMP.findall(boot)
+        if not pump_matches:
+            raise RuntimeError("M11 L3 packet-pump telemetry is missing")
+        pump_values = [int(value) for value in pump_matches[-1]]
+        pump_names = (
+            "rx_packets",
+            "tx_packets",
+            "tx_dropped",
+            "io_rounds",
+            "empty_rounds",
+            "rx_irq_events",
+            "tx_queue_wakeups",
+            "tx_writable_events",
+            "tx_eagain",
+            "writable_arms",
+            "rx_budget_yields",
+            "tx_budget_yields",
+        )
+        report["l3_pump"] = dict(zip(pump_names, pump_values, strict=True))
+        if report["l3_pump"]["empty_rounds"]:
+            raise RuntimeError(
+                "L3 packet pump observed empty wake rounds: "
+                f"{report['l3_pump']['empty_rounds']}"
+            )
+        if (
+            report["l3_pump"]["tx_queue_wakeups"]
+            > (
+                report["l3_pump"]["tx_packets"]
+                + report["l3_pump"]["tx_dropped"]
+            )
+        ):
+            raise RuntimeError(
+                "L3 TX wakeups exceeded transmitted packets: "
+                f"{report['l3_pump']['tx_queue_wakeups']} > "
+                f"{report['l3_pump']['tx_packets']} + "
+                f"{report['l3_pump']['tx_dropped']} dropped"
+            )
     except BaseException as error:
         partial_report = getattr(error, "tcpcc_partial_report", None)
         report = (
