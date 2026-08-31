@@ -483,6 +483,78 @@ def stop_process(process: subprocess.Popen[object] | None) -> None:
         process.wait(timeout=5)
 
 
+def start_packet_capture(
+    names: dict[str, str],
+    output_dir: Path,
+    *,
+    case: str,
+    round_number: int,
+    public_port: int,
+) -> tuple[subprocess.Popen[bytes], Path, Path]:
+    """Capture the public TCP flow before WAN netem mutates it.
+
+    The WAN-side server veth sees public data packets as they enter the WAN
+    namespace and returning ACKs after the reverse-direction netem qdisc.  A
+    small snap length retains TCP sequence/options/timestamps without copying
+    application payload into the CI artifact.
+    """
+    capture_path = output_dir / f"packet-{case}-round-{round_number}.pcap"
+    diagnostic_path = output_dir / f"packet-{case}-round-{round_number}.log"
+    diagnostic_stream = diagnostic_path.open("wb")
+    try:
+        process = subprocess.Popen(
+            ns_command(
+                names["wan_ns"],
+                "tcpdump",
+                "-i",
+                names["wan_server_dev"],
+                "-n",
+                "-U",
+                "-s",
+                "160",
+                "-w",
+                str(capture_path),
+                "tcp",
+                "and",
+                "host",
+                SERVER_ADDRESS,
+                "and",
+                "port",
+                str(public_port),
+            ),
+            stdout=subprocess.DEVNULL,
+            stderr=diagnostic_stream,
+            start_new_session=True,
+        )
+    finally:
+        diagnostic_stream.close()
+
+    # tcpdump opens the capture device synchronously before entering its read
+    # loop.  Catch startup failures before iperf creates the connection.
+    time.sleep(0.2)
+    if process.poll() is not None:
+        diagnostic = diagnostic_path.read_text(
+            encoding="utf-8", errors="replace"
+        )
+        raise RuntimeError(
+            f"tcpdump exited with {process.returncode} before {case} "
+            f"round {round_number}:\n{diagnostic}"
+        )
+    return process, capture_path, diagnostic_path
+
+
+def stop_packet_capture(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        process.send_signal(signal.SIGINT)
+    try:
+        status = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        status = process.wait(timeout=5)
+    if status not in {0, -signal.SIGINT}:
+        raise RuntimeError(f"tcpdump exited with status {status}")
+
+
 def wait_listener(
     namespace: str,
     port: int,
@@ -934,6 +1006,7 @@ def run_iperf_measurement(
     case: str,
     round_number: int,
     order: int,
+    packet_trace: bool,
 ) -> dict[str, Any]:
     if case not in CASES:
         raise ValueError(f"unknown iperf case {case}")
@@ -964,7 +1037,21 @@ def run_iperf_measurement(
         f"{case}-round-{round_number}",
     )
     timeout = scenario.duration_seconds + scenario.omit_seconds + 30
-    completed = run(command, check=False, timeout=timeout)
+    capture_process: subprocess.Popen[bytes] | None = None
+    capture_path: Path | None = None
+    if packet_trace:
+        capture_process, capture_path, _diagnostic_path = start_packet_capture(
+            names,
+            output_dir,
+            case=case,
+            round_number=round_number,
+            public_port=public_port,
+        )
+    try:
+        completed = run(command, check=False, timeout=timeout)
+    finally:
+        if capture_process is not None:
+            stop_packet_capture(capture_process)
     stem = f"iperf-{case}-round-{round_number}"
     write_text(output_dir / f"{stem}.json", completed.stdout)
     if completed.returncode != 0:
@@ -984,6 +1071,9 @@ def run_iperf_measurement(
             "order": order,
             "public_port": public_port,
             "raw_artifact": f"{stem}.json",
+            "packet_trace_artifact": (
+                capture_path.name if capture_path is not None else None
+            ),
         }
     )
     return result
@@ -1190,7 +1280,10 @@ def start_tcpcc_case(
 def benchmark(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         raise PermissionError("--integration requires root")
-    for command in ("ethtool", "ip", "iperf3", "nft", "ss", "sysctl", "tc"):
+    commands = ["ethtool", "ip", "iperf3", "nft", "ss", "sysctl", "tc"]
+    if args.packet_trace:
+        commands.append("tcpdump")
+    for command in commands:
         if shutil.which(command) is None:
             raise FileNotFoundError(f"required command is unavailable: {command}")
     kernel = args.kernel.resolve(strict=True)
@@ -1293,6 +1386,7 @@ def benchmark(args: argparse.Namespace) -> int:
                     case=case,
                     round_number=round_index + 1,
                     order=order_index + 1,
+                    packet_trace=args.packet_trace,
                 )
                 measurements[case].append(measurement)
                 time.sleep(scenario.settle_seconds)
@@ -1439,6 +1533,11 @@ def parse_args() -> argparse.Namespace:
         "--scenario-file",
         type=Path,
         default=DEFAULT_SCENARIO,
+    )
+    parser.add_argument(
+        "--packet-trace",
+        action="store_true",
+        help="capture public TCP headers for each measurement",
     )
     parser.add_argument("--output-dir", required=True, type=Path)
     return parser.parse_args()

@@ -47,7 +47,8 @@ jobs:
               libssl-dev \
               nftables \
               procps \
-              strace
+              strace \
+              tcpdump
 
       - name: Validate benchmark contracts
         run: |
@@ -80,6 +81,7 @@ jobs:
               --kernel .build/tcpcc-bootstrap-out/vmlinux \
               --scenario-file \
                 benchmarks/m8/iperf-transoceanic-extreme-v1.json \
+              --packet-trace \
               --output-dir .build/transoceanic-extreme
 
       - name: Publish benchmark summary

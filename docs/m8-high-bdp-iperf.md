@@ -102,6 +102,7 @@ sudo python3 scripts/run-tcpcc-high-bdp-iperf.py \
   --integration \
   --kernel .build/tcpcc-bootstrap-out/vmlinux \
   --scenario-file benchmarks/m8/iperf-transoceanic-extreme-v1.json \
+  --packet-trace \
   --output-dir .build/transoceanic-extreme
 ```
 
