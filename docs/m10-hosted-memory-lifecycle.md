@@ -100,6 +100,12 @@ with `HAVE_PAGE_SIZE_4KB` and `PAGE_SIZE_4KB`, raising the mechanical ceiling to
 115 without adding runtime functionality. The image-size ceiling remains
 unchanged.
 
+M11 replaces `HZ_PERIODIC` with `NO_HZ_COMMON` and `NO_HZ_IDLE`, a net increase
+of one enabled symbol, so the exact ceiling is now 116. This deliberate 8.6-KiB
+section-size increase lets an idle hosted kernel disarm its former 100 Hz host
+timer. The 3.25-MiB executable ceiling and `.eh_frame` rejection remain
+unchanged.
+
 The append-only `RECLAIM_STATS` control operation exposes monotonic aggregate
 counters rather than per-page or per-flow events:
 

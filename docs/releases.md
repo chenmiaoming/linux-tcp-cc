@@ -46,17 +46,20 @@ bash scripts/update-linux-lts.sh v6.18.46
 
 `.github/workflows/release.yml` listens for a successful complete `TCPCC
 hosted bootstrap` run on the repository's `6.18.y` branch. Pull-request runs,
-forks, failed runs, and topic branches cannot publish. The release job checks
-out the exact validated commit and downloads the hosted image produced by that
+forks, failed runs, and topic branches cannot publish. It additionally requires
+the exact validated commit to change `upstream/linux.env` relative to its first
+parent. Ordinary feature, performance, documentation, and CI pull requests are
+therefore never Release-producing commits. The release job checks out the exact
+validated LTS-update commit and downloads the hosted image produced by that
 same workflow run.
 
 Before publication it also builds and runs the native C boundary tests in CI,
 constructs the archive, extracts it into a clean directory, and proves the
 installed relative layout. A tag or Release that already exists is never
-overwritten. Ordinary project commits after a version is published therefore
-do not respin that upstream version; they ship with the next Linux 6.18.y
-patch. A security fix that cannot wait requires an explicit versioning-policy
-change rather than silently replacing an artifact.
+overwritten. Ordinary project commits accumulate on `6.18.y` and ship only
+when a later pull request advances the upstream Linux pin. A security fix that
+cannot wait requires an explicit versioning-policy change rather than silently
+replacing an artifact.
 
 ## Binary archive
 

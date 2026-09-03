@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import errno
 import io
 import json
@@ -1024,6 +1025,8 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
                 "VmRSS:\t   72144 kB\n"
                 "RssAnon:\t   68000 kB\n"
                 "Threads:\t1\n"
+                "voluntary_ctxt_switches:\t17\n"
+                "nonvoluntary_ctxt_switches:\t3\n"
             )
             (proc_pid / "smaps_rollup").write_text(
                 "Rss:               72144 kB\n"
@@ -1033,6 +1036,9 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
             )
             (proc_pid / "stat").write_text(
                 "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 15 25 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "io").write_text(
+                "syscr: 101\nsyscw: 202\nread_bytes: 303\nwrite_bytes: 404\n"
             )
             (proc_pid / "fd").mkdir()
             (proc_pid / "fd" / "0").touch()
@@ -1059,8 +1065,52 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
             self.assertEqual(metrics["threads"], 1)
             self.assertEqual(metrics["host_fds"], 3)
             self.assertEqual(metrics["cpu_ticks"], 40)
+            self.assertEqual(metrics["voluntary_context_switches"], 17)
+            self.assertEqual(metrics["nonvoluntary_context_switches"], 3)
+            self.assertEqual(metrics["read_syscalls"], 101)
+            self.assertEqual(metrics["write_syscalls"], 202)
             self.assertTrue(metrics["smaps_rollup_available"])
             self.assertEqual(metrics["rss_source"], "smaps_rollup")
+
+    def test_idle_observation_reports_cpu_switch_and_io_deltas(self) -> None:
+        before = {field: 10 for field in self.mod.PROCESS_DELTA_FIELDS}
+        after = {field: 25 for field in self.mod.PROCESS_DELTA_FIELDS}
+        with (
+            patch.object(
+                self.mod, "process_metrics", side_effect=[before, after]
+            ),
+            patch.object(self.mod.time, "sleep"),
+            patch.object(
+                self.mod.time, "monotonic", side_effect=[100.0, 102.0]
+            ),
+            patch.object(self.mod.os, "sysconf", return_value=100),
+        ):
+            observed = self.mod.idle_observation(1234, 2.0)
+
+        self.assertEqual(observed["deltas"]["cpu_ticks"], 15)
+        self.assertEqual(
+            observed["deltas"]["voluntary_context_switches"], 15
+        )
+        self.assertEqual(observed["deltas"]["read_syscalls"], 15)
+        self.assertEqual(observed["cpu_percent_one_core"], 7.5)
+        self.assertEqual(observed["host_wakeups_per_second"], 7.5)
+
+    def test_idle_limits_reject_periodic_host_wakeups(self) -> None:
+        args = argparse.Namespace(
+            max_idle_cpu_percent=1.0,
+            max_idle_host_wakeups_per_second=5.0,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "idle host wakeups exceeded ceiling"
+        ):
+            self.mod.enforce_idle_limits(
+                "ready",
+                {
+                    "cpu_percent_one_core": 0.3,
+                    "host_wakeups_per_second": 100.0,
+                },
+                args,
+            )
 
     def test_process_metrics_fallback_without_smaps_rollup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1073,6 +1123,9 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
             )
             (proc_pid / "stat").write_text(
                 "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 5 10 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "io").write_text(
+                "syscr: 1\nsyscw: 2\nread_bytes: 3\nwrite_bytes: 4\n"
             )
             (proc_pid / "fd").mkdir()
             (proc_pid / "fd" / "0").touch()
@@ -1124,6 +1177,9 @@ class CapacityDiscoveryMetricsTests(unittest.TestCase):
             )
             (proc_pid / "stat").write_text(
                 "1234 (vmlinux) S 1 1234 1234 0 -1 4194304 100 0 0 0 5 10 0 0 20 0 1 0 0 0 0 0"
+            )
+            (proc_pid / "io").write_text(
+                "syscr: 0\nsyscw: 0\nread_bytes: 0\nwrite_bytes: 0\n"
             )
             (proc_pid / "fd").mkdir()
 

@@ -14,6 +14,8 @@ on:
       - 'patches/**'
       - 'scripts/prepare-linux.sh'
       - 'scripts/package-release.sh'
+      - 'scripts/check-release-trigger.sh'
+      - 'scripts/test-release-trigger.sh'
       - 'scripts/validate-tcpcc-link.sh'
       - 'scripts/validate-tcpcc-bootstrap.sh'
       - 'scripts/validate-tcpcc-tun.sh'
@@ -69,6 +71,8 @@ jobs:
           bash -n scripts/validate-tcpcc-bootstrap.sh
           bash -n scripts/validate-tcpcc-tun.sh
           bash -n scripts/validate-tcpcc-long-fat.sh
+          bash -n scripts/check-release-trigger.sh
+          bash -n scripts/test-release-trigger.sh
           python3 -m py_compile scripts/run-tcpcc-control-test.py
           python3 -m py_compile scripts/run-tcpcc-runtime-test.py
           python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
@@ -82,6 +86,7 @@ jobs:
           python3 -m py_compile tools/tcpcc_control.py
           python3 -m py_compile tools/tcpcc_host.py
           python3 -m json.tool benchmarks/m7/scenarios-v1.json >/dev/null
+          bash scripts/test-release-trigger.sh
 
       - name: Exercise stable CLI and hosted runtime fault boundaries
         run: python3 scripts/test-tcpcc-cli.py
@@ -304,6 +309,66 @@ jobs:
         with:
           name: tcpcc-m9-capacity
           path: .build/m9-capacity
+          if-no-files-found: warn
+
+  cpu-efficiency:
+    name: M11 CPU efficiency (${{ matrix.cpu_quota_percent }}% CPU)
+    needs: start-kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu_quota_percent: [25, 50]
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Download hosted kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: tcpcc-m85-vmlinux
+          path: .build/tcpcc-bootstrap-out
+
+      - name: Install low-resource probe dependencies
+        run: |
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends iproute2 procps
+
+      - name: Prepare TUN and low-resource process limits
+        run: |
+          sudo -n modprobe tun || true
+          test -c /dev/net/tun
+          test -f /sys/fs/cgroup/cgroup.controllers
+          grep -qw cpu /sys/fs/cgroup/cgroup.controllers
+          sudo -n sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+          chmod u+x .build/tcpcc-bootstrap-out/vmlinux
+
+      - name: Measure idle and small-packet CPU under quota
+        run: |
+          sudo -n python3 scripts/run-tcpcc-capacity-discovery.py \
+            --integration \
+            --kernel .build/tcpcc-bootstrap-out/vmlinux \
+            --memory-mib 128 \
+            --levels 64,1024,4096,8192 \
+            --minimum 8192 \
+            --active-connections 64 \
+            --active-rounds 128 \
+            --cpu-quota-percent "${{ matrix.cpu_quota_percent }}" \
+            --cpu-idle-seconds 30 \
+            --max-idle-cpu-percent 1 \
+            --max-idle-host-wakeups-per-second 5 \
+            --skip-memory-lifecycle \
+            --output ".build/m11-cpu-${{ matrix.cpu_quota_percent }}/report.json" \
+            --boot-log ".build/m11-cpu-${{ matrix.cpu_quota_percent }}/vmlinux.log"
+
+      - name: Upload M11 CPU and packet-pump telemetry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-m11-cpu-${{ matrix.cpu_quota_percent }}
+          path: .build/m11-cpu-${{ matrix.cpu_quota_percent }}
           if-no-files-found: warn
 
   ipv6-ingress:

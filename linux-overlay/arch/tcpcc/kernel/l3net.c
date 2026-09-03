@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include <linux/completion.h>
+#include <linux/bitops.h>
 #include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/if_arp.h>
@@ -9,9 +9,11 @@
 #include <linux/irq.h>
 #include <linux/kthread.h>
 #include <linux/netdevice.h>
+#include <linux/sched.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
+#include <linux/wait.h>
 #include <net/checksum.h>
 #include <net/ip_tunnels.h>
 #include <asm/host.h>
@@ -25,20 +27,37 @@
 #define TCPCC_L3_TX_QUEUE_LIMIT   64U
 #define TCPCC_L3_TX_LOW_WATERMARK 32U
 #define TCPCC_L3_RX_BUFFER_SIZE   65535U
+#define TCPCC_L3_IO_BUDGET        64U
 #define TCPCC_L3_MIN_TEST_PACKETS 33U
 #define TCPCC_HOST_EAGAIN         11
+
+#define TCPCC_L3_EVENT_RX_READY    0
+#define TCPCC_L3_EVENT_TX_WRITABLE 1
+
+struct tcpcc_l3_runtime_stats {
+	u64 io_rounds;
+	u64 empty_rounds;
+	u64 rx_irq_events;
+	u64 tx_queue_wakeups;
+	u64 tx_writable_events;
+	u64 tx_eagain;
+	u64 writable_arms;
+	u64 rx_budget_yields;
+	u64 tx_budget_yields;
+};
 
 struct tcpcc_l3_priv {
 	struct net_device *dev;
 	struct sk_buff_head tx_queue;
-	struct completion rx_ready;
-	struct completion tx_ready;
-	struct completion tx_writable;
-	struct task_struct *rx_task;
-	struct task_struct *tx_task;
+	struct sk_buff *tx_pending;
+	wait_queue_head_t io_wait;
+	struct task_struct *io_task;
 	spinlock_t stats_lock;
 	struct tcpcc_l3_stats stats;
+	struct tcpcc_l3_runtime_stats runtime_stats;
+	unsigned long pending_events;
 	int host_fd;
+	bool tx_blocked;
 	bool shutting_down;
 	bool event_registered;
 	bool irq_registered;
@@ -181,109 +200,159 @@ static int tcpcc_l3_inject_one(struct tcpcc_l3_priv *priv,
 	return 0;
 }
 
-static int tcpcc_l3_rx_thread(void *arg)
+static bool tcpcc_l3_drain_rx(struct tcpcc_l3_priv *priv)
 {
-	struct tcpcc_l3_priv *priv = arg;
+	unsigned int packets;
 
-	for (;;) {
-		wait_for_completion(&priv->rx_ready);
-		if (kthread_should_stop() || READ_ONCE(priv->shutting_down))
-			break;
+	for (packets = 0; packets < TCPCC_L3_IO_BUDGET; packets++) {
+		ssize_t ret;
 
-		for (;;) {
-			ssize_t ret;
-
-			ret = tcpcc_host_read_fd(priv->host_fd, tcpcc_l3_rx_buffer,
-						 TCPCC_L3_RX_BUFFER_SIZE);
-			if (ret == -TCPCC_HOST_EAGAIN)
-				break;
-			if (ret < 0) {
-				tcpcc_l3_stats_rx_drop(priv, true);
-				break;
-			}
-			if (!ret) {
-				tcpcc_l3_stats_rx_drop(priv, true);
-				break;
-			}
-
-			(void)tcpcc_l3_inject_one(priv, tcpcc_l3_rx_buffer,
-						  (size_t)ret);
+		ret = tcpcc_host_read_fd(priv->host_fd, tcpcc_l3_rx_buffer,
+					 TCPCC_L3_RX_BUFFER_SIZE);
+		if (ret == -TCPCC_HOST_EAGAIN)
+			return false;
+		if (ret < 0) {
+			tcpcc_l3_stats_rx_drop(priv, true);
+			return false;
 		}
+		if (!ret) {
+			tcpcc_l3_stats_rx_drop(priv, true);
+			return false;
+		}
+
+		(void)tcpcc_l3_inject_one(priv, tcpcc_l3_rx_buffer,
+					  (size_t)ret);
 	}
 
-	return 0;
+	priv->runtime_stats.rx_budget_yields++;
+	return true;
 }
 
-static int tcpcc_l3_wait_writable(struct tcpcc_l3_priv *priv)
+static void tcpcc_l3_finish_tx(struct tcpcc_l3_priv *priv, ssize_t ret)
+{
+	struct sk_buff *skb = priv->tx_pending;
+
+	if (!skb)
+		return;
+	if (ret == skb->len)
+		tcpcc_l3_stats_tx(priv, skb->len);
+	else
+		tcpcc_l3_stats_tx_drop(priv, true);
+	dev_kfree_skb(skb);
+	priv->tx_pending = NULL;
+
+	if (!READ_ONCE(priv->shutting_down) &&
+	    netif_queue_stopped(priv->dev) &&
+	    skb_queue_len(&priv->tx_queue) < TCPCC_L3_TX_LOW_WATERMARK)
+		netif_wake_queue(priv->dev);
+}
+
+static bool tcpcc_l3_tx_ready(const struct tcpcc_l3_priv *priv)
+{
+	if (priv->tx_blocked)
+		return test_bit(TCPCC_L3_EVENT_TX_WRITABLE,
+				&priv->pending_events);
+	return priv->tx_pending || !skb_queue_empty(&priv->tx_queue);
+}
+
+static bool tcpcc_l3_has_work(const struct tcpcc_l3_priv *priv)
+{
+	return kthread_should_stop() || READ_ONCE(priv->shutting_down) ||
+	       test_bit(TCPCC_L3_EVENT_RX_READY, &priv->pending_events) ||
+	       tcpcc_l3_tx_ready(priv);
+}
+
+static void tcpcc_l3_arm_writable(struct tcpcc_l3_priv *priv)
 {
 	int ret;
 
-	/*
-	 * EPOLLOUT is level-ready most of the time, so only arm it after real
-	 * TUN backpressure. Reinitializing is safe on the single vCPU: host
-	 * readiness can only be dispatched after this thread blocks.
-	 */
-	reinit_completion(&priv->tx_writable);
+	/* EPOLLOUT is subscribed only while a write is actually blocked. */
+	clear_bit(TCPCC_L3_EVENT_TX_WRITABLE, &priv->pending_events);
 	ret = tcpcc_host_event_mod_mask(
 		priv->host_fd, TCPCC_HOST_EVENT_IRQ_BASE + TCPCC_L3_IRQ,
 		TCPCC_HOST_EVENT_READABLE | TCPCC_HOST_EVENT_WRITABLE, true);
-	if (ret)
-		return ret;
-
-	wait_for_completion(&priv->tx_writable);
-	if (kthread_should_stop() || READ_ONCE(priv->shutting_down))
-		return -ECANCELED;
-
-	/* Avoid a permanent writable wake storm on the normally writable TUN. */
-	return tcpcc_host_event_mod_mask(
-		priv->host_fd, TCPCC_HOST_EVENT_IRQ_BASE + TCPCC_L3_IRQ,
-		TCPCC_HOST_EVENT_READABLE, true);
+	if (ret) {
+		tcpcc_l3_finish_tx(priv, ret);
+		return;
+	}
+	priv->tx_blocked = true;
+	priv->runtime_stats.writable_arms++;
 }
 
-static int tcpcc_l3_tx_thread(void *arg)
+static void tcpcc_l3_drain_tx(struct tcpcc_l3_priv *priv)
+{
+	unsigned int packets;
+
+	if (priv->tx_blocked) {
+		int ret;
+
+		if (!test_and_clear_bit(TCPCC_L3_EVENT_TX_WRITABLE,
+					&priv->pending_events))
+			return;
+		ret = tcpcc_host_event_mod_mask(
+			priv->host_fd,
+			TCPCC_HOST_EVENT_IRQ_BASE + TCPCC_L3_IRQ,
+			TCPCC_HOST_EVENT_READABLE, true);
+		priv->tx_blocked = false;
+		if (ret) {
+			tcpcc_l3_finish_tx(priv, ret);
+			return;
+		}
+	}
+
+	for (packets = 0; packets < TCPCC_L3_IO_BUDGET; packets++) {
+		ssize_t ret;
+
+		if (!priv->tx_pending)
+			priv->tx_pending = skb_dequeue(&priv->tx_queue);
+		if (!priv->tx_pending)
+			return;
+
+		ret = tcpcc_host_write_fd(priv->host_fd,
+					  priv->tx_pending->data,
+					  priv->tx_pending->len);
+		if (ret == -TCPCC_HOST_EAGAIN) {
+			priv->runtime_stats.tx_eagain++;
+			tcpcc_l3_arm_writable(priv);
+			return;
+		}
+		tcpcc_l3_finish_tx(priv, ret);
+	}
+
+	if (priv->tx_pending || !skb_queue_empty(&priv->tx_queue))
+		priv->runtime_stats.tx_budget_yields++;
+}
+
+static int tcpcc_l3_io_thread(void *arg)
 {
 	struct tcpcc_l3_priv *priv = arg;
 
 	for (;;) {
-		struct sk_buff *skb;
+		bool did_work = false;
 
-		wait_for_completion(&priv->tx_ready);
+		wait_event(priv->io_wait, tcpcc_l3_has_work(priv));
 		if (kthread_should_stop() || READ_ONCE(priv->shutting_down))
 			break;
 
-		while ((skb = skb_dequeue(&priv->tx_queue)) != NULL) {
-			ssize_t ret;
-
-			for (;;) {
-				ret = tcpcc_host_write_fd(priv->host_fd, skb->data,
-							  skb->len);
-				if (ret != -TCPCC_HOST_EAGAIN)
-					break;
-				if (kthread_should_stop() ||
-				    READ_ONCE(priv->shutting_down))
-					break;
-
-				ret = tcpcc_l3_wait_writable(priv);
-				if (ret)
-					break;
-			}
-
-			if (ret == skb->len)
-				tcpcc_l3_stats_tx(priv, skb->len);
-			else
-				tcpcc_l3_stats_tx_drop(priv, true);
-			dev_kfree_skb(skb);
-
-			if (netif_queue_stopped(priv->dev) &&
-			    skb_queue_len(&priv->tx_queue) <
-					TCPCC_L3_TX_LOW_WATERMARK)
-				netif_wake_queue(priv->dev);
-
-			if (kthread_should_stop())
-				break;
+		priv->runtime_stats.io_rounds++;
+		if (test_and_clear_bit(TCPCC_L3_EVENT_RX_READY,
+					&priv->pending_events)) {
+			if (tcpcc_l3_drain_rx(priv))
+				set_bit(TCPCC_L3_EVENT_RX_READY,
+					&priv->pending_events);
+			did_work = true;
 		}
+		if (tcpcc_l3_tx_ready(priv)) {
+			tcpcc_l3_drain_tx(priv);
+			did_work = true;
+		}
+		if (!did_work)
+			priv->runtime_stats.empty_rounds++;
+		cond_resched();
 	}
 
+	if (priv->tx_pending)
+		tcpcc_l3_finish_tx(priv, -ECANCELED);
 	return 0;
 }
 
@@ -296,11 +365,16 @@ static irqreturn_t tcpcc_l3_irq_handler(int irq, void *dev_id)
 		return IRQ_NONE;
 	events = tcpcc_host_irq_events(irq);
 	if (events & (TCPCC_HOST_EVENT_READABLE |
-		      TCPCC_HOST_EVENT_HANGUP | TCPCC_HOST_EVENT_ERROR))
-		complete(&priv->rx_ready);
+		      TCPCC_HOST_EVENT_HANGUP | TCPCC_HOST_EVENT_ERROR)) {
+		set_bit(TCPCC_L3_EVENT_RX_READY, &priv->pending_events);
+		priv->runtime_stats.rx_irq_events++;
+	}
 	if (events & (TCPCC_HOST_EVENT_WRITABLE |
-		      TCPCC_HOST_EVENT_HANGUP | TCPCC_HOST_EVENT_ERROR))
-		complete(&priv->tx_writable);
+		      TCPCC_HOST_EVENT_HANGUP | TCPCC_HOST_EVENT_ERROR)) {
+		set_bit(TCPCC_L3_EVENT_TX_WRITABLE, &priv->pending_events);
+		priv->runtime_stats.tx_writable_events++;
+	}
+	wake_up(&priv->io_wait);
 	return IRQ_HANDLED;
 }
 
@@ -321,6 +395,7 @@ static int tcpcc_l3_stop(struct net_device *dev)
 static netdev_tx_t tcpcc_l3_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct tcpcc_l3_priv *priv = netdev_priv(dev);
+	bool wake_io;
 
 	if (unlikely(skb->len > dev->mtu || skb->len < sizeof(struct iphdr))) {
 		tcpcc_l3_stats_tx_drop(priv, false);
@@ -340,12 +415,16 @@ static netdev_tx_t tcpcc_l3_xmit(struct sk_buff *skb, struct net_device *dev)
 		spin_unlock(&priv->tx_queue.lock);
 		return NETDEV_TX_BUSY;
 	}
+	wake_io = !priv->tx_queue.qlen;
 	__skb_queue_tail(&priv->tx_queue, skb);
 	if (priv->tx_queue.qlen >= TCPCC_L3_TX_QUEUE_LIMIT)
 		netif_stop_queue(dev);
 	spin_unlock(&priv->tx_queue.lock);
 
-	complete(&priv->tx_ready);
+	if (wake_io) {
+		priv->runtime_stats.tx_queue_wakeups++;
+		wake_up(&priv->io_wait);
+	}
 	return NETDEV_TX_OK;
 }
 
@@ -395,9 +474,7 @@ static void tcpcc_l3_setup(struct net_device *dev)
 	priv->dev = dev;
 	priv->host_fd = -1;
 	skb_queue_head_init(&priv->tx_queue);
-	init_completion(&priv->rx_ready);
-	init_completion(&priv->tx_ready);
-	init_completion(&priv->tx_writable);
+	init_waitqueue_head(&priv->io_wait);
 	spin_lock_init(&priv->stats_lock);
 }
 
@@ -475,17 +552,10 @@ static int tcpcc_l3_attach_config(
 		goto err_teardown;
 	priv->event_registered = true;
 
-	priv->rx_task = kthread_run(tcpcc_l3_rx_thread, priv, "tcpcc-l3-rx");
-	if (IS_ERR(priv->rx_task)) {
-		ret = PTR_ERR(priv->rx_task);
-		priv->rx_task = NULL;
-		goto err_teardown;
-	}
-
-	priv->tx_task = kthread_run(tcpcc_l3_tx_thread, priv, "tcpcc-l3-tx");
-	if (IS_ERR(priv->tx_task)) {
-		ret = PTR_ERR(priv->tx_task);
-		priv->tx_task = NULL;
+	priv->io_task = kthread_run(tcpcc_l3_io_thread, priv, "tcpcc-l3-io");
+	if (IS_ERR(priv->io_task)) {
+		ret = PTR_ERR(priv->io_task);
+		priv->io_task = NULL;
 		goto err_teardown;
 	}
 
@@ -510,8 +580,8 @@ static int tcpcc_l3_attach_config(
 		goto err_teardown;
 
 	*ifindex = dev->ifindex;
-	pr_notice("tcpcc: M5.1 L3 netdevice %s attached to host fd %d, mtu %u, "
-		  "event-driven TX backpressure\n",
+	pr_notice("tcpcc: M11 L3 netdevice %s attached to host fd %d, mtu %u, "
+		  "single budgeted event pump\n",
 		  dev->name, host_fd, dev->mtu);
 	return 0;
 
@@ -599,22 +669,34 @@ void tcpcc_l3_teardown(void)
 	}
 
 	netif_stop_queue(dev);
-	if (priv->rx_task) {
-		complete(&priv->rx_ready);
-		kthread_stop(priv->rx_task);
-		priv->rx_task = NULL;
-	}
-	if (priv->tx_task) {
-		complete(&priv->tx_ready);
-		complete(&priv->tx_writable);
-		kthread_stop(priv->tx_task);
-		priv->tx_task = NULL;
+	if (priv->io_task) {
+		wake_up(&priv->io_wait);
+		kthread_stop(priv->io_task);
+		priv->io_task = NULL;
 	}
 
 	while ((skb = skb_dequeue(&priv->tx_queue)) != NULL) {
 		tcpcc_l3_stats_tx_drop(priv, false);
 		dev_kfree_skb(skb);
 	}
+
+	pr_notice("tcpcc: M11 L3 pump rx_packets=%llu tx_packets=%llu "
+		  "tx_dropped=%llu "
+		  "rounds=%llu empty=%llu rx_irq=%llu "
+		  "tx_wake=%llu writable_irq=%llu eagain=%llu arms=%llu "
+		  "rx_budget=%llu tx_budget=%llu\n",
+		  priv->stats.rx_packets,
+		  priv->stats.tx_packets,
+		  priv->stats.tx_dropped,
+		  priv->runtime_stats.io_rounds,
+		  priv->runtime_stats.empty_rounds,
+		  priv->runtime_stats.rx_irq_events,
+		  priv->runtime_stats.tx_queue_wakeups,
+		  priv->runtime_stats.tx_writable_events,
+		  priv->runtime_stats.tx_eagain,
+		  priv->runtime_stats.writable_arms,
+		  priv->runtime_stats.rx_budget_yields,
+		  priv->runtime_stats.tx_budget_yields);
 
 	unregister_netdev(dev);
 	if (priv->host_fd >= 0)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Collect a stable M7 hosted parity baseline from the proven M6.4 evidence."""
+"""Collect a stable M7 hosted lossless baseline from proven M6.4 evidence."""
 
 from __future__ import annotations
 
@@ -297,7 +297,6 @@ def main() -> int:
             "passed": passed,
             "checks": checks,
         },
-        "native_reference": scenario["native_parity"],
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

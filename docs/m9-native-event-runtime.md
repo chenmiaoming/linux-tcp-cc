@@ -40,13 +40,13 @@ The TUN fd is passed once to `L3_ATTACH`. Packet ingress and egress then remain
 between the host kernel's TUN implementation and the hosted network stack;
 they never traverse the supervisor's event loop.
 
-The hosted TUN adapter is readiness-driven in both directions. It normally
-registers only edge-triggered read readiness. If a nonblocking packet write
-actually returns `EAGAIN`, it temporarily adds write readiness to the same
-epoll registration, sleeps until the host reports the TUN writable, then
-removes write interest before retrying. It does not run a timer-based retry,
-and it does not leave `EPOLLOUT` permanently armed (which would wake continuously
-for the normally writable TUN fd).
+The hosted TUN adapter is readiness-driven in both directions. One budgeted
+packet-pump kthread owns RX and TX and normally registers only edge-triggered
+read readiness. If a nonblocking packet write returns `EAGAIN`, it retains that
+skb, temporarily adds write readiness to the same epoll registration, and can
+continue RX before the host reports TUN writable. It removes write interest
+before retrying. It does not run a timer-based retry or leave `EPOLLOUT`
+permanently armed, which would wake continuously for the normally writable fd.
 
 ## Single-owner event model
 
@@ -268,7 +268,7 @@ ring. Because it has no stack unwinder, compiler-generated DWARF unwind tables
 are omitted. Linker dead-code/data elimination also removes network, filter,
 and BPF implementations that are unreachable from the hosted entry points;
 Linux still exposes the base `CONFIG_BPF` capability because `CONFIG_NET`
-selects it. CI rejects an image above 3.25 MiB, more than 115 enabled symbols,
+selects it. CI rejects an image above 3.25 MiB, more than 116 enabled symbols,
 or any returning `.eh_frame` section, so later kernel updates and features must
 make material growth explicit in review.
 
