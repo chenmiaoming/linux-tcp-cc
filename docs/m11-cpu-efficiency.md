@@ -26,9 +26,12 @@ load to prove meaningful post-spike reclaim. Raw JSON and the hosted log remain
 artifacts so later optimizations can compare CPU, context switches, syscalls,
 and throughput without replacing evidence with one synthetic score.
 
-Existing lossless parity, transoceanic impairment, 16,384-flow capacity, IPv6,
-and firewall jobs remain the throughput and correctness gates. The constrained
-CPU job complements them; it does not reinterpret their results.
+Existing hosted lossless delayed-path, transoceanic impairment, 16,384-flow
+capacity, IPv6, and firewall jobs remain the throughput and correctness gates.
+The constrained CPU job complements them; it does not reinterpret their
+results. The former KVM/virtme-ng native parity workflow was removed because
+GitHub-hosted runners do not reliably expose `/dev/kvm`; the non-KVM
+transoceanic suite remains the native CUBIC/BBR performance comparison.
 
 ## M11.2: coalesced TX wakeups
 

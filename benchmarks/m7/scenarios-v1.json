@@ -3,7 +3,7 @@
   "scenarios": {
     "hosted-lossless-delayed-50ms": {
       "parity_scenario_id": "lossless-delayed-50ms-v1",
-      "description": "Deterministic lossless 50 ms ACK-path-delay scenario shared by tcpcc and the pinned native Linux reference.",
+      "description": "Deterministic lossless 50 ms ACK-path-delay scenario for the tcpcc hosted path.",
       "network": {
         "tun_name": "tcpcc-bdp",
         "host_ipv4": "192.0.2.1",
@@ -17,8 +17,7 @@
         "limit_packets": 10000
       },
       "topology_bindings": {
-        "tcpcc": "host TUN egress delays host-to-guest ACK traffic",
-        "native-linux": "receiver network namespace veth egress delays receiver-to-sender ACK traffic"
+        "tcpcc": "host TUN egress delays host-to-guest ACK traffic"
       },
       "transfer": {
         "congestion_controls": [
@@ -39,11 +38,7 @@
       },
       "tcp_loss_counters": {
         "policy": "observational_not_gated_m7_1",
-        "reason": "TCP lost/retrans/total_retrans are preserved for native parity analysis; the lossless gate applies to the configured zero-loss qdisc instead of assuming runtime scheduling cannot trigger TCP recovery."
-      },
-      "native_parity": {
-        "status": "reference_defined_m7_2",
-        "reason": "The native reference must boot the pinned Linux source; the GitHub runner host kernel is never accepted as a substitute."
+        "reason": "TCP lost/retrans/total_retrans remain observational; the lossless gate applies to the configured zero-loss qdisc instead of assuming runtime scheduling cannot trigger TCP recovery."
       }
     }
   }
