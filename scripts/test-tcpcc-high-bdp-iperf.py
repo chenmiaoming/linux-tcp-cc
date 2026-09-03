@@ -263,7 +263,7 @@ class TcpccEventTests(unittest.TestCase):
     @staticmethod
     def events(data_status: int, cc: str = "bbr") -> list[dict[str, object]]:
         return [
-            {"event": "ready", "cc": cc},
+            {"event": "ready", "cc": cc, "hosted_memory_mib": 128},
             {
                 "event": "service-stats",
                 "accepted_connections": 6,
@@ -285,6 +285,7 @@ class TcpccEventTests(unittest.TestCase):
             self.events(-errno.ECONNRESET),
             scenario,
             expected_cc="bbr",
+            expected_memory_mib=128,
         )
 
         self.assertEqual(result["completed_data_flows"], 3)
@@ -295,6 +296,7 @@ class TcpccEventTests(unittest.TestCase):
             self.events(0, cc="cubic"),
             scenario,
             expected_cc="cubic",
+            expected_memory_mib=128,
         )
         self.assertEqual(cubic["accepted_cc"], "cubic")
 
@@ -305,6 +307,7 @@ class TcpccEventTests(unittest.TestCase):
                 self.events(-errno.ECANCELED),
                 scenario,
                 expected_cc="bbr",
+                expected_memory_mib=128,
             )
 
 

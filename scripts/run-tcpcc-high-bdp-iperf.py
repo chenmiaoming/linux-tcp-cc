@@ -55,6 +55,7 @@ TCPCC_TUN_ADDRESSES = {
     "tcpcc_cubic": ("198.19.0.1", "198.19.0.2"),
     "tcpcc_bbr": ("198.18.0.1", "198.18.0.2"),
 }
+TCPCC_EXPECTED_MEMORY_MIB = 128
 PING_RTT = re.compile(
     r"(?:rtt|round-trip) min/avg/max/(?:mdev|stddev) = "
     r"([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+) ms"
@@ -481,6 +482,78 @@ def stop_process(process: subprocess.Popen[object] | None) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=5)
+
+
+def start_packet_capture(
+    names: dict[str, str],
+    output_dir: Path,
+    *,
+    case: str,
+    round_number: int,
+    public_port: int,
+) -> tuple[subprocess.Popen[bytes], Path, Path]:
+    """Capture the public TCP flow before WAN netem mutates it.
+
+    The WAN-side server veth sees public data packets as they enter the WAN
+    namespace and returning ACKs after the reverse-direction netem qdisc.  A
+    small snap length retains TCP sequence/options/timestamps without copying
+    application payload into the CI artifact.
+    """
+    capture_path = output_dir / f"packet-{case}-round-{round_number}.pcap"
+    diagnostic_path = output_dir / f"packet-{case}-round-{round_number}.log"
+    diagnostic_stream = diagnostic_path.open("wb")
+    try:
+        process = subprocess.Popen(
+            ns_command(
+                names["wan_ns"],
+                "tcpdump",
+                "-i",
+                names["wan_server_dev"],
+                "-n",
+                "-U",
+                "-s",
+                "160",
+                "-w",
+                str(capture_path),
+                "tcp",
+                "and",
+                "host",
+                SERVER_ADDRESS,
+                "and",
+                "port",
+                str(public_port),
+            ),
+            stdout=subprocess.DEVNULL,
+            stderr=diagnostic_stream,
+            start_new_session=True,
+        )
+    finally:
+        diagnostic_stream.close()
+
+    # tcpdump opens the capture device synchronously before entering its read
+    # loop.  Catch startup failures before iperf creates the connection.
+    time.sleep(0.2)
+    if process.poll() is not None:
+        diagnostic = diagnostic_path.read_text(
+            encoding="utf-8", errors="replace"
+        )
+        raise RuntimeError(
+            f"tcpdump exited with {process.returncode} before {case} "
+            f"round {round_number}:\n{diagnostic}"
+        )
+    return process, capture_path, diagnostic_path
+
+
+def stop_packet_capture(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        process.send_signal(signal.SIGINT)
+    try:
+        status = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        status = process.wait(timeout=5)
+    if status not in {0, -signal.SIGINT}:
+        raise RuntimeError(f"tcpdump exited with status {status}")
 
 
 def wait_listener(
@@ -934,6 +1007,7 @@ def run_iperf_measurement(
     case: str,
     round_number: int,
     order: int,
+    packet_trace: bool,
 ) -> dict[str, Any]:
     if case not in CASES:
         raise ValueError(f"unknown iperf case {case}")
@@ -964,7 +1038,21 @@ def run_iperf_measurement(
         f"{case}-round-{round_number}",
     )
     timeout = scenario.duration_seconds + scenario.omit_seconds + 30
-    completed = run(command, check=False, timeout=timeout)
+    capture_process: subprocess.Popen[bytes] | None = None
+    capture_path: Path | None = None
+    if packet_trace:
+        capture_process, capture_path, _diagnostic_path = start_packet_capture(
+            names,
+            output_dir,
+            case=case,
+            round_number=round_number,
+            public_port=public_port,
+        )
+    try:
+        completed = run(command, check=False, timeout=timeout)
+    finally:
+        if capture_process is not None:
+            stop_packet_capture(capture_process)
     stem = f"iperf-{case}-round-{round_number}"
     write_text(output_dir / f"{stem}.json", completed.stdout)
     if completed.returncode != 0:
@@ -984,6 +1072,9 @@ def run_iperf_measurement(
             "order": order,
             "public_port": public_port,
             "raw_artifact": f"{stem}.json",
+            "packet_trace_artifact": (
+                capture_path.name if capture_path is not None else None
+            ),
         }
     )
     return result
@@ -993,6 +1084,7 @@ def validate_tcpcc_events(
     events: list[dict[str, Any]],
     scenario: Scenario,
     expected_cc: str,
+    expected_memory_mib: int,
 ) -> dict[str, Any]:
     ready = next((event for event in events if event.get("event") == "ready"), None)
     stopped = next(
@@ -1002,6 +1094,10 @@ def validate_tcpcc_events(
     if ready is None or ready.get("cc") != expected_cc:
         raise RuntimeError(
             f"tcpcc readiness did not prove {expected_cc}"
+        )
+    if ready.get("hosted_memory_mib") != expected_memory_mib:
+        raise RuntimeError(
+            "tcpcc readiness did not prove the requested hosted memory"
         )
     if stopped is None or stopped.get("clean") is not True:
         raise RuntimeError("tcpcc did not report a clean stop")
@@ -1033,6 +1129,7 @@ def validate_tcpcc_events(
     last_error = int(service_stats.get("last_error", 0))
     if terminal_failures > scenario.repetitions or last_error not in {
         0,
+        -errno.EPIPE,
         -errno.ECONNRESET,
     }:
         raise RuntimeError(
@@ -1064,6 +1161,7 @@ def validate_tcpcc_events(
         },
         "data_terminal_policy": "native hosted-service aggregate",
         "accepted_cc": expected_cc,
+        "hosted_memory_mib": expected_memory_mib,
         "clean_stop": True,
     }
 
@@ -1190,7 +1288,10 @@ def start_tcpcc_case(
 def benchmark(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         raise PermissionError("--integration requires root")
-    for command in ("ethtool", "ip", "iperf3", "nft", "ss", "sysctl", "tc"):
+    commands = ["ethtool", "ip", "iperf3", "nft", "ss", "sysctl", "tc"]
+    if args.packet_trace:
+        commands.append("tcpdump")
+    for command in commands:
         if shutil.which(command) is None:
             raise FileNotFoundError(f"required command is unavailable: {command}")
     kernel = args.kernel.resolve(strict=True)
@@ -1266,7 +1367,7 @@ def benchmark(args: argparse.Namespace) -> int:
         # independent hosted stack under the matching default, then restore BBR
         # before measurements. The public sockets themselves retain the
         # explicitly selected algorithm.
-        for case in ("tcpcc_bbr", "tcpcc_cubic"):
+        for case in TCPCC_CASES:
             process, event_path, ready = start_tcpcc_case(
                 names, kernel, output_dir, case
             )
@@ -1293,6 +1394,7 @@ def benchmark(args: argparse.Namespace) -> int:
                     case=case,
                     round_number=round_index + 1,
                     order=order_index + 1,
+                    packet_trace=args.packet_trace,
                 )
                 measurements[case].append(measurement)
                 time.sleep(scenario.settle_seconds)
@@ -1311,7 +1413,10 @@ def benchmark(args: argparse.Namespace) -> int:
         for case in TCPCC_CASES:
             events = read_events(tcpcc_event_paths[case])
             contract = validate_tcpcc_events(
-                events, scenario, expected_cc=CASE_CC[case]
+                events,
+                scenario,
+                expected_cc=CASE_CC[case],
+                expected_memory_mib=TCPCC_EXPECTED_MEMORY_MIB,
             )
             assert_tcpcc_resources_removed(names, contract["ready"])
             tcpcc_contracts[case] = contract
@@ -1439,6 +1544,11 @@ def parse_args() -> argparse.Namespace:
         "--scenario-file",
         type=Path,
         default=DEFAULT_SCENARIO,
+    )
+    parser.add_argument(
+        "--packet-trace",
+        action="store_true",
+        help="capture public TCP headers for each measurement",
     )
     parser.add_argument("--output-dir", required=True, type=Path)
     return parser.parse_args()

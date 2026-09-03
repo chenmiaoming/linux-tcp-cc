@@ -65,6 +65,13 @@ delivered goodput and retransmissions for:
 - tcpcc public-side CUBIC; and
 - tcpcc public-side BBR.
 
+Linux normally derives its automatic per-socket `tcp_wmem` ceiling from
+available RAM, up to 4 MiB. That policy reduced a 128-MiB hosted arena to about
+1 MiB and throttled BBR on this 200-ms path. TCPCC restores the ordinary 4-MiB
+autotuning ceiling without allocating 4 MiB per connection: buffers grow only
+when a flow needs them, while Linux's aggregate `tcp_mem` pressure thresholds
+continue to govern the shared arena.
+
 The native paths use the GitHub runner kernel and report its release. tcpcc uses
 the pinned hosted Linux image built by the prerequisite CI job. Consequently,
 BBR-over-CUBIC ratios are prominent observations but are not semantic parity
@@ -88,9 +95,9 @@ socket's retransmit counter is not currently exported. The report labels this
 scope explicitly, and TCPCC/native retransmit totals must not be compared.
 
 iperf3 normally closes its reverse data socket abortively after a successful
-measurement. A completed tcpcc data flow may therefore end with clean EOF or
-`ECONNRESET`; the control flow must close cleanly, and cancellation or another
-terminal errno is always a failure.
+measurement. A completed tcpcc data flow may therefore end with clean EOF,
+`EPIPE`, or `ECONNRESET`; the control flow must close cleanly, and cancellation
+or another terminal errno is always a failure.
 
 ## Running the gate
 
@@ -102,8 +109,13 @@ sudo python3 scripts/run-tcpcc-high-bdp-iperf.py \
   --integration \
   --kernel .build/tcpcc-bootstrap-out/vmlinux \
   --scenario-file benchmarks/m8/iperf-transoceanic-extreme-v1.json \
+  --packet-trace \
   --output-dir .build/transoceanic-extreme
 ```
+
+`--packet-trace` is optional and retains only the first 160 bytes of each
+public packet for sequence/pacing diagnosis. Scheduled and pull-request runs
+leave it disabled; a manual workflow dispatch can enable it.
 
 GitHub Actions runs the experiment weekly, on manual request, and when its own
 contract changes. It publishes the complete directory for 30 days, including

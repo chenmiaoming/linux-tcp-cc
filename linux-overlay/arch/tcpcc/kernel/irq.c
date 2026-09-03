@@ -32,6 +32,7 @@ static struct tasklet_struct tcpcc_test_tasklet;
 static unsigned int tcpcc_test_hardirq_count;
 static unsigned int tcpcc_test_softirq_count;
 static bool tcpcc_test_softirq_active;
+static u32 tcpcc_host_irq_event_masks[NR_IRQS];
 
 static struct tcpcc_host_event tcpcc_runtime_pending;
 static bool tcpcc_runtime_pending_valid;
@@ -68,7 +69,14 @@ static struct irq_chip tcpcc_host_irq_chip = {
 	.irq_unmask = tcpcc_irq_noop,
 };
 
-static void tcpcc_dispatch_host_irq(unsigned int irq)
+u32 tcpcc_host_irq_events(unsigned int irq)
+{
+	if (irq >= NR_IRQS)
+		return 0;
+	return READ_ONCE(tcpcc_host_irq_event_masks[irq]);
+}
+
+static void tcpcc_dispatch_host_irq(unsigned int irq, u32 events)
 {
 	struct pt_regs regs = { 0 };
 	struct pt_regs *old_regs;
@@ -77,13 +85,19 @@ static void tcpcc_dispatch_host_irq(unsigned int irq)
 
 	if (irqs_disabled())
 		panic("tcpcc: host IRQ %u dispatch attempted with IRQs disabled", irq);
+	if (irq >= NR_IRQS || !events)
+		panic("tcpcc: invalid host IRQ %u event mask 0x%x", irq, events);
+	if (READ_ONCE(tcpcc_host_irq_event_masks[irq]))
+		panic("tcpcc: host IRQ %u event mask overwritten", irq);
 
 	local_irq_save(flags);
+	WRITE_ONCE(tcpcc_host_irq_event_masks[irq], events);
 	old_regs = set_irq_regs(&regs);
 	irq_enter();
 	ret = generic_handle_irq(irq);
 	irq_exit();
 	set_irq_regs(old_regs);
+	WRITE_ONCE(tcpcc_host_irq_event_masks[irq], 0);
 	local_irq_restore(flags);
 
 	if (ret)
@@ -128,7 +142,7 @@ static void tcpcc_dispatch_host_runtime_event(
 
 	tcpcc_runtime_pending = *event;
 	tcpcc_runtime_pending_valid = true;
-	tcpcc_dispatch_host_irq(TCPCC_HOST_RUNTIME_IRQ);
+	tcpcc_dispatch_host_irq(TCPCC_HOST_RUNTIME_IRQ, event->events);
 
 	if (tcpcc_runtime_pending_valid)
 		panic("tcpcc: M8.2 runtime IRQ did not consume host event");
@@ -256,7 +270,8 @@ void tcpcc_host_idle_wait(void)
 	if (event.token >= TCPCC_HOST_EVENT_IRQ_BASE &&
 	    event.token < TCPCC_HOST_EVENT_IRQ_BASE + NR_IRQS) {
 		tcpcc_dispatch_host_irq((unsigned int)(event.token -
-						       TCPCC_HOST_EVENT_IRQ_BASE));
+						       TCPCC_HOST_EVENT_IRQ_BASE),
+					event.events);
 		return;
 	}
 
@@ -305,10 +320,15 @@ static void tcpcc_test_tasklet_fn(struct tasklet_struct *tasklet)
 static irqreturn_t tcpcc_test_irq_handler(int irq, void *dev_id)
 {
 	u64 expirations;
+	u32 events;
 	int ret;
 
 	if (!in_hardirq())
 		panic("tcpcc: M3.4 virtual IRQ handler ran outside hardirq context");
+	events = tcpcc_host_irq_events(irq);
+	if (!(events & TCPCC_HOST_EVENT_READABLE) ||
+	    events & (TCPCC_HOST_EVENT_WRITABLE | TCPCC_HOST_EVENT_ERROR))
+		panic("tcpcc: M3.4 virtual IRQ received mask 0x%x", events);
 
 	ret = tcpcc_host_timer_wait(tcpcc_test_irq_fd, &expirations);
 	if (ret)
