@@ -359,6 +359,7 @@ jobs:
             --cpu-idle-seconds 30 \
             --max-idle-cpu-percent 1 \
             --max-idle-host-wakeups-per-second 5 \
+            --skip-memory-lifecycle \
             --output ".build/m11-cpu-${{ matrix.cpu_quota_percent }}/report.json" \
             --boot-log ".build/m11-cpu-${{ matrix.cpu_quota_percent }}/vmlinux.log"
 

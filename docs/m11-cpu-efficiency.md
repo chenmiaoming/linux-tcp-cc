@@ -21,10 +21,12 @@ v2 leaf with 25% or 50% of one CPU. Each case boots with the 128-MiB default,
 holds 8,192 connections, runs 128 small-packet rounds over 64 active flows, and
 observes both zero-flow and loaded idle periods for 30 seconds. Each idle period
 must average no more than 1% of one core and no more than five host wakeups per
-second. The 8,192-flow stage also gives the shared M10 lifecycle gate enough
-load to prove meaningful post-spike reclaim. Raw JSON and the hosted log remain
-artifacts so later optimizations can compare CPU, context switches, syscalls,
-and throughput without replacing evidence with one synthetic score.
+second. The CPU matrix stops after its load, idle, service-drain, and clean
+shutdown checks; it does not duplicate the asynchronous RSS-reclaim, reuse, or
+multi-round stability gates. Those remain strict in the independent 16,384-flow
+M10 lifecycle job. Raw JSON and the hosted log remain artifacts so later
+optimizations can compare CPU, context switches, syscalls, and throughput
+without replacing evidence with one synthetic score.
 
 Existing hosted lossless delayed-path, transoceanic impairment, 16,384-flow
 capacity, IPv6, and firewall jobs remain the throughput and correctness gates.

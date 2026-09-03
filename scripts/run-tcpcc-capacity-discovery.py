@@ -164,6 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-idle-cpu-percent", type=float)
     parser.add_argument("--max-idle-host-wakeups-per-second", type=float)
     parser.add_argument("--cpu-quota-percent", type=int)
+    parser.add_argument("--skip-memory-lifecycle", action="store_true")
     return parser.parse_args()
 
 
@@ -739,7 +740,11 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 "quota_percent": args.cpu_quota_percent,
                 "idle_seconds": args.cpu_idle_seconds,
                 "max_idle_cpu_percent": args.max_idle_cpu_percent,
+                "max_idle_host_wakeups_per_second": (
+                    args.max_idle_host_wakeups_per_second
+                ),
             },
+            "memory_lifecycle_requested": not args.skip_memory_lifecycle,
             "cpu_cgroup": cpu_cgroup_stats(cpu_cgroup),
             "minimum_required": args.minimum,
             "levels": list(args.levels),
@@ -992,6 +997,24 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                         "reclaim": asdict(reclaim_stats(control)),
                     }
                 )
+
+            if args.skip_memory_lifecycle:
+                reclaim_result = {
+                    "status": "not_requested",
+                    "reason": "CPU and packet-pump measurement only",
+                }
+                reuse_sample = {
+                    "status": "not_requested",
+                    "reason": "covered by the independent M10 lifecycle job",
+                }
+                control.transact(OP_SHUTDOWN)
+                status = process.wait(timeout=15)
+                if status != 0:
+                    raise RuntimeError(
+                        f"hosted kernel shutdown returned {status}"
+                    )
+                process = None
+                return lifecycle_report("passed")
 
             ready_anonymous = ready_sample["process"]["anonymous_kib"]
             stage_anonymous = [
@@ -1444,6 +1467,7 @@ def main() -> int:
             args.stability_rounds
             and args.active_connections > args.stability_connections
         )
+        or (args.skip_memory_lifecycle and args.stability_rounds)
     ):
         raise SystemExit(
             "memory must be at least 128 MiB; connection, stability-round, "
