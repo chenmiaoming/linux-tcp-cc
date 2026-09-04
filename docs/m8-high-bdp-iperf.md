@@ -1,9 +1,13 @@
 # Transoceanic extreme-network comparison
 
-This CI experiment compares the shipped tcpcc server-ingress path with ordinary native
-Linux TCP under the same emulated bottleneck. It measures delivered application
-goodput rather than treating an end-of-flow TCP telemetry snapshot as a
-throughput benchmark.
+> This document defines a benchmark contract, not the overall product
+> architecture. For the current ownership model, start with
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+
+This CI experiment compares the shipped tcpcc server-ingress path with ordinary
+native Linux TCP under the same emulated bottleneck. It measures delivered
+application goodput rather than treating an end-of-flow TCP telemetry snapshot
+as a throughput benchmark.
 
 ## Measurement direction
 
@@ -23,8 +27,19 @@ control and would not test the algorithm selected by `tcpcc --cc`.
 
 For tcpcc, the iperf server remains an ordinary loopback backend. Its TCP
 connection ends at the bridge and is not the measured public connection. The
-`tcpcc.runtime.v1` events must independently prove that every accepted public
-socket inherited the selected CUBIC or BBR algorithm.
+native runtime's `ready` event proves that the requested algorithm was set and
+read back on the hosted public listener before service exposure, while
+aggregate `service-stats` prove that the benchmark flows were accepted and
+completed by that hosted service. The lower-level real-TUN regression separately
+checks accepted-socket congestion-control inheritance through the upstream Linux
+accept path.
+
+The benchmark intentionally does **not** claim a per-flow accepted-socket
+`TCP_CONGESTION` readback from `tcpcc.runtime.v1`: the current native production
+event stream is aggregate and has no per-flow `connection-opened` event. The
+legacy report key named `accepted_cc` currently records the algorithm already
+validated on the hosted listener; it should not be interpreted as an
+independent per-accepted-socket measurement.
 
 ## Network contract
 
@@ -47,6 +62,13 @@ The resulting configured path BDP is 25,000,000 bytes. Endpoint offloads are
 disabled so netem loss is applied to ordinary packets rather than large veth
 GSO aggregates. Endpoint `fq` remains intact so native and hosted BBR can use
 socket pacing before packets enter the separate bottleneck.
+
+The server namespace's outer-host default congestion control is fixed to CUBIC
+while both tcpcc public CUBIC and public BBR instances run. This is an
+architectural regression check: hosted BBR must remain selectable and usable
+without changing the outer host's default TCP congestion control. The native
+BBR comparison is a separate native-kernel case and therefore still requires
+BBR to be available in the runner kernel.
 
 The checked-in contract is
 [`benchmarks/m8/iperf-transoceanic-extreme-v1.json`](../benchmarks/m8/iperf-transoceanic-extreme-v1.json).
@@ -80,9 +102,9 @@ claims between two identical kernels.
 Goodput, retransmissions, and all cross-path ratios are observations rather
 than merge gates. At symmetric 10% random loss, short shared-runner samples are
 too variable for a stable ranking threshold. CI still fails if a measurement
-cannot complete, a requested congestion-control algorithm is not actually in
-use, the configured qdisc delay/loss/rate contract drifts, endpoint `fq` drops packets,
-or either TCPCC instance fails to shut down and remove its resources.
+cannot complete, the requested listener congestion control cannot be selected,
+the configured qdisc delay/loss/rate contract drifts, endpoint `fq` drops
+packets, or either TCPCC instance fails to shut down and remove its resources.
 
 Twenty ICMP samples record min/average/median/max RTT. The median is an
 observation rather than a gate because runner scheduling and severe loss can
@@ -112,6 +134,10 @@ sudo python3 scripts/run-tcpcc-high-bdp-iperf.py \
   --packet-trace \
   --output-dir .build/transoceanic-extreme
 ```
+
+BBR in that prerequisite list is needed by the **native BBR comparison case**,
+not by tcpcc's hosted BBR listener. A tcpcc-only deployment does not require
+outer-host BBR.
 
 `--packet-trace` is optional and retains only the first 160 bytes of each
 public packet for sequence/pacing diagnosis. Scheduled and pull-request runs

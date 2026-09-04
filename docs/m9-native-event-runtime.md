@@ -1,5 +1,11 @@
 # M9 native event runtime
 
+> This document records the M9 migration and its intermediate gates. For the
+> current composed product architecture, start with
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md). Sections below that describe M9.2,
+> M9.3, or another numbered sub-milestone are historical snapshots unless they
+> explicitly state current behavior.
+
 M9 removes Python from the installed runtime while keeping one hosted
 `vmlinux`, one TUN queue, and one public endpoint. The target is a low-memory,
 single-threaded, event-driven service: one owner mutates every connection and
@@ -8,7 +14,8 @@ therefore the data plane requires no application locks.
 The repository still contains Python test and benchmark drivers, but
 `make install` installs only the native executable and `vmlinux`. Neither the
 installed CLI nor its steady-state service requires a Python interpreter or
-Python modules.
+Python modules. `tools/tcpcc_cli.py` is retained as a legacy supervisor/test
+model rather than production implementation.
 
 ## Process and data ownership
 
@@ -136,7 +143,7 @@ returns the protocol version, feature bits, current bridge limits, and hosted
 Linux release. New operations and feature bits are append-only within a
 version.
 
-The migration is deliberately split into mergeable gates:
+The migration was deliberately split into mergeable gates:
 
 1. Shared ABI, native exact-I/O client, `fork`/`execve` process boundary, and
    CI-only contract tests.
@@ -148,15 +155,17 @@ The migration is deliberately split into mergeable gates:
 4. Dynamic flow storage and buffer accounting; remove the eight-session
    limit, then add CI pressure gates.
 5. Native preflight, TUN, firewall, signal, and rollback parity; switch the
-   installed `tcpcc` entry point from Python to C. (Complete.)
+   installed `tcpcc` entry point from Python to C.
 6. CI pressure gates for idle connections, active throughput, slow peers,
-   reset storms, and graceful drain. Published results include CPU, RSS,
-   accepted/active/rejected counts, event-loop lag, and buffer high-water mark.
+   reset storms, and graceful drain.
 
-The first pressure gate finds capacity; it does not encode an arbitrary large
-pass number. A later gate pins a conservative supported default below the
-observed CI limit and verifies deterministic `EMFILE`, memory-budget, and
-backlog behavior rather than allowing OOM or scheduler collapse.
+These are development-history gates, not pending product requirements. In
+particular, an early plan considered pinning a conservative nonzero default
+connection limit below measured capacity. M9.6 deliberately chose the opposite
+product contract after evidence: the current default is
+`max_connections=0` (no tcpcc admission-policy limit), while positive limits
+remain an explicit operator choice. CI capacity stages and the handle encoding
+must not be reinterpreted as a default `max_connections` value.
 
 ## M9.2 hosted service ABI
 
@@ -217,8 +226,8 @@ budget, allowing TCP flow control to provide bounded backpressure.
 The first M9.4 CI gate holds nine flows concurrently, proving that eight is no
 longer a bridge limit while preserving generation reuse, reset isolation,
 half-close, backpressure, and signal-drain coverage. Larger idle/active/slow-
-peer discovery belongs to M9.6 and selects the supported default from measured
-CPU and memory behavior rather than from a handle-encoding ceiling.
+peer discovery belongs to M9.6 and selects evidence for capacity policy rather
+than turning a handle-encoding ceiling into a default.
 
 ## M9.6 capacity discovery and admission policy
 
