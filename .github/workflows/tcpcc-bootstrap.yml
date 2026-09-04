@@ -227,10 +227,9 @@ jobs:
               nftables \
               procps
 
-      - name: Load available TUN, BBR, NAT, and conntrack modules
+      - name: Load available TUN, NAT, and conntrack modules
         run: |
           sudo -n modprobe tun || true
-          sudo -n modprobe tcp_bbr || true
           sudo -n modprobe nf_tables || true
           sudo -n modprobe nf_nat || true
           sudo -n modprobe nf_conntrack || true
@@ -239,11 +238,10 @@ jobs:
           sudo -n modprobe xt_comment || true
           test -c /dev/net/tun
           command -v '${{ matrix.iptables_variant }}'
-          sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
           make native-build
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 
-      - name: Prove concurrent BBR ingress, backpressure, and signal drain
+      - name: Prove concurrent hosted BBR ingress, backpressure, and signal drain
         run: |
           sudo -n python3 scripts/test-tcpcc-cli-integration.py \
             --integration \
@@ -396,16 +394,14 @@ jobs:
               nftables \
               procps
 
-      - name: Prepare IPv6 TUN, BBR, NAT, and conntrack
+      - name: Prepare IPv6 TUN, NAT, and conntrack
         run: |
           sudo -n modprobe tun || true
-          sudo -n modprobe tcp_bbr || true
           sudo -n modprobe nf_tables || true
           sudo -n modprobe nf_nat || true
           sudo -n modprobe nf_conntrack || true
           test -c /dev/net/tun
           test -r /proc/net/if_inet6
-          sysctl net.ipv4.tcp_available_congestion_control | grep -w bbr
           make native-build
           chmod u+x tcpcc .build/tcpcc-bootstrap-out/vmlinux
 

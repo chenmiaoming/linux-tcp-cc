@@ -719,7 +719,7 @@ def setup_topology(
             server,
             (
                 "net.ipv4.ip_forward=1",
-                "net.ipv4.tcp_congestion_control=bbr",
+                "net.ipv4.tcp_congestion_control=cubic",
                 "net.ipv4.conf.all.rp_filter=0",
                 "net.ipv4.conf.default.rp_filter=0",
                 f"net.ipv4.conf.{names['server_dev']}.rp_filter=0",
@@ -757,6 +757,13 @@ def setup_topology(
     for cc_name in ("cubic", "bbr"):
         if cc_name not in available.split():
             raise RuntimeError(f"native congestion control unavailable: {cc_name}")
+    host_default_cc = run(
+        ns_command(server, "sysctl", "-n", "net.ipv4.tcp_congestion_control")
+    ).stdout.strip()
+    if host_default_cc != "cubic":
+        raise RuntimeError(
+            f"high-BDP outer host default is not fixed to CUBIC: {host_default_cc!r}"
+        )
 
     run(
         ns_command(
@@ -807,6 +814,7 @@ def setup_topology(
 
     lines = [
         f"available_cc={available}",
+        f"outer_host_default_cc={host_default_cc}",
         f"configured_rtt_ms={scenario.rtt_ms}",
         f"configured_bdp_bytes={scenario.bdp_bytes}",
     ]
@@ -1239,15 +1247,6 @@ def start_tcpcc_case(
     event_path = output_dir / f"{case}-events.jsonl"
     diagnostic_path = output_dir / f"{case}.log"
 
-    run(
-        ns_command(
-            names["server_ns"],
-            "sysctl",
-            "-q",
-            "-w",
-            f"net.ipv4.tcp_congestion_control={cc_name}",
-        )
-    )
     event_stream = event_path.open("wb")
     diagnostic_stream = diagnostic_path.open("wb")
     try:
@@ -1363,10 +1362,8 @@ def benchmark(args: argparse.Namespace) -> int:
         )
         wait_listener(names["server_ns"], TCPCC_BACKEND_PORT, backend_server)
 
-        # The C supervisor verifies the host default at startup. Start each
-        # independent hosted stack under the matching default, then restore BBR
-        # before measurements. The public sockets themselves retain the
-        # explicitly selected algorithm.
+        # Prove public-side CC selection is owned by each hosted stack,
+        # not by the outer namespace's default TCP congestion control.
         for case in TCPCC_CASES:
             process, event_path, ready = start_tcpcc_case(
                 names, kernel, output_dir, case
@@ -1374,15 +1371,18 @@ def benchmark(args: argparse.Namespace) -> int:
             tcpcc_processes[case] = process
             tcpcc_event_paths[case] = event_path
             tcpcc_ready[case] = ready
-        run(
+        outer_cc = run(
             ns_command(
                 names["server_ns"],
                 "sysctl",
-                "-q",
-                "-w",
-                "net.ipv4.tcp_congestion_control=bbr",
+                "-n",
+                "net.ipv4.tcp_congestion_control",
             )
-        )
+        ).stdout.strip()
+        if outer_cc != "cubic":
+            raise RuntimeError(
+                f"outer host CC changed after tcpcc startup: {outer_cc!r}"
+            )
 
         for round_index in range(scenario.repetitions):
             order = CASES[round_index:] + CASES[:round_index]

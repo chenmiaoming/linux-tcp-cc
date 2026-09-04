@@ -464,12 +464,12 @@ class ParserTests(unittest.TestCase):
             requested_cc="bbr",
             checks=(
                 CheckResult(
-                    "sysctl.tcp_congestion_control",
+                    "sysctl.ipv4_forward",
                     "fail",
                     "required",
-                    "cubic",
-                    "bbr",
-                    "set net.ipv4.tcp_congestion_control=bbr before startup",
+                    "0",
+                    "1",
+                    "set net.ipv4.ip_forward=1 before startup",
                 ),
             ),
         )

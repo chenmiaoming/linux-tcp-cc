@@ -617,7 +617,7 @@ def integration(args: argparse.Namespace) -> int:
 
             for setting in (
                 "net.ipv4.ip_forward=1",
-                "net.ipv4.tcp_congestion_control=bbr",
+                "net.ipv4.tcp_congestion_control=cubic",
                 "net.ipv4.conf.all.rp_filter=0",
                 "net.ipv4.conf.default.rp_filter=0",
                 f"net.ipv4.conf.{router_link}.rp_filter=0",
@@ -687,6 +687,18 @@ def integration(args: argparse.Namespace) -> int:
             ready = wait_event(event_log, tcpcc_process, "ready")
             if ready.get("cc") != "bbr" or ready.get("tun") != tun_name:
                 raise RuntimeError(f"tcpcc readiness contract mismatch: {ready}")
+            outer_cc = run(
+                ns_command(
+                    router,
+                    "sysctl",
+                    "-n",
+                    "net.ipv4.tcp_congestion_control",
+                )
+            ).stdout.strip()
+            if outer_cc != "cubic":
+                raise RuntimeError(
+                    f"outer host CC changed while hosted BBR was active: {outer_cc!r}"
+                )
             if ready.get("firewall_backend") != args.firewall_backend:
                 raise RuntimeError(f"tcpcc selected an unexpected backend: {ready}")
             if (
