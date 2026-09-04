@@ -1,5 +1,10 @@
 # M10 Hosted Memory Lifecycle, Demand-Backed Reservation, and Reclaim
 
+> This document records the M10 memory work and its evidence. For the current
+> composed product architecture, start with
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md). M10.4 is now a completed design
+> decision: current evidence does not justify online guest-memory hotplug.
+
 M10.1 measures the complete memory lifecycle of the single hosted `vmlinux`,
 M10.2 makes its host commit-accounting intent explicit, and M10.3 returns pages
 that the guest buddy allocator has proved free to the host. Anonymous mappings
@@ -254,7 +259,7 @@ owned by TCP timers or orphaned sockets: such pages cannot be isolated from a
 buddy free list. The bounded observation reports the guest log alongside RSS
 and reclaim counters so orphan pressure remains visible separately.
 
-## Capacity, Host Policy, and Online Growth
+## Capacity, Host Policy, and M10.4 Online-Growth Decision
 
 Reclaim changes residency, not guest-visible capacity. `--memory-mib=N` still
 sets the contiguous guest arena and buddy allocator ceiling; it does not
@@ -265,7 +270,29 @@ host mapping or later page fault fail independently of the project admission
 policy.
 
 An advisory reclaim failure never converts into a connection limit and never
-invalidates already mapped RAM. True one-way online growth is separate M10.4
-work because it would change the guest allocator's capacity and likely the
-current `FLATMEM`/contiguous direct-map model; `MADV_DONTNEED` deliberately does
-neither.
+invalidates already mapped RAM. `MADV_DONTNEED` deliberately changes residency
+without changing guest-visible capacity.
+
+M10.4 was the explicit decision point for whether to replace the simple
+contiguous `FLATMEM` model with true one-way online growth. The available
+evidence does **not** justify that complexity:
+
+- the existing capacity gate reaches 16,384 simultaneous connections with
+  `max_connections=0`, zero rejects, and zero bridge-start failures;
+- the same hosted process completes repeated 8,192-connection load/drain/reclaim
+  cycles;
+- successful page discard continues across those cycles;
+- reclaimed pages are reused for verified bidirectional traffic; and
+- the observed post-reclaim floor stabilizes rather than ratcheting upward every
+  round.
+
+Accordingly, M10.4 is complete as a **no-hotplug decision** for the current
+product. Online growth would require a substantially different memory model
+(`SPARSEMEM`/hotplug, section activation, and new allocator-failure behavior)
+and should not be treated as unfinished work merely because `--memory-mib`
+remains a startup guest-capacity ceiling.
+
+If production deployments later demonstrate that this ceiling is a real
+capacity bottleneck, open a new evidence-driven design issue with the failing
+workload and resource data. That is the threshold for reconsidering online
+growth.

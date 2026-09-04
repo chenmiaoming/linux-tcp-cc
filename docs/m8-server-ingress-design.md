@@ -1,5 +1,10 @@
 # M8 server-ingress design
 
+> This document records the M8 server-ingress design and later updates to that
+> path. Some sections deliberately describe intermediate M8 behavior. For the
+> current composed product architecture and runtime ownership model, start with
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+
 M8 turns the hosted Linux TCP stack into an inbound server-side TCP front end.
 It is not a SOCKS5 or HTTP CONNECT proxy.
 
@@ -13,10 +18,11 @@ sudo tcpcc \
 ```
 
 The public TCP connection terminates on a listener inside the hosted Linux
-stack. `TCP_CONGESTION` is applied to that listener before `listen(2)`, and an
-accepted socket must inherit the requested algorithm. A separate ordinary host
-TCP connection carries the stream to the local backend; its congestion-control
-choice is outside tcpcc's public-side contract.
+stack. `TCP_CONGESTION` is applied to that listener before `listen(2)`, and
+accepted sockets inherit the listener's selected algorithm through the normal
+upstream Linux TCP path. A separate ordinary host TCP connection carries the
+stream to the local backend; its congestion-control choice is outside tcpcc's
+public-side contract.
 
 ### M8.4-M8.5 command contract
 
@@ -64,24 +70,25 @@ accepts `--iptables-variant=iptables`, `iptables-nft`, or `iptables-legacy` and
 uses the matching restore/save frontends. Selection is explicit and there is
 no automatic fallback after compatibility, startup, or runtime failure.
 
-The CLI launches the project-owned `ARCH=tcpcc` executable with only the owned
-TUN fd inherited. It attaches L3, creates a hosted listener, applies and reads
-back the requested `TCP_CONGESTION`, then uses nonblocking accept while no more
-than the configured number of asynchronous bridge sessions run. Every accepted
-child is read back to verify congestion-control inheritance before ownership
-transfers to the bridge. The current dynamic service table has no admission
-limit unless the operator supplies a positive `--max-connections` value.
+The current native CLI launches the project-owned `ARCH=tcpcc` executable with
+only the owned TUN fd inherited. It attaches L3, creates a hosted listener,
+applies and reads back the requested `TCP_CONGESTION`, binds/listens, and then
+transfers the listener to the hosted `SERVICE_START` owner. The hosted service,
+not the native supervisor, accepts public sockets and hands them to the
+single-owner bridge dispatcher. Production no longer performs a host-side
+per-accepted-socket GET_CC loop; the listener is verified before exposure and
+the lower-level TUN regression retains explicit inheritance coverage. The
+current dynamic service table has no admission limit unless the operator
+supplies a positive `--max-connections` value.
 
-Stdout is newline-delimited JSON with schema `tcpcc.runtime.v1`. The `ready`
-record includes the exact public/backend endpoints, requested CC, TUN name,
-hosted ifindex/PID, owned firewall resource, connection limit, and shutdown
-grace period. `connection-opened` records expose the verified inherited CC and
-current admission count. A completed session's `connection-closed` record
-carries the actual terminal status plus byte counts, host readiness flags,
-`EAGAIN` counts, and partial-write counts, including reset and cancellation
-outcomes. A control-channel failure that prevents retrieval instead reports
-that control status without inventing counters. Human diagnostics and hosted
-kernel logs use stderr.
+Stdout is newline-delimited JSON with schema `tcpcc.runtime.v1`. The current
+native runtime emits aggregate lifecycle records: `ready`, `draining`, optional
+`drain-timeout`, `service-stats`, and `stopped`. `service-stats` carries the
+authoritative accepted/completed/rejected/active counts, byte totals, bridge
+failures, and terminal aggregate state. The legacy Python supervisor/test model
+still contains per-flow `connection-opened`/`connection-closed` events, but
+those are not part of the installed native production stream. Human diagnostics
+and hosted kernel logs use stderr.
 
 SIGINT/SIGTERM first close the hosted listener and emit `draining`. Existing
 sessions continue until all finish or the monotonic grace deadline expires. A
@@ -139,10 +146,10 @@ hosted Linux TCP listener (--cc)
 host TCP socket to --backend
 ```
 
-TUN is the default and only M8 data plane. The link is point-to-point IPv4 or
+TUN is the production M8-derived data plane. The link is point-to-point IPv4 or
 IPv6 and does not require Ethernet headers, ARP, or a bridge, so TAP adds
 complexity without helping this product path. A future AF_PACKET backend can be
-evaluated separately; it is not a prerequisite for the first usable release.
+evaluated separately; it is not a prerequisite for the current product.
 
 DNAT applies only to TCP packets whose destination exactly matches
 `--listen`. A loopback backend such as `127.0.0.1:443` therefore does not enter
@@ -371,7 +378,7 @@ release-eligible merely because another path passes.
 Per-listener congestion control inside the hosted stack remains tcpcc's
 responsibility and is selected by `--cc`.
 
-## Delivery sequence
+## Historical delivery sequence
 
 1. Prove real-TUN inbound listen/accept and CUBIC/BBR inheritance.
 2. Replace the synchronous test control path with an asynchronous,
@@ -383,6 +390,8 @@ responsibility and is selected by `--cc`.
 5. Harden concurrency, backpressure, half-close, reset, shutdown, recovery,
    resource limits, and long-duration behavior before packaging a release.
 
-M8.1 covers only step 1. It deliberately validates the direction and socket
+M8.1 covered only step 1. It deliberately validated the direction and socket
 inheritance on which all later server-proxy work depends, without treating the
-current serialized control ABI as a production stream transport.
+then-serialized control ABI as a production stream transport. Later M9-M11 work
+replaced the intermediate runtime while preserving the public TUN/listener
+architecture.

@@ -1,5 +1,11 @@
 # Linux 6.18 userspace architecture port: M2 plan
 
+> Historical bring-up plan. M2 describes how `ARCH=tcpcc` was initially made a
+> Linux 6.18 userspace architecture; it is not the current product/runtime
+> contract. For the current system, start with
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md). For current Linux-version
+> maintenance rules, see [`porting.md`](porting.md).
+
 M2 is split into reviewable steps. The product branch must never carry a large,
 unreviewable userspace-kernel port as one change.
 
@@ -49,5 +55,6 @@ Exit criteria:
 
 `arch/tcpcc` is a new Linux 6.18 port. LKL is an implementation reference for a
 small host boundary, not a dependency or source base. Linux 6.18 User-Mode Linux
-(`arch/um`) is the primary reference for current Kbuild and host-build behavior.
-All copied or adapted code must retain appropriate SPDX/copyright attribution.
+(`arch/um`) is the primary reference for the original Kbuild and host-build
+bring-up. All copied or adapted code must retain appropriate SPDX/copyright
+attribution.
