@@ -204,7 +204,7 @@ def integration(args: argparse.Namespace) -> int:
                     PUBLIC_NETWORK, "dev", link, "src", address,
                 ])
             run(ns(router, "sysctl", "-q", "-w", "net.ipv6.conf.all.forwarding=1"))
-            run(ns(router, "sysctl", "-q", "-w", "net.ipv4.tcp_congestion_control=bbr"))
+            run(ns(router, "sysctl", "-q", "-w", "net.ipv4.tcp_congestion_control=cubic"))
 
             backend_log = backend_path.open("wb")
             backend = subprocess.Popen(
@@ -238,6 +238,13 @@ def integration(args: argparse.Namespace) -> int:
             event_stream.close()
             diagnostic_stream.close()
             ready = wait_event(events_path, tcpcc, "ready")
+            outer_cc = run(
+                ns(router, "sysctl", "-n", "net.ipv4.tcp_congestion_control")
+            ).stdout.strip()
+            if outer_cc != "cubic":
+                raise RuntimeError(
+                    f"outer host CC changed while hosted IPv6 BBR was active: {outer_cc!r}"
+                )
             if ready.get("listen") != f"[{PUBLIC_ADDRESS}]:{PUBLIC_PORT}":
                 raise RuntimeError(f"IPv6 readiness mismatch: {ready!r}")
             if ready.get("hosted_address") != HOSTED_ADDRESS:

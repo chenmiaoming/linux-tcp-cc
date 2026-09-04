@@ -25,8 +25,6 @@ class RecordingFixture:
         self.values: dict[str, str | BaseException] = {
             "self/status": "Name:\ttcpcc-test\nCapEff:\t0000000000001000\n",
             "sys/net/ipv4/ip_forward": "1\n",
-            "sys/net/ipv4/tcp_congestion_control": "bbr\n",
-            "sys/net/ipv4/tcp_available_congestion_control": "reno cubic bbr\n",
             "sys/net/ipv4/conf/all/rp_filter": "0\n",
             "sys/net/ipv4/conf/default/rp_filter": "0\n",
         }
@@ -91,8 +89,6 @@ class HostPreflightTests(unittest.TestCase):
                 "tool.ip",
                 "tool.nft",
                 "sysctl.ipv4_forward",
-                "sysctl.tcp_congestion_control",
-                "sysctl.tcp_available_congestion_control",
                 "sysctl.rp_filter.all",
                 "sysctl.rp_filter.default",
             ],
@@ -108,10 +104,6 @@ class HostPreflightTests(unittest.TestCase):
         fixture = RecordingFixture()
         fixture.values["self/status"] = "CapEff:\t0000000000000000\n"
         fixture.values["sys/net/ipv4/ip_forward"] = "0\n"
-        fixture.values["sys/net/ipv4/tcp_congestion_control"] = "cubic\n"
-        fixture.values["sys/net/ipv4/tcp_available_congestion_control"] = (
-            "reno cubic\n"
-        )
         fixture.tun_kind = "missing"
         fixture.tools = {"ip": None, "nft": None}
 
@@ -127,11 +119,23 @@ class HostPreflightTests(unittest.TestCase):
                 "tool.ip",
                 "tool.nft",
                 "sysctl.ipv4_forward",
-                "sysctl.tcp_congestion_control",
-                "sysctl.tcp_available_congestion_control",
             },
         )
         self.assertTrue(all(check.remediation for check in failed))
+
+    def test_outer_host_tcp_cc_is_not_inspected(self) -> None:
+        fixture = RecordingFixture()
+        fixture.values["sys/net/ipv4/tcp_congestion_control"] = "cubic\n"
+        fixture.values["sys/net/ipv4/tcp_available_congestion_control"] = (
+            "reno cubic\n"
+        )
+
+        report = collect_preflight("bbr", fixture.inspector())
+        reads = {value for kind, value in fixture.operations if kind == "read"}
+
+        self.assertTrue(report.ok)
+        self.assertNotIn("sys/net/ipv4/tcp_congestion_control", reads)
+        self.assertNotIn("sys/net/ipv4/tcp_available_congestion_control", reads)
 
     def test_rp_filter_is_advisory_and_never_fails_report(self) -> None:
         fixture = RecordingFixture()
@@ -150,21 +154,11 @@ class HostPreflightTests(unittest.TestCase):
         fixture = RecordingFixture()
         fixture.values["self/status"] = "Name:\ttcpcc-test\n"
         fixture.values["sys/net/ipv4/ip_forward"] = "\n"
-        fixture.values["sys/net/ipv4/tcp_congestion_control"] = PermissionError()
-        fixture.values["sys/net/ipv4/tcp_available_congestion_control"] = "\x00"
 
         checks = checks_by_id(collect_preflight("bbr", fixture.inspector()))
 
         self.assertEqual(checks["cap.net_admin"].observed, "malformed")
         self.assertEqual(checks["sysctl.ipv4_forward"].observed, "malformed")
-        self.assertEqual(
-            checks["sysctl.tcp_congestion_control"].observed,
-            "unreadable",
-        )
-        self.assertEqual(
-            checks["sysctl.tcp_available_congestion_control"].observed,
-            "malformed",
-        )
 
     def test_tun_must_be_character_device_with_read_write_access(self) -> None:
         fixture = RecordingFixture()

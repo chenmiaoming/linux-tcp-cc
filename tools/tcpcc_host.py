@@ -354,20 +354,6 @@ def _required_sysctl(
     )
 
 
-def _available_cc(inspector: HostInspector, requested_cc: str) -> CheckResult:
-    value, error = inspector.read_proc(
-        "sys/net/ipv4/tcp_available_congestion_control"
-    )
-    available = value.split() if value is not None else []
-    return _check(
-        "sysctl.tcp_available_congestion_control",
-        requested_cc in available,
-        "required",
-        " ".join(available) if available else error or "malformed",
-        f"list containing {requested_cc}",
-        f"make {requested_cc} available on the host before starting tcpcc",
-    )
-
 
 def _rp_filter(inspector: HostInspector, scope: str) -> CheckResult:
     value, error = inspector.read_proc(
@@ -479,14 +465,6 @@ def collect_preflight(
         *prefix_checks,
         *firewall_checks,
         forwarding_check,
-        _required_sysctl(
-            inspector,
-            "sysctl.tcp_congestion_control",
-            "sys/net/ipv4/tcp_congestion_control",
-            requested_cc,
-            f"set net.ipv4.tcp_congestion_control={requested_cc} before starting tcpcc",
-        ),
-        _available_cc(inspector, requested_cc),
         *family_advisories,
     )
     return PreflightReport(requested_cc=requested_cc, checks=checks)

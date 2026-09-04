@@ -75,20 +75,22 @@ sudo make install
 source checkout, run `make native-build`, then use `sudo ./tcpcc` with either
 the default `.build/tcpcc-bootstrap-out/vmlinux` or `--kernel PATH`.
 
-Before startup, the operator must provide TUN, forwarding, and the requested
-host congestion-control prerequisite. tcpcc reports all missing prerequisites
-but does not change global sysctls:
+Before startup, the operator must provide a usable TUN device, the selected
+firewall backend, and forwarding for the public address family. tcpcc reports
+missing packet-path prerequisites but does not change global sysctls:
 
 ```bash
 sysctl net.ipv4.ip_forward
 sysctl net.ipv6.conf.all.forwarding
-sysctl net.ipv4.tcp_congestion_control
-sysctl net.ipv4.tcp_available_congestion_control
 ```
 
 IPv4 listeners require `net.ipv4.ip_forward=1`; IPv6 listeners require
 `net.ipv6.conf.all.forwarding=1`. Only the forwarding switch for the selected
-public address family is required.
+public address family is required. The outer host's default and available TCP
+congestion-control algorithms are deliberately **not** prerequisites: `--cc`
+is applied to the public listener inside the hosted Linux stack and read back
+there before the listener is exposed. An outer host using CUBIC, or one that
+does not provide BBR at all, can therefore front a hosted BBR endpoint.
 
 The stable server-facing command is:
 

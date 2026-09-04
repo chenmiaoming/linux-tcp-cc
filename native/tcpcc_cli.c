@@ -585,22 +585,6 @@ static int tcpcc_check_ownership_text(const char *text)
 	return 0;
 }
 
-static bool tcpcc_word_present(const char *words, const char *wanted)
-{
-	size_t wanted_length = strlen(wanted);
-	const char *cursor = words;
-
-	while (*cursor) {
-		while (*cursor == ' ' || *cursor == '\t' || *cursor == '\n') cursor++;
-		if (!strncmp(cursor, wanted, wanted_length) &&
-		    (cursor[wanted_length] == '\0' || cursor[wanted_length] == ' ' ||
-		     cursor[wanted_length] == '\t' || cursor[wanted_length] == '\n'))
-			return true;
-		cursor += strcspn(cursor, " \t\n");
-	}
-	return false;
-}
-
 static bool tcpcc_executable_on_path(const char *name)
 {
 	const char *path = getenv("PATH");
@@ -724,12 +708,6 @@ static int tcpcc_preflight(const struct tcpcc_cli_config *config)
 		return tcpcc_error(config->listen.version == 4 ?
 			"net.ipv4.ip_forward must be 1" :
 			"net.ipv6.conf.all.forwarding must be 1");
-	if (tcpcc_read_file("/proc/sys/net/ipv4/tcp_congestion_control", value,
-			    sizeof(value)) || strcmp(value, config->cc))
-		return tcpcc_error("host tcp_congestion_control must equal --cc");
-	if (tcpcc_read_file("/proc/sys/net/ipv4/tcp_available_congestion_control",
-			    value, sizeof(value)) || !tcpcc_word_present(value, config->cc))
-		return tcpcc_error("requested congestion control is not available on the host");
 	if (!tcpcc_executable_on_path("ip"))
 		return tcpcc_error("ip executable is required on PATH");
 	if (config->firewall == TCPCC_FIREWALL_NFT_EXEC &&
