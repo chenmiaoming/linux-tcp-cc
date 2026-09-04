@@ -10,7 +10,7 @@ Each supported Linux LTS series has its own long-lived repository branch. The de
 
 Current branch: `6.18.y`
 
-Current pinned upstream baseline: Linux `v6.18.48` from the kernel.org stable tree.
+Current pinned upstream baseline: Linux `v6.18.49` from the kernel.org stable tree.
 
 Patch-level releases inside this branch will follow Linux 6.18.y stable updates after CI and regression validation.
 
