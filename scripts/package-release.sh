@@ -6,7 +6,22 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VMLINUX="${VMLINUX:-$ROOT/.build/tcpcc-bootstrap-out/vmlinux}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/.build/release}"
 NATIVE_CLI="${NATIVE_CLI:-$ROOT/.build/native/tcpcc}"
-TARGET="linux-x86_64-glibc"
+TARGET="${TARGET:-linux-x86_64-glibc}"
+
+case "$TARGET" in
+  linux-x86_64-glibc)
+    TARGET_DESCRIPTION="x86-64 glibc systems"
+    EXPECTED_INTERP='ld-linux-x86-64\.so\.2'
+    ;;
+  linux-x86_64-musl)
+    TARGET_DESCRIPTION="x86-64 musl systems such as Alpine Linux"
+    EXPECTED_INTERP='ld-musl-x86_64\.so\.1'
+    ;;
+  *)
+    echo "unsupported release target: $TARGET" >&2
+    exit 1
+    ;;
+esac
 
 # shellcheck disable=SC1091
 source "$ROOT/upstream/linux.env"
@@ -33,6 +48,11 @@ for executable in "$VMLINUX" "$NATIVE_CLI"; do
 done
 if readelf -lW "$VMLINUX" | grep -q 'INTERP'; then
   echo "release vmlinux unexpectedly has a program interpreter" >&2
+  exit 1
+fi
+if ! readelf -lW "$NATIVE_CLI" | grep -Eq "$EXPECTED_INTERP"; then
+  echo "release CLI interpreter does not match target $TARGET" >&2
+  readelf -lW "$NATIVE_CLI" | grep -E 'INTERP|Requesting program interpreter' >&2 || true
   exit 1
 fi
 
@@ -73,7 +93,7 @@ cat > "$package_root/share/doc/tcpcc/README.md" <<EOF
 # tcpcc $LINUX_VERSION binary package
 
 This package contains the native C supervisor and its hosted Linux vmlinux for
-x86-64 glibc systems. It has no Python runtime dependency.
+$TARGET_DESCRIPTION. It has no Python runtime dependency.
 
 Install under the default prefix:
 
@@ -85,6 +105,7 @@ The command resolves the adjacent hosted image automatically:
 
 Runtime prerequisites include /dev/net/tun, CAP_NET_ADMIN, IP forwarding for
 the selected address family, and one supported nftables/iptables backend.
+The default nft-lib backend loads the target system's libnftables at runtime.
 EOF
 
 cat > "$package_root/share/doc/tcpcc/SOURCE.md" <<EOF

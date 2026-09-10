@@ -6,10 +6,13 @@ on:
       - 6.18.y
     paths:
       - '.github/workflows/m9-native-runtime.yml'
+      - '.github/workflows/release.yml'
       - 'Makefile'
       - 'tcpcc'
       - 'docs/m9-native-event-runtime.md'
+      - 'docs/releases.md'
       - 'native/**'
+      - 'scripts/package-release.sh'
       - 'linux-overlay/arch/tcpcc/include/asm/bridge.h'
       - 'linux-overlay/arch/tcpcc/include/asm/service.h'
       - 'linux-overlay/arch/tcpcc/include/asm/tcpcc_control_abi.h'
@@ -27,14 +30,8 @@ concurrency:
 
 jobs:
   native-runtime:
-    name: native-runtime (${{ matrix.runner }})
-    strategy:
-      fail-fast: false
-      matrix:
-        runner:
-          - ubuntu-22.04
-          - ubuntu-latest
-    runs-on: ${{ matrix.runner }}
+    name: native-runtime (Ubuntu 22.04 glibc x86-64)
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - name: Checkout linux-tcp-cc
@@ -45,3 +42,34 @@ jobs:
 
       - name: Exercise control ABI and exec boundaries
         run: make native-check
+
+  native-runtime-musl:
+    name: native-runtime (Alpine 3.22 musl x86-64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout linux-tcp-cc
+        uses: actions/checkout@v4
+
+      - name: Build and test inside Alpine
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            alpine:3.22 \
+            sh -euxc '
+              apk add --no-cache build-base linux-headers binutils
+              rm -rf .build/native
+              make native-build
+              make native-check
+              readelf -lW .build/native/tcpcc | grep -F "/lib/ld-musl-x86_64.so.1"
+              .build/native/tcpcc --help >/dev/null
+            '
+
+      - name: Upload musl supervisor for deployment smoke tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: tcpcc-native-linux-x86_64-musl
+          path: .build/native/tcpcc
+          if-no-files-found: error
+          retention-days: 14
