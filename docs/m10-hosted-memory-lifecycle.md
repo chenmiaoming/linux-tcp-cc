@@ -123,56 +123,79 @@ counters rather than per-page or per-flow events:
 These counters distinguish a successful host discard from an RSS fluctuation.
 They do not claim that all guest TCP objects have reached their terminal state.
 
-### Reclaim CI Gate
+### Reclaim Telemetry (Non-Gating)
 
-The 512 MiB / 16,384-flow lifecycle job retains the M10.1 samples and adds a
-bounded 120-second reclaim observation after synchronous bridge teardown. It
-requires all of the following:
+The 512 MiB / 16,384-flow lifecycle job retains the M10.1 samples and performs
+a bounded 120-second reclaim observation after synchronous bridge teardown.
+This observation no longer decides CI pass/fail. It records two useful but
+host-timing-sensitive signals:
 
-1. the load grows anonymous RSS by at least 16 MiB over the ready sample;
-2. successful discard bytes increase after the final active-flow sample;
-3. anonymous RSS falls to at most the ready value plus half of the measured
-   load-induced delta;
-4. two post-reclaim idle samples are recorded;
-5. 64 fresh bidirectional IPv4 flows pass through a new listener in the same
-   process, while IPv6 public-endpoint CI executes a second verified flow after
-   crossing the generic page-reporting delay.
+1. **Reclaim mechanism telemetry (A):** state, successful discard bytes,
+   advisory failures, and the discard delta after the final active-flow sample.
+2. **Single-spike RSS telemetry (B):** ready/peak anonymous RSS, the load-induced
+   delta, whether that delta is at least 16 MiB, the historical half-recovery
+   target, whether that target was observed, elapsed time, and recovered-delta
+   ratio.
 
-The report publishes every one-second reclaim sample, its computed target,
-discard delta, elapsed time, and recovered-delta ratio. The ratio is tied to
-the same process's ready and peak samples rather than an exact runner-specific
-RSS number. The gate does not require RSS to return exactly to boot level:
-TCP timers, orphaned sockets, allocator metadata, and caches may remain live.
-The window covers the observed exponential TCP close/orphan timer cadence; it
-does not shorten those timers or treat bridge teardown as transport quiescence.
+Neither A nor B is a hard gate. In particular, a run is not failed merely
+because successful discard has not increased at the instant sampled, because
+reclaim state reports an advisory failure, because the load-induced RSS delta
+is below 16 MiB, or because anonymous RSS does not cross the half-recovery
+target within 120 seconds. Those values remain in the JSON artifact for
+regression diagnosis and comparison across runners.
+
+The report keeps the existing `reclaim_samples` and `reclaim_result` fields and
+adds explicit policy/observation fields. `reclaim_result.status == "passed"`
+means that the bounded telemetry observation completed; `gate ==
+"telemetry_only"` makes clear that the old half-recovery target is not a
+pass/fail criterion. The report also records `half_recovery_observed`,
+`successful_discard_observed`, `reclaim_health_observed`, and whether the
+load-delta signal was large enough to be informative.
+
+This distinction is deliberate. Host RSS reflects guest ownership transitions,
+TCP timer/orphan lifetime, guest allocator behavior, host `madvise` handling,
+and host-side RSS accounting. Requiring one particular percentage to appear by
+one particular wall-clock deadline made CI sensitive to runner timing without
+proving the property the long-running product actually needs.
+
+Capacity, verified traffic, clean service teardown, fresh-flow reuse, and other
+functional correctness checks remain hard failures. The change here only
+removes A/B as independent **memory-reclaim** gates.
 
 ### Multi-Round RSS Stability Gate
 
-A single successful decline does not prove that a long-running process avoids
-a rising post-load floor. The same capacity job therefore continues inside the
-same hosted kernel, TUN, control channel, and host process for six additional
-rounds. Each round:
+The hard memory-reclaim gate is the long-running property (C): repeated load
+must not create a steadily rising post-load resident floor. A single fast RSS
+decline is neither necessary nor sufficient to prove that property.
+
+The same capacity job therefore continues inside the same hosted kernel, TUN,
+control channel, and host process for six additional rounds. Each round:
 
 1. starts a listener on a distinct port, without restarting the guest;
 2. establishes 8,192 simultaneous connections and verifies bidirectional data
    on 64 of them;
 3. closes every host socket, synchronously stops the service, and verifies zero
    active connections, rejects, bridge-start failures, and admission limit;
-4. requires successful discard bytes to increase after the active sample;
+4. records reclaim state and successful-discard delta as telemetry, without
+   making either value an independent pass/fail condition;
 5. waits up to the existing 120-second bound for anonymous RSS to return below
    the stability ceiling, then records a further 0.5-second idle sample.
 
-The baseline is the last post-reclaim idle sample after the initial 16,384-flow
-spike. Every subsequent floor must remain within 8 MiB of that same baseline;
-the limit is not rebased upward after each round. This catches a staircase or
-"ratchet" pattern while allowing a small fixed amount of allocator/cache noise.
-It is a residency gate, not a claim that Linux must return to its boot RSS.
+The baseline is the last post-observation idle sample after the initial
+16,384-flow spike. Every subsequent floor must remain within 8 MiB of that same
+baseline; the limit is not rebased upward after each round. This catches a
+staircase or "ratchet" pattern while allowing a small fixed amount of
+allocator/cache noise. Failure to return below that fixed ceiling is a C
+failure, regardless of what the discard counters say. Conversely, discard
+counter timing alone cannot fail a run whose resident floors remain stable.
 
-The append-only report fields `stability_configuration`, `stability_rounds`,
-and `stability_result` retain per-round pre-load, active, stopped, reclaim,
-post-reclaim, discard-delta, verified-traffic, and idle-CPU evidence. The final
-summary publishes every observed floor, maximum/final drift, and the span of
-the last three floors so a passing result cannot hide its trajectory.
+The append-only report fields `memory_gate_policy`, `stability_configuration`,
+`stability_rounds`, and `stability_result` retain per-round pre-load, active,
+stopped, reclaim, post-reclaim, discard-delta, verified-traffic, and idle-CPU
+evidence. The final summary publishes every observed floor, maximum/final
+drift, and the span of the last three floors so a passing result cannot hide
+its trajectory. `stability_result.gate == "hard"` identifies the memory
+criterion that controls CI.
 
 ## M10.1: Complete Memory Lifecycle Measurement
 
@@ -198,12 +221,12 @@ records host memory telemetry across five distinct lifecycle phases:
    bidirectional flows with payload verification. A distinct port avoids making
    this memory test depend on TCP's previous-connection port reuse timing. It
    proves that the runtime remains reusable after the capacity service is fully
-   torn down. Under M10.3 it runs after the bounded reclaim gate.
+   torn down. Under M10.3 it runs after the bounded reclaim observation.
 
 M10.3 appends `reclaim_samples`, `reclaim_result`,
-`post_reclaim_idle_samples`, `stability_configuration`, `stability_rounds`,
-and `stability_result`; it does not rename or reinterpret the earlier schema
-fields.
+`post_reclaim_idle_samples`, `memory_gate_policy`, `stability_configuration`,
+`stability_rounds`, and `stability_result`; it does not rename the earlier
+schema fields.
 
 ### Process Telemetry Metrics
 
@@ -254,10 +277,10 @@ threshold. The M10.3 implementation distinguishes these phases:
 3. guest-free pages reported and discarded by the host;
 4. a fresh traffic pass proving safe reuse.
 
-The reclaim gate never requires the page reporter to discard memory still
-owned by TCP timers or orphaned sockets: such pages cannot be isolated from a
-buddy free list. The bounded observation reports the guest log alongside RSS
-and reclaim counters so orphan pressure remains visible separately.
+The reclaim telemetry path never requires the page reporter to discard memory
+still owned by TCP timers or orphaned sockets: such pages cannot be isolated
+from a buddy free list. The bounded observation reports the guest log alongside
+RSS and reclaim counters so orphan pressure remains visible separately.
 
 ## Capacity, Host Policy, and M10.4 Online-Growth Decision
 
