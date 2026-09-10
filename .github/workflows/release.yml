@@ -21,7 +21,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == '6.18.y' &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - name: Checkout the exact validated commit
@@ -80,39 +80,83 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
 
-      - name: Build and test the native C supervisor
+      - name: Build and test the glibc native C supervisor
         if: >-
           steps.trigger.outputs.eligible == 'true' &&
           steps.release.outputs.skip == 'false'
         run: |
           make native-build
           make native-check
+          mkdir -p .build/release-native
+          cp .build/native/tcpcc .build/release-native/tcpcc-glibc
+          readelf -lW .build/release-native/tcpcc-glibc | \
+            grep -F '/lib64/ld-linux-x86-64.so.2'
           chmod 0755 .build/tcpcc-bootstrap-out/vmlinux
 
-      - name: Build the normalized release archive
+      - name: Build and test the musl native C supervisor in Alpine
+        if: >-
+          steps.trigger.outputs.eligible == 'true' &&
+          steps.release.outputs.skip == 'false'
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            alpine:3.22 \
+            sh -euxc '
+              apk add --no-cache build-base linux-headers binutils
+              rm -rf .build/native
+              make native-build
+              make native-check
+              readelf -lW .build/native/tcpcc | grep -F "/lib/ld-musl-x86_64.so.1"
+              .build/native/tcpcc --help >/dev/null
+              cp .build/native/tcpcc .build/release-native/tcpcc-musl
+            '
+
+      - name: Build the normalized release archives
         if: >-
           steps.trigger.outputs.eligible == 'true' &&
           steps.release.outputs.skip == 'false'
         run: |
           bash -n scripts/package-release.sh
           VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
+            NATIVE_CLI=.build/release-native/tcpcc-glibc \
+            TARGET=linux-x86_64-glibc \
+            scripts/package-release.sh
+          VMLINUX=.build/tcpcc-bootstrap-out/vmlinux \
+            NATIVE_CLI=.build/release-native/tcpcc-musl \
+            TARGET=linux-x86_64-musl \
             scripts/package-release.sh
 
-      - name: Validate the packaged installed layout
+      - name: Validate the packaged installed layouts
         if: >-
           steps.trigger.outputs.eligible == 'true' &&
           steps.release.outputs.skip == 'false'
         run: |
-          archive=$(find .build/release -maxdepth 1 -name '*.tar.xz' -print -quit)
-          test -n "$archive"
-          extract_root=$(mktemp -d)
-          tar -xJf "$archive" -C "$extract_root"
-          package_root=$(find "$extract_root" -mindepth 1 -maxdepth 1 -type d -print -quit)
-          test -x "$package_root/bin/tcpcc"
-          test -x "$package_root/libexec/tcpcc/vmlinux"
-          "$package_root/bin/tcpcc" --help >/dev/null
-          test ! -e "$package_root/lib/tcpcc"
-          test ! -e "$package_root/bin/python"
+          source upstream/linux.env
+          for target in linux-x86_64-glibc linux-x86_64-musl; do
+            archive=".build/release/tcpcc-${LINUX_VERSION}-${target}.tar.xz"
+            test -f "$archive"
+            test -f "$archive.sha256"
+            test -f ".build/release/tcpcc-${LINUX_VERSION}-${target}.manifest.env"
+            extract_root=$(mktemp -d)
+            tar -xJf "$archive" -C "$extract_root"
+            package_root="$extract_root/tcpcc-${LINUX_VERSION}-${target}"
+            test -x "$package_root/bin/tcpcc"
+            test -x "$package_root/libexec/tcpcc/vmlinux"
+            if [[ "$target" == linux-x86_64-glibc ]]; then
+              "$package_root/bin/tcpcc" --help >/dev/null
+            else
+              docker run --rm \
+                -v "$package_root:/pkg:ro" \
+                alpine:3.22 \
+                /pkg/bin/tcpcc --help >/dev/null
+            fi
+            test ! -e "$package_root/lib/tcpcc"
+            test ! -e "$package_root/bin/python"
+            grep -Fx "TCPCC_TARGET=$target" \
+              "$package_root/share/doc/tcpcc/RELEASE.env"
+            rm -rf "$extract_root"
+          done
 
       - name: Publish the immutable GitHub Release
         if: >-
@@ -128,14 +172,15 @@ jobs:
           notes=$(mktemp)
           cat > "$notes" <<EOF
           tcpcc built from upstream Linux $RELEASE_TAG for the 6.18.y LTS product
-          branch. The installed service is a native C executable plus the hosted
-          vmlinux and has no Python runtime dependency.
+          branch. Each archive contains the native C supervisor plus the same
+          validated hosted vmlinux and has no Python runtime dependency.
 
           Validation: $VALIDATION_RUN
 
-          Download the linux-x86_64-glibc archive and verify it with the
-          attached SHA-256 file. Installation and exact upstream source provenance
-          are included inside the archive.
+          Choose the linux-x86_64-glibc archive for glibc distributions or the
+          linux-x86_64-musl archive for musl distributions such as Alpine Linux,
+          then verify it with the attached SHA-256 file. Installation and exact
+          upstream source provenance are included inside each archive.
           EOF
 
           gh release create "$RELEASE_TAG" \

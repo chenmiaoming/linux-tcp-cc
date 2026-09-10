@@ -3,7 +3,7 @@
 The `6.18.y` branch is a product branch tied to the upstream Linux 6.18
 longterm series. `upstream/linux.env` is its only release-version source. A
 tcpcc release tag is exactly the pinned annotated upstream tag, for example
-`v6.18.45`; tcpcc does not invent an unrelated application version.
+`v6.18.50`; tcpcc does not invent an unrelated application version.
 
 ## Sequential LTS updates
 
@@ -39,7 +39,7 @@ The update can also be prepared manually:
 
 ```bash
 bash scripts/check-linux-lts.sh
-bash scripts/update-linux-lts.sh v6.18.46
+bash scripts/update-linux-lts.sh v6.18.51
 ```
 
 ## Release gate
@@ -53,23 +53,39 @@ therefore never Release-producing commits. The release job checks out the exact
 validated LTS-update commit and downloads the hosted image produced by that
 same workflow run.
 
-Before publication it also builds and runs the native C boundary tests in CI,
-constructs the archive, extracts it into a clean directory, and proves the
-installed relative layout. A tag or Release that already exists is never
-overwritten. Ordinary project commits accumulate on `6.18.y` and ship only
-when a later pull request advances the upstream Linux pin. A security fix that
-cannot wait requires an explicit versioning-policy change rather than silently
-replacing an artifact.
+Before publication it builds and runs the native C boundary tests for both
+supported libc targets. The release build baselines are deliberately pinned:
+Ubuntu 22.04 for the glibc supervisor and Alpine 3.22 for the musl supervisor.
+The musl build runs in an Alpine container with Alpine's native GCC/musl and
+Linux UAPI headers. Both native supervisors are packaged with the same
+already-validated hosted `vmlinux`. The release job extracts both archives,
+executes each supervisor's `--help` in a matching libc environment, and verifies
+that each manifest identifies the expected target. A tag or Release that
+already exists is never overwritten. Ordinary project commits accumulate on
+`6.18.y` and ship only when a later pull request advances the upstream Linux
+pin. A security fix that cannot wait requires an explicit versioning-policy
+change rather than silently replacing an artifact.
 
-## Binary archive
+The libc build baselines do not follow floating `latest` tags. Moving either
+baseline is an explicit maintenance change so the minimum userspace ABI does
+not drift silently as CI runner images evolve.
 
-The release archive is named:
+The normal M9 pull-request CI uses the same Ubuntu 22.04 and Alpine 3.22
+baselines. It builds and runs `native-check` for both libc targets so portability
+regressions are found before the next LTS release. The Alpine job also uploads
+the resulting musl supervisor as a short-lived Actions artifact for real-machine
+smoke testing.
+
+## Binary archives
+
+Each release publishes two x86-64 archives:
 
 ```text
 tcpcc-6.18.N-linux-x86_64-glibc.tar.xz
+tcpcc-6.18.N-linux-x86_64-musl.tar.xz
 ```
 
-It contains:
+Each contains:
 
 ```text
 bin/tcpcc
@@ -82,21 +98,49 @@ share/doc/tcpcc/SOURCE.md
 
 The archive root is relocatable. Extracting it beneath `/usr/local` gives the
 same layout as `make install`, and the native command discovers
-`../libexec/tcpcc/vmlinux` relative to `/proc/self/exe`. Releases are built on
-GitHub's current `ubuntu-latest` image and are labelled `glibc` rather than
-claiming compatibility with every Linux libc. The native CI matrix still
-includes Ubuntu 22.04 as a compile/runtime compatibility check; that older
-runner does not produce release artifacts.
+`../libexec/tcpcc/vmlinux` relative to `/proc/self/exe`.
+
+The `glibc` archive contains a dynamically linked supervisor built on Ubuntu
+22.04. The `musl` archive contains a dynamically linked supervisor built in
+Alpine 3.22 and uses `/lib/ld-musl-x86_64.so.1`, matching x86-64 Alpine Linux.
+The hosted `vmlinux` itself is the same `ET_EXEC` image in both archives and has
+no userspace dynamic-loader dependency.
+
+The musl supervisor is intentionally **dynamically linked**, not fully static.
+The default `nft-lib` firewall backend loads the target system's
+`libnftables.so` at runtime with `dlopen(3)`, so a fully static-musl artifact
+would make the default backend contract misleading. Alpine deployments should
+install the normal nftables/libnftables runtime when using `nft-lib`, or select
+one of tcpcc's explicit executable/iptables compatibility backends when
+appropriate.
 
 `RELEASE.env` records the tcpcc commit, upstream Linux tag/commit, target, and
 SHA-256 hashes of both executables. The Release also attaches the manifest and
 an archive checksum. `SOURCE.md` identifies both exact source repositories and
 the repository scripts that reconstruct the prepared hosted Linux tree.
 
-CI or a maintainer with an already validated `vmlinux` can create the same
-package surface with:
+CI or a maintainer with an already validated `vmlinux` can create either
+package surface explicitly. Reproducing the release libc baselines means using
+Ubuntu 22.04 for glibc and Alpine 3.22 for musl:
 
 ```bash
+# glibc on Ubuntu 22.04
 make native-build
-make VMLINUX=/path/to/validated/vmlinux release-package
+make VMLINUX=/path/to/validated/vmlinux \
+  NATIVE_CLI=.build/native/tcpcc \
+  TARGET=linux-x86_64-glibc \
+  release-package
+
+# musl supervisor in Alpine 3.22
+docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh -euxc '
+  apk add --no-cache build-base linux-headers binutils
+  rm -rf .build/native
+  make native-build
+  make native-check
+'
+
+make VMLINUX=/path/to/validated/vmlinux \
+  NATIVE_CLI=.build/native/tcpcc \
+  TARGET=linux-x86_64-musl \
+  release-package
 ```
