@@ -36,7 +36,7 @@ void tcpcc_compat_configure_tcp_wmem(void)
 	 * tcp_init() normally caps tcp_wmem[2] at 4 MiB, but also limits it
 	 * to roughly 1/128 of free RAM. TCPCC's deliberately small 128-MiB
 	 * arena therefore leaves a public BBR sender with only about 1 MiB,
-	 * even when most of the arena is free. On a 200-ms path the skb
+	 * even when most of the arena is free. On a high-RTT path the skb
 	 * accounting overhead and BBR's 3*cwnd provisioning turn that policy
 	 * into a throughput ceiling.
 	 *
