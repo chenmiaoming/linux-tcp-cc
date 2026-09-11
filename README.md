@@ -186,14 +186,15 @@ bridge deliberately remains an ordinary IPv4 loopback connection.
 The CLI applies no connection admission limit by default and uses a five-second
 graceful-shutdown window. Hosted RAM defaults to a 128-MiB guest-capacity arena,
 but host physical residency is demand-backed and reclaimable. Operators can
-tune capacity or opt into a policy limit explicitly:
+select smaller 32- or 64-MiB arenas for constrained hosts, increase capacity,
+or opt into a policy limit explicitly:
 
 ```bash
 sudo tcpcc \
   --listen 203.0.113.10:443 \
   --backend 127.0.0.1:443 \
   --cc bbr \
-  --memory-mib 512 \
+  --memory-mib 64 \
   --max-connections 16384 \
   --shutdown-grace-period 5
 ```
@@ -205,12 +206,31 @@ buffers only while data is ready and shares a 256-KiB aggregate payload-buffer
 budget. Capacity CI, rather than the default configuration, measures the
 practical limit in explicit stages.
 
-`--memory-mib` has a 128-MiB safety minimum and no project-defined upper bound,
-but it remains the startup guest buddy-allocator capacity for that hosted
-process. The anonymous mapping is demand-backed, and pages proven free by the
-guest are returned to the host; the project does not currently perform online
-guest-memory hotplug. An oversized request or later host memory policy failure
-still fails explicitly.
+`--memory-mib` defaults to 128 MiB, accepts an opt-in minimum of 32 MiB, and has
+no project-defined upper bound. It remains the startup guest buddy-allocator
+capacity for that hosted process. The anonymous mapping is demand-backed, and
+pages proven free by the guest are returned to the host; the project does not
+currently perform online guest-memory hotplug. An oversized request or later
+host memory policy failure still fails explicitly.
+
+The hosted TCP send-autotuning ceiling is sized from that arena by default:
+512 KiB at 32 MiB, 1 MiB through 64 MiB, 2 MiB through 128 MiB, and 4 MiB above
+128 MiB. This is a ceiling, not an eager allocation; normal TCP autotuning and
+the shared `tcp_mem` pressure governor remain active. Qualification or unusual
+high-BDP deployments may override only this ceiling explicitly, for example:
+
+```bash
+sudo tcpcc \
+  --listen 203.0.113.10:443 \
+  --backend 127.0.0.1:443 \
+  --cc bbr \
+  --memory-mib 128 \
+  --tcp-wmem-max-kib 3072
+```
+
+The receive-side `tcp_rmem` policy remains upstream-derived; the explicit knob
+is intentionally limited to the send side while low-memory BBR behavior is
+being qualified.
 
 The public connection terminates in the hosted Linux stack using the algorithm
 selected by `--cc`; the ordinary loopback connection to the application is a
