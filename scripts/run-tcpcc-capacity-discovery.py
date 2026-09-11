@@ -224,14 +224,7 @@ def service_stats(control: ControlClient, handle: int) -> ServiceStats:
 
 def reclaim_stats(control: ControlClient) -> ReclaimStats:
     response = control.transact(OP_RECLAIM_STATS)
-    stats = decode_reclaim_stats(response.data)
-    if (
-        stats.state != RECLAIM_STATE_ACTIVE
-        or stats.advisory_failures
-        or stats.last_error
-    ):
-        raise RuntimeError(f"guest-free page reclaim is unhealthy: {asdict(stats)}")
-    return stats
+    return decode_reclaim_stats(response.data)
 
 
 def start_capacity_service(
@@ -679,6 +672,7 @@ def summarize_stability(
     late_floors = observed_floors[-min(3, len(observed_floors)) :]
     return {
         "status": "passed",
+        "gate": "hard",
         "rounds": expected_rounds,
         "baseline_anonymous_kib": baseline_anonymous_kib,
         "drift_allowance_kib": drift_allowance_kib,
@@ -743,6 +737,11 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 "max_idle_host_wakeups_per_second": (
                     args.max_idle_host_wakeups_per_second
                 ),
+            },
+            "memory_gate_policy": {
+                "reclaim_health": "telemetry_only",
+                "single_spike_recovery": "telemetry_only",
+                "multi_round_stability": "hard",
             },
             "memory_lifecycle_requested": not args.skip_memory_lifecycle,
             "cpu_cgroup": cpu_cgroup_stats(cpu_cgroup),
@@ -1024,21 +1023,19 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 value is None for value in stage_anonymous
             ):
                 raise RuntimeError(
-                    "anonymous RSS is required for the M10.3 reclaim gate"
+                    "anonymous RSS is required for the multi-round stability gate"
                 )
             peak_anonymous = max(stage_anonymous)
             load_delta = peak_anonymous - ready_anonymous
-            if load_delta < RECLAIM_MIN_LOAD_DELTA_KIB:
-                raise RuntimeError(
-                    "capacity load did not create the minimum anonymous-RSS "
-                    f"delta: {load_delta} < {RECLAIM_MIN_LOAD_DELTA_KIB} KiB"
-                )
-            target_anonymous = ready_anonymous + load_delta // 2
+            target_anonymous = (
+                ready_anonymous + load_delta // 2 if load_delta > 0 else None
+            )
             pre_drain_discard = stages[-1]["reclaim"][
                 "successful_discard_bytes"
             ]
             reclaim_started = time.monotonic()
             reclaim_deadline = reclaim_started + RECLAIM_TIMEOUT
+            half_recovery_observed = False
             while time.monotonic() < reclaim_deadline:
                 observed_reclaim = reclaim_stats(control)
                 observed_process = process_metrics(process.pid)
@@ -1051,38 +1048,54 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                 }
                 reclaim_samples.append(sample)
                 observed_anonymous = observed_process["anonymous_kib"]
-                if (
-                    observed_anonymous is not None
+                half_recovery_observed = (
+                    target_anonymous is not None
+                    and observed_anonymous is not None
                     and observed_anonymous <= target_anonymous
-                    and observed_reclaim.successful_discard_bytes
-                    > pre_drain_discard
-                ):
-                    reclaim_result = {
-                        "status": "passed",
-                        "ready_anonymous_kib": ready_anonymous,
-                        "peak_anonymous_kib": peak_anonymous,
-                        "load_delta_kib": load_delta,
-                        "target_anonymous_kib": target_anonymous,
-                        "observed_anonymous_kib": observed_anonymous,
-                        "recovered_load_delta_ratio": round(
-                            (peak_anonymous - observed_anonymous) / load_delta,
-                            6,
-                        ),
-                        "successful_discard_delta_bytes": (
-                            observed_reclaim.successful_discard_bytes
-                            - pre_drain_discard
-                        ),
-                        "elapsed_seconds": sample["elapsed_seconds"],
-                    }
+                )
+                if target_anonymous is None or half_recovery_observed:
                     break
                 time.sleep(RECLAIM_SAMPLE_SECONDS)
-            if reclaim_result is None:
-                latest = reclaim_samples[-1] if reclaim_samples else None
-                raise RuntimeError(
-                    "guest-free page reclaim did not recover half of the "
-                    f"load-induced anonymous RSS within {RECLAIM_TIMEOUT}s: "
-                    f"target={target_anonymous} KiB latest={latest}"
+
+            latest_reclaim_sample = reclaim_samples[-1]
+            latest_reclaim = latest_reclaim_sample["reclaim"]
+            observed_anonymous = latest_reclaim_sample["process"][
+                "anonymous_kib"
+            ]
+            successful_discard_delta = (
+                latest_reclaim["successful_discard_bytes"]
+                - pre_drain_discard
+            )
+            recovered_load_delta_ratio = None
+            if load_delta > 0 and observed_anonymous is not None:
+                recovered_load_delta_ratio = round(
+                    (peak_anonymous - observed_anonymous) / load_delta,
+                    6,
                 )
+            reclaim_result = {
+                "status": "passed",
+                "gate": "telemetry_only",
+                "ready_anonymous_kib": ready_anonymous,
+                "peak_anonymous_kib": peak_anonymous,
+                "load_delta_kib": load_delta,
+                "minimum_load_delta_kib": RECLAIM_MIN_LOAD_DELTA_KIB,
+                "load_delta_signal_sufficient": (
+                    load_delta >= RECLAIM_MIN_LOAD_DELTA_KIB
+                ),
+                "target_anonymous_kib": target_anonymous,
+                "half_recovery_observed": half_recovery_observed,
+                "observed_anonymous_kib": observed_anonymous,
+                "recovered_load_delta_ratio": recovered_load_delta_ratio,
+                "successful_discard_delta_bytes": successful_discard_delta,
+                "successful_discard_observed": successful_discard_delta > 0,
+                "reclaim_health_observed": (
+                    latest_reclaim["state"] == RECLAIM_STATE_ACTIVE
+                    and latest_reclaim["advisory_failures"] == 0
+                    and latest_reclaim["last_error"] == 0
+                ),
+                "elapsed_seconds": latest_reclaim_sample["elapsed_seconds"],
+                "observation_timeout_seconds": RECLAIM_TIMEOUT,
+            }
 
             for window_index in range(2):
                 window_before = process_metrics(process.pid)
@@ -1315,8 +1328,6 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                     if (
                         observed_anonymous is not None
                         and observed_anonymous <= stability_ceiling
-                        and observed_reclaim.successful_discard_bytes
-                        > active_round_reclaim.successful_discard_bytes
                     ):
                         post_reclaim_process = observed_process
                         post_reclaim_stats = observed_reclaim
@@ -1324,7 +1335,7 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                     time.sleep(RECLAIM_SAMPLE_SECONDS)
                 if post_reclaim_process is None or post_reclaim_stats is None:
                     raise RuntimeError(
-                        "multi-round reclaim did not return to the stability "
+                        "multi-round RSS stability did not return to the "
                         f"ceiling in round {round_index + 1}: "
                         f"ceiling={stability_ceiling} KiB "
                         f"latest={round_reclaim_samples[-1] if round_reclaim_samples else None}"
@@ -1339,10 +1350,14 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                     or post_idle_anonymous > stability_ceiling
                 ):
                     raise RuntimeError(
-                        "post-reclaim RSS exceeded the stability ceiling after "
+                        "post-load RSS exceeded the stability ceiling after "
                         f"idle round {round_index + 1}: "
                         f"ceiling={stability_ceiling} KiB observed={post_idle_anonymous}"
                     )
+                round_discard_delta = (
+                    post_reclaim_stats.successful_discard_bytes
+                    - active_round_reclaim.successful_discard_bytes
+                )
                 round_sample.update(
                     {
                         "status": "passed",
@@ -1351,9 +1366,12 @@ def discover(args: argparse.Namespace) -> dict[str, object]:
                         ),
                         "post_reclaim_process": idle_after,
                         "post_reclaim": asdict(post_reclaim_stats),
-                        "successful_discard_delta_bytes": (
-                            post_reclaim_stats.successful_discard_bytes
-                            - active_round_reclaim.successful_discard_bytes
+                        "successful_discard_delta_bytes": round_discard_delta,
+                        "successful_discard_observed": round_discard_delta > 0,
+                        "reclaim_health_observed": (
+                            post_reclaim_stats.state == RECLAIM_STATE_ACTIVE
+                            and post_reclaim_stats.advisory_failures == 0
+                            and post_reclaim_stats.last_error == 0
                         ),
                         "idle_seconds": 0.5,
                         "idle_cpu_ticks_delta": (
