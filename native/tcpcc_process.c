@@ -154,6 +154,25 @@ static int tcpcc_open_pidfd(pid_t pid)
 #endif
 }
 
+static int tcpcc_open_child_event_fd(pid_t pid, int response_fd)
+{
+	int fd = tcpcc_open_pidfd(pid);
+
+	if (fd >= 0)
+		return fd;
+	if (errno != ENOSYS)
+		return -1;
+
+	/*
+	 * Old container hosts may predate pidfd_open(). The hosted child owns the
+	 * sole write end of the control-response pipe, so its exit produces
+	 * EPOLLHUP on a duplicated read end. epoll reports HUP regardless of the
+	 * requested interest mask, preserving the event-driven child-death path
+	 * without polling or a helper thread.
+	 */
+	return fcntl(response_fd, F_DUPFD_CLOEXEC, 0);
+}
+
 static void tcpcc_reap_failed_child(pid_t pid)
 {
 	int status;
@@ -259,7 +278,7 @@ int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 	}
 
 	process->pid = child;
-	process->pid_fd = tcpcc_open_pidfd(child);
+	process->pid_fd = tcpcc_open_child_event_fd(child, responses[0]);
 	if (process->pid_fd < 0) {
 		int code = errno;
 
@@ -268,7 +287,7 @@ int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 		tcpcc_close(&requests[1]);
 		tcpcc_close(&responses[0]);
 		return tcpcc_process_fail(error, code,
-			"pidfd_open for hosted process failed: %s", strerror(code));
+			"opening hosted process event fd failed: %s", strerror(code));
 	}
 	process->request_fd = requests[1];
 	process->response_fd = responses[0];
