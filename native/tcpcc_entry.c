@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define TCPCC_TCP_WMEM_OPTION "--tcp-wmem-max-kib="
+
 int tcpcc_cli_main(int argc, char **argv);
 
 static void tcpcc_entry_usage(FILE *stream)
@@ -108,12 +110,14 @@ int main(int argc, char **argv)
 			}
 			value_text = argv[index + 1];
 			consume_next = true;
-		} else if (!strncmp(argument, "--tcp-wmem-max-kib=", 20)) {
-			value_text = argument + 20;
+		} else if (!strncmp(argument, TCPCC_TCP_WMEM_OPTION,
+				   sizeof(TCPCC_TCP_WMEM_OPTION) - 1)) {
+			value_text = argument + sizeof(TCPCC_TCP_WMEM_OPTION) - 1;
 		}
 		if (value_text &&
 		    (!strcmp(argument, "--tcp-wmem-max-kib") ||
-		     !strncmp(argument, "--tcp-wmem-max-kib=", 20))) {
+		     !strncmp(argument, TCPCC_TCP_WMEM_OPTION,
+			      sizeof(TCPCC_TCP_WMEM_OPTION) - 1))) {
 			char canonical[32];
 
 			if (tcp_wmem_seen) {
