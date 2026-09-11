@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -89,6 +90,7 @@ static void tcpcc_child_close_from(int first_fd, rlim_t descriptor_limit)
 static __attribute__((noreturn)) void
 tcpcc_child_exec(const char *kernel_path, int tun_fd,
 			 const char *memory_argument,
+			 const char *tcp_wmem_argument,
 			 const int requests[2], const int responses[2],
 			 const int exec_status[2], pid_t expected_parent,
 			 rlim_t descriptor_limit)
@@ -96,6 +98,7 @@ tcpcc_child_exec(const char *kernel_path, int tun_fd,
 	char *const arguments[] = {
 		(char *)kernel_path,
 		(char *)memory_argument,
+		(char *)tcp_wmem_argument,
 		NULL,
 	};
 	int code;
@@ -181,12 +184,37 @@ static void tcpcc_reap_failed_child(pid_t pid)
 		;
 }
 
+static int tcpcc_tcp_wmem_argument(char *buffer, size_t size,
+				   struct tcpcc_control_error *error)
+{
+	const char *environment = getenv(TCPCC_TCP_WMEM_MAX_KIB_ENV);
+	unsigned long value = 0;
+	char *end = NULL;
+
+	if (environment && environment[0]) {
+		errno = 0;
+		value = strtoul(environment, &end, 10);
+		if (errno || !end || *end ||
+		    value < TCPCC_TCP_WMEM_MAX_KIB_MINIMUM ||
+		    value > TCPCC_TCP_WMEM_MAX_KIB_LIMIT)
+			return tcpcc_process_fail(error, EINVAL,
+				"invalid %s value '%s'",
+				TCPCC_TCP_WMEM_MAX_KIB_ENV, environment);
+	}
+	if (snprintf(buffer, size, "--tcp-wmem-max-kib=%lu", value) >=
+	    (int)size)
+		return tcpcc_process_fail(error, EOVERFLOW,
+			"hosted tcp_wmem argument is too large");
+	return 0;
+}
+
 int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 			       const char *kernel_path,
 			       unsigned long memory_mib, int tun_fd,
 			       struct tcpcc_control_error *error)
 {
 	char memory_argument[64];
+	char tcp_wmem_argument[64];
 	int requests[2] = { -1, -1 };
 	int responses[2] = { -1, -1 };
 	int exec_status[2] = { -1, -1 };
@@ -205,6 +233,9 @@ int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 	    (int)sizeof(memory_argument))
 		return tcpcc_process_fail(error, EOVERFLOW,
 			"hosted memory argument is too large");
+	if (tcpcc_tcp_wmem_argument(tcp_wmem_argument,
+				    sizeof(tcp_wmem_argument), error))
+		return -1;
 	*process = (struct tcpcc_hosted_process) {
 		.pid = -1,
 		.pid_fd = -1,
@@ -244,7 +275,7 @@ int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 	}
 	if (!child)
 		tcpcc_child_exec(kernel_path, tun_fd, memory_argument,
-				 requests, responses,
+				 tcp_wmem_argument, requests, responses,
 				 exec_status, expected_parent,
 				 descriptor_limit.rlim_cur);
 
