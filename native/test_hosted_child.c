@@ -53,7 +53,8 @@ int main(int argc, char **argv)
 		.control_version = TCPCC_CONTROL_VERSION,
 	};
 
-	if (argc != 2 || strcmp(argv[1], "--memory-mib=512"))
+	if (argc != 3 || strcmp(argv[1], "--memory-mib=512") ||
+	    strcmp(argv[2], "--tcp-wmem-max-kib=3072"))
 		return 80;
 	if (fcntl(TCPCC_HOSTED_TUN_FD, F_GETFD) < 0)
 		return 81;
