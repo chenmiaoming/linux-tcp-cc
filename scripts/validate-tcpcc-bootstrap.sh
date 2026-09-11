@@ -97,7 +97,11 @@ grep -F 'tcpcc: M11 L3 netdevice tcpcc' "$BOOT_LOG" |
   grep -F 'single budgeted event pump' >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: TCP send-buffer ceiling ' "$BOOT_LOG" |
-  grep -F -- '-> 4194304 bytes (on-demand, tcp_mem-governed)' >/dev/null
+  grep -F -- '-> 2097152 bytes (low-memory profile, on-demand, tcp_mem-governed)' >/dev/null
+grep -F 'tcpcc: TCP memory policy ram_pages=' "$BOOT_LOG" |
+  grep -F ' tcp_mem=' |
+  grep -F ' tcp_wmem=' |
+  grep -F ' pressure=' >/dev/null
 grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$BOOT_LOG" >/dev/null
 grep -F 'Kernel panic - not syncing: tcpcc: M5.1 reached hosted L3 netdevice boundary after packet-fd validation' \
   "$BOOT_LOG" >/dev/null
