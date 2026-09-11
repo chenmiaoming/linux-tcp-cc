@@ -43,6 +43,11 @@ jobs:
       - name: Exercise control ABI and exec boundaries
         run: make native-check
 
+      - name: Verify low-memory CLI contract
+        run: |
+          .build/native/tcpcc --help | grep -F -- '--memory-mib MIB              hosted memory, minimum 32 (default 128)'
+          .build/native/tcpcc --help | grep -F -- '--tcp-wmem-max-kib KIB'
+
   native-runtime-musl:
     name: native-runtime (Alpine 3.22 musl x86-64)
     runs-on: ubuntu-22.04
@@ -63,7 +68,8 @@ jobs:
               make native-build
               make native-check
               readelf -lW .build/native/tcpcc | grep -F "/lib/ld-musl-x86_64.so.1"
-              .build/native/tcpcc --help >/dev/null
+              .build/native/tcpcc --help | grep -F -- "--memory-mib MIB              hosted memory, minimum 32 (default 128)"
+              .build/native/tcpcc --help | grep -F -- "--tcp-wmem-max-kib KIB"
             '
 
       - name: Upload musl supervisor for deployment smoke tests

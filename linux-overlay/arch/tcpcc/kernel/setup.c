@@ -10,14 +10,18 @@
 #include <asm/sections.h>
 #include <asm/tcpcc_compat.h>
 
-#define TCPCC_MEMORY_MIB              (1024UL * 1024UL)
-#define TCPCC_DEFAULT_MEMORY_MIB      128UL
-#define TCPCC_MINIMUM_MEMORY_MIB      128UL
-#define TCPCC_MEMORY_ARGUMENT         "--memory-mib="
+#define TCPCC_MEMORY_MIB                 (1024UL * 1024UL)
+#define TCPCC_DEFAULT_MEMORY_MIB         128UL
+#define TCPCC_MINIMUM_MEMORY_MIB         32UL
+#define TCPCC_MEMORY_ARGUMENT            "--memory-mib="
+#define TCPCC_TCP_WMEM_ARGUMENT          "--tcp-wmem-max-kib="
+#define TCPCC_TCP_WMEM_MINIMUM_KIB       64UL
+#define TCPCC_TCP_WMEM_MAXIMUM_KIB       2097151UL
 
 unsigned long tcpcc_physmem;
 unsigned long tcpcc_physmem_size;
 unsigned long tcpcc_host_initial_stack;
+unsigned long tcpcc_tcp_wmem_max_kib;
 
 static void __init tcpcc_paging_init(void)
 {
@@ -54,16 +58,27 @@ static unsigned long __init tcpcc_host_memory_size(void)
 		unsigned long parsed;
 		const char *value;
 
-		if (strncmp(argv[index], TCPCC_MEMORY_ARGUMENT,
-			    sizeof(TCPCC_MEMORY_ARGUMENT) - 1))
+		if (!strncmp(argv[index], TCPCC_MEMORY_ARGUMENT,
+			     sizeof(TCPCC_MEMORY_ARGUMENT) - 1)) {
+			value = argv[index] + sizeof(TCPCC_MEMORY_ARGUMENT) - 1;
+			if (kstrtoul(value, 10, &parsed) ||
+			    parsed < TCPCC_MINIMUM_MEMORY_MIB ||
+			    parsed > ~0UL / TCPCC_MEMORY_MIB)
+				panic("tcpcc: invalid hosted memory argument '%s'",
+				      argv[index]);
+			memory_mib = parsed;
 			continue;
-		value = argv[index] + sizeof(TCPCC_MEMORY_ARGUMENT) - 1;
-		if (kstrtoul(value, 10, &parsed) ||
-		    parsed < TCPCC_MINIMUM_MEMORY_MIB ||
-		    parsed > ~0UL / TCPCC_MEMORY_MIB)
-			panic("tcpcc: invalid hosted memory argument '%s'",
-			      argv[index]);
-		memory_mib = parsed;
+		}
+		if (!strncmp(argv[index], TCPCC_TCP_WMEM_ARGUMENT,
+			     sizeof(TCPCC_TCP_WMEM_ARGUMENT) - 1)) {
+			value = argv[index] + sizeof(TCPCC_TCP_WMEM_ARGUMENT) - 1;
+			if (kstrtoul(value, 10, &parsed) ||
+			    (parsed && (parsed < TCPCC_TCP_WMEM_MINIMUM_KIB ||
+				parsed > TCPCC_TCP_WMEM_MAXIMUM_KIB)))
+				panic("tcpcc: invalid tcp_wmem argument '%s'",
+				      argv[index]);
+			tcpcc_tcp_wmem_max_kib = parsed;
+		}
 	}
 
 	return memory_mib * TCPCC_MEMORY_MIB;

@@ -8,7 +8,17 @@
 
 #define TCPCC_HOSTED_TUN_FD 3
 #define TCPCC_HOSTED_DEFAULT_MEMORY_MIB 128UL
-#define TCPCC_HOSTED_MINIMUM_MEMORY_MIB 128UL
+#define TCPCC_HOSTED_MINIMUM_MEMORY_MIB 32UL
+
+/*
+ * The installed CLI consumes --tcp-wmem-max-kib and passes the selected value
+ * to the hosted image through this private process-launch environment slot.
+ * A missing value means the hosted kernel should apply its RAM-sized auto
+ * policy.  The byte value must fit the signed int used by tcp_wmem[].
+ */
+#define TCPCC_TCP_WMEM_MAX_KIB_ENV "TCPCC_TCP_WMEM_MAX_KIB"
+#define TCPCC_TCP_WMEM_MAX_KIB_MINIMUM 64UL
+#define TCPCC_TCP_WMEM_MAX_KIB_LIMIT 2097151UL
 
 struct tcpcc_hosted_process {
 	pid_t pid;

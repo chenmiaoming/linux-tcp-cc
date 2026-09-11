@@ -4,6 +4,7 @@
 #include <linux/in.h>
 #include <linux/inetdevice.h>
 #include <linux/ipv6.h>
+#include <linux/mm.h>
 #include <linux/netdevice.h>
 #include <linux/printk.h>
 #include <linux/rtnetlink.h>
@@ -15,30 +16,56 @@
 #include <net/ip6_route.h>
 #include <net/net_namespace.h>
 #include <net/sch_generic.h>
+#include <net/tcp.h>
 #include <asm/tcpcc_compat.h>
 
-#define TCPCC_TCP_WMEM_MAX (4U * 1024U * 1024U)
+#define TCPCC_TCP_WMEM_MAX_32M   (512U * 1024U)
+#define TCPCC_TCP_WMEM_MAX_64M   (1024U * 1024U)
+#define TCPCC_TCP_WMEM_MAX_128M  (2U * 1024U * 1024U)
+#define TCPCC_TCP_WMEM_MAX_LARGE (4U * 1024U * 1024U)
+#define TCPCC_RAM_PAGES(mib) (((mib) * 1024UL * 1024UL) >> PAGE_SHIFT)
+
+static int tcpcc_auto_tcp_wmem_max(unsigned long ram_pages)
+{
+	if (ram_pages <= TCPCC_RAM_PAGES(32UL))
+		return TCPCC_TCP_WMEM_MAX_32M;
+	if (ram_pages <= TCPCC_RAM_PAGES(64UL))
+		return TCPCC_TCP_WMEM_MAX_64M;
+	if (ram_pages <= TCPCC_RAM_PAGES(128UL))
+		return TCPCC_TCP_WMEM_MAX_128M;
+	return TCPCC_TCP_WMEM_MAX_LARGE;
+}
 
 void tcpcc_compat_configure_tcp_wmem(void)
 {
+	unsigned long ram_pages = totalram_pages();
+	unsigned long requested_kib = READ_ONCE(tcpcc_tcp_wmem_max_kib);
+	unsigned long ram_mib = (ram_pages << PAGE_SHIFT) >> 20;
 	int old_max = READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[2]);
-	int new_max = max_t(int, old_max, TCPCC_TCP_WMEM_MAX);
+	int target_max = requested_kib ? (int)(requested_kib * 1024UL) :
+		tcpcc_auto_tcp_wmem_max(ram_pages);
+	const char *policy = requested_kib ? "explicit" : "auto";
 
 	/*
-	 * tcp_init() normally caps tcp_wmem[2] at 4 MiB, but also limits it
-	 * to roughly 1/128 of free RAM.  TCPCC's deliberately small 128-MiB
-	 * arena therefore leaves a public BBR sender with only about 1 MiB,
-	 * even when most of the arena is free.  On a 200-ms path the skb
-	 * accounting overhead and BBR's 3*cwnd provisioning turn that policy
-	 * into a throughput ceiling.
+	 * tcp_init() derives tcp_wmem[2] from the hosted RAM size. That is a
+	 * sensible safety default, but it is too small for high-BDP BBR at the
+	 * tiny RAM sizes tcpcc targets. Keep a RAM-sized auto policy that doubles
+	 * from 512 KiB at 32 MiB through the ordinary 4-MiB Linux ceiling above
+	 * 128 MiB, and permit an explicit CLI override for qualification.
 	 *
-	 * Restore the ordinary upstream ceiling without allocating memory.
-	 * Socket buffers still grow on demand and the existing tcp_mem pressure
-	 * thresholds continue to arbitrate the shared 128-MiB arena.
+	 * This changes only the autotuning ceiling. Socket buffers still grow on
+	 * demand, while tcp_mem remains the shared TCP pressure governor.
 	 */
-	WRITE_ONCE(init_net.ipv4.sysctl_tcp_wmem[2], new_max);
-	pr_notice("tcpcc: TCP send-buffer ceiling %d -> %d bytes (on-demand, tcp_mem-governed)\n",
-		  old_max, new_max);
+	WRITE_ONCE(init_net.ipv4.sysctl_tcp_wmem[2], target_max);
+	pr_notice("tcpcc: TCP send-buffer ceiling %d -> %d bytes (%s, hosted RAM %lu MiB, on-demand, tcp_mem-governed)\n",
+		  old_max, target_max, policy, ram_mib);
+	pr_notice("tcpcc: TCP memory policy ram_pages=%lu tcp_mem=%ld/%ld/%ld tcp_wmem=%d/%d/%d pressure=%lu\n",
+		  ram_pages, READ_ONCE(sysctl_tcp_mem[0]), READ_ONCE(sysctl_tcp_mem[1]),
+		  READ_ONCE(sysctl_tcp_mem[2]),
+		  READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[0]),
+		  READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[1]),
+		  READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[2]),
+		  READ_ONCE(tcp_memory_pressure));
 }
 
 int tcpcc_compat_configure_ipv4(struct net_device *dev, u32 address,
@@ -143,8 +170,7 @@ int tcpcc_compat_add_default_route_ipv6(struct net_device *dev,
 
 	ret = ip6_route_add(&config, GFP_KERNEL, NULL);
 	if (!ret)
-		pr_notice("tcpcc: default IPv6 route active on %s\n",
-			  dev->name);
+		pr_notice("tcpcc: default IPv6 route active on %s\n", dev->name);
 	return ret;
 }
 

@@ -97,7 +97,11 @@ grep -F 'tcpcc: M11 L3 netdevice tcpcc' "$BOOT_LOG" |
   grep -F 'single budgeted event pump' >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: TCP send-buffer ceiling ' "$BOOT_LOG" |
-  grep -F -- '-> 4194304 bytes (on-demand, tcp_mem-governed)' >/dev/null
+  grep -F -- '-> 2097152 bytes (auto, hosted RAM 126 MiB, on-demand, tcp_mem-governed)' >/dev/null
+grep -F 'tcpcc: TCP memory policy ram_pages=' "$BOOT_LOG" |
+  grep -F ' tcp_mem=' |
+  grep -F ' tcp_wmem=' |
+  grep -F ' pressure=' >/dev/null
 grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$BOOT_LOG" >/dev/null
 grep -F 'Kernel panic - not syncing: tcpcc: M5.1 reached hosted L3 netdevice boundary after packet-fd validation' \
   "$BOOT_LOG" >/dev/null
@@ -124,5 +128,38 @@ if grep -Fq 'tcpcc: M4.2 reached userspace control boundary after native TCP/CC 
   exit 1
 fi
 
+run_memory_profile() {
+  local label="$1"
+  local memory_mib="$2"
+  local tcp_wmem_kib="$3"
+  local expected_bytes="$4"
+  local expected_policy="$5"
+  local wrapper="$ROOT/.build/tcpcc-${label}-kernel.sh"
+  local boot_log="$ROOT/.build/tcpcc-${label}-bootstrap.log"
+  local responses="$ROOT/.build/tcpcc-${label}-control.responses"
+
+  cat >"$wrapper" <<EOF
+#!/bin/sh
+exec "$OUT/vmlinux" --memory-mib=$memory_mib --tcp-wmem-max-kib=$tcp_wmem_kib "\$@"
+EOF
+  chmod u+x "$wrapper"
+  python3 "$ROOT/scripts/run-tcpcc-m6-diagnostic.py" \
+    --kernel "$wrapper" \
+    --boot-log "$boot_log" \
+    --responses "$responses"
+  grep -F "tcpcc: M3.1 host RAM $memory_mib MiB at" "$boot_log" >/dev/null
+  grep -F 'tcpcc: TCP send-buffer ceiling ' "$boot_log" |
+    grep -F -- "-> $expected_bytes bytes ($expected_policy," >/dev/null
+  grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$boot_log" >/dev/null
+  grep -F 'tcpcc-host: panic boundary -> exit(86)' "$boot_log" >/dev/null
+}
+
+# Small hosted arenas remain opt-in, but they must at least boot through the
+# complete M6 diagnostic boundary.  Zero selects the RAM-sized auto policy.
+run_memory_profile memory32-auto 32 0 524288 auto
+run_memory_profile memory64-auto 64 0 1048576 auto
+# Also prove that an explicit qualification override replaces the auto ceiling.
+run_memory_profile memory128-explicit 128 3072 3145728 explicit
+
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M6.1 hosted native BBR/default-fq configuration and packet-fd validation succeeded\n'
+printf 'M6.1 hosted native BBR/default-fq configuration and 32/64/128 MiB memory-profile validation succeeded\n'
