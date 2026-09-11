@@ -8,6 +8,9 @@ struct in6_addr;
 struct net_device;
 struct socket;
 
+/* Parsed hosted startup override; zero selects the RAM-sized auto policy. */
+extern unsigned long tcpcc_tcp_wmem_max_kib;
+
 /*
  * Keep direct use of unstable networking internals behind this boundary.
  * A new upstream kernel should adapt this implementation before changing the
