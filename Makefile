@@ -82,15 +82,21 @@ $(NATIVE_BUILD_DIR)/test-event: native/test_event.c $(NATIVE_LIBRARY)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-o $@ native/test_event.c $(NATIVE_LIBRARY)
 
+$(NATIVE_BUILD_DIR)/test-sigpipe: native/test_sigpipe.c $(NATIVE_CLI)
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
+		-o $@ native/test_sigpipe.c
+
 native-build: $(NATIVE_LIBRARY) $(NATIVE_CLI)
 
 native-check: $(NATIVE_BUILD_DIR)/test-control \
 		$(NATIVE_BUILD_DIR)/test-hosted-child \
 		$(NATIVE_BUILD_DIR)/test-process \
-		$(NATIVE_BUILD_DIR)/test-event
+		$(NATIVE_BUILD_DIR)/test-event \
+		$(NATIVE_BUILD_DIR)/test-sigpipe
 	$(NATIVE_BUILD_DIR)/test-control
 	$(NATIVE_BUILD_DIR)/test-process $(NATIVE_BUILD_DIR)/test-hosted-child
 	$(NATIVE_BUILD_DIR)/test-event
+	$(NATIVE_BUILD_DIR)/test-sigpipe $(NATIVE_CLI)
 
 release-package: $(NATIVE_CLI)
 	VMLINUX="$(VMLINUX)" scripts/package-release.sh
