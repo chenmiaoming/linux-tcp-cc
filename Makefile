@@ -15,6 +15,9 @@ NATIVE_OBJECTS := \
 	$(NATIVE_BUILD_DIR)/tcpcc_control.o \
 	$(NATIVE_BUILD_DIR)/tcpcc_event.o \
 	$(NATIVE_BUILD_DIR)/tcpcc_process.o
+NATIVE_CLI_OBJECTS := \
+	$(NATIVE_BUILD_DIR)/tcpcc_entry.o \
+	$(NATIVE_BUILD_DIR)/tcpcc_cli.o
 .PHONY: install native-build native-check release-package
 install: $(NATIVE_CLI)
 	test -x "$(VMLINUX)"
@@ -43,16 +46,21 @@ $(NATIVE_BUILD_DIR)/tcpcc_event.o: native/tcpcc_event.c \
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-c -o $@ native/tcpcc_event.c
 
+$(NATIVE_BUILD_DIR)/tcpcc_entry.o: native/tcpcc_entry.c \
+		native/tcpcc_process.h native/tcpcc_control.h | $(NATIVE_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
+		-c -o $@ native/tcpcc_entry.c
+
 $(NATIVE_BUILD_DIR)/tcpcc_cli.o: native/tcpcc_cli.c \
 		native/tcpcc_control.h native/tcpcc_event.h native/tcpcc_process.h \
 		linux-overlay/arch/tcpcc/include/asm/tcpcc_control_abi.h | $(NATIVE_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
-		-c -o $@ native/tcpcc_cli.c
+		-Dmain=tcpcc_cli_main -c -o $@ native/tcpcc_cli.c
 
 $(NATIVE_LIBRARY): $(NATIVE_OBJECTS)
 	$(AR) rcs $@ $^
 
-$(NATIVE_CLI): $(NATIVE_BUILD_DIR)/tcpcc_cli.o $(NATIVE_LIBRARY)
+$(NATIVE_CLI): $(NATIVE_CLI_OBJECTS) $(NATIVE_LIBRARY)
 	$(CC) $(LDFLAGS) -o $@ $^ -ldl
 
 $(NATIVE_BUILD_DIR)/test-control: native/test_control.c $(NATIVE_LIBRARY)
