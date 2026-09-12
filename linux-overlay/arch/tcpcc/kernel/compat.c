@@ -22,11 +22,6 @@
 #include <net/tcp.h>
 #include <asm/tcpcc_compat.h>
 
-#define TCPCC_TCP_WMEM_MAX_32M   (512U * 1024U)
-#define TCPCC_TCP_WMEM_MAX_64M   (1024U * 1024U)
-#define TCPCC_TCP_WMEM_MAX_128M  (2U * 1024U * 1024U)
-#define TCPCC_TCP_WMEM_MAX_LARGE (4U * 1024U * 1024U)
-#define TCPCC_RAM_PAGES(mib) (((mib) * 1024UL * 1024UL) >> PAGE_SHIFT)
 #define TCPCC_TCP_MEM_PRESSURE_WMEM_MULTIPLIER 8UL
 #define TCPCC_TCP_MEM_PRESSURE_RAM_DIVISOR 8UL
 #define TCPCC_MEMORY_TELEMETRY_INTERVAL (10 * HZ)
@@ -36,18 +31,8 @@ static void tcpcc_memory_telemetry_workfn(struct work_struct *work);
 static DECLARE_DELAYED_WORK(tcpcc_memory_telemetry_work,
 			    tcpcc_memory_telemetry_workfn);
 
-static int tcpcc_auto_tcp_wmem_max(unsigned long ram_pages)
-{
-	if (ram_pages <= TCPCC_RAM_PAGES(32UL))
-		return TCPCC_TCP_WMEM_MAX_32M;
-	if (ram_pages <= TCPCC_RAM_PAGES(64UL))
-		return TCPCC_TCP_WMEM_MAX_64M;
-	if (ram_pages <= TCPCC_RAM_PAGES(128UL))
-		return TCPCC_TCP_WMEM_MAX_128M;
-	return TCPCC_TCP_WMEM_MAX_LARGE;
-}
-
 static void tcpcc_compat_configure_tcp_mem(unsigned long ram_pages,
+					    int upstream_wmem_max,
 					    int target_wmem_max)
 {
 	long old_low = READ_ONCE(sysctl_tcp_mem[0]);
@@ -61,18 +46,24 @@ static void tcpcc_compat_configure_tcp_mem(unsigned long ram_pages,
 	long new_high;
 
 	/*
-	 * tcp_init() sizes tcp_mem and tcp_wmem from the same hosted RAM pool.
-	 * tcpcc intentionally raises tcp_wmem[2] on tiny guests so high-BDP
-	 * senders are not capped by the ordinary small-RAM autotune result.  If
-	 * tcp_mem is left untouched, a single sender can then cross the global
-	 * TCP pressure threshold while most guest RAM is still free.
+	 * tcp_init() derives tcp_mem and tcp_wmem[2] from the same hosted RAM
+	 * pool.  Preserve that upstream pairing by default, and also preserve the
+	 * upstream aggregate tcp_mem budget when an explicit send ceiling lowers
+	 * tcp_wmem[2].  Only an explicit ceiling above the upstream value needs a
+	 * coordinated tcp_mem increase.
 	 *
-	 * Keep the global budget coordinated with the chosen send ceiling: aim
-	 * for a pressure threshold of eight send ceilings, close to the stock
-	 * ratio on a 512-MiB guest, but cap the pressure point at 12.5% of hosted
-	 * RAM.  Preserve Linux's low:pressure:high shape of 3/4 : 1 : 3/2 and
-	 * never lower an upstream-derived threshold.
+	 * For that opt-in case, retain the upstream scale of roughly eight send
+	 * ceilings per pressure threshold, but cap the pressure point at 12.5% of
+	 * hosted RAM.  Preserve Linux's low:pressure:high shape of 3/4 : 1 : 3/2
+	 * and never lower an upstream-derived threshold.
 	 */
+	if (target_wmem_max <= upstream_wmem_max) {
+		pr_notice("tcpcc: TCP memory budget %ld/%ld/%ld -> %ld/%ld/%ld pages (upstream-preserved)\n",
+			  old_low, old_pressure, old_high,
+			  old_low, old_pressure, old_high);
+		return;
+	}
+
 	wmem_pages = DIV_ROUND_UP((unsigned long)target_wmem_max, PAGE_SIZE);
 	pressure_cap = max_t(unsigned long, 1,
 			     ram_pages / TCPCC_TCP_MEM_PRESSURE_RAM_DIVISOR);
@@ -140,24 +131,23 @@ void tcpcc_compat_configure_tcp_wmem(void)
 	unsigned long requested_kib = READ_ONCE(tcpcc_tcp_wmem_max_kib);
 	unsigned long ram_mib = (ram_pages << PAGE_SHIFT) >> 20;
 	int old_max = READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[2]);
-	int target_max = requested_kib ? (int)(requested_kib * 1024UL) :
-		tcpcc_auto_tcp_wmem_max(ram_pages);
-	const char *policy = requested_kib ? "explicit" : "auto";
+	int target_max = requested_kib ? (int)(requested_kib * 1024UL) : old_max;
+	const char *policy = requested_kib ? "explicit" : "upstream";
 
 	/*
-	 * tcp_init() derives tcp_wmem[2] from the hosted RAM size. That is a
-	 * sensible safety default, but it is too small for high-BDP BBR at the
-	 * tiny RAM sizes tcpcc targets. Keep a RAM-sized auto policy that doubles
-	 * from 512 KiB at 32 MiB through the ordinary 4-MiB Linux ceiling above
-	 * 128 MiB, and permit an explicit CLI override for qualification.
+	 * Preserve tcp_init()'s RAM-derived tcp_wmem[2] and tcp_mem defaults when
+	 * the operator does not request an override.  This keeps the hosted stack
+	 * on upstream Linux's normal memory policy instead of silently doubling
+	 * the per-socket send ceiling on small guests.
 	 *
-	 * This changes only the autotuning ceiling; socket buffers still grow on
-	 * demand.  Coordinate tcp_mem with the raised ceiling so the shared TCP
-	 * pressure governor does not trip solely because tcp_wmem was enlarged,
-	 * while bounding that pressure point to 12.5% of hosted RAM.
+	 * An explicit --tcp-wmem-max-kib remains available for qualification and
+	 * unusual high-BDP deployments.  A lower explicit ceiling leaves the
+	 * upstream aggregate tcp_mem budget intact; a higher ceiling coordinates
+	 * tcp_mem so tcpcc does not enlarge only one side of the upstream policy.
 	 */
-	WRITE_ONCE(init_net.ipv4.sysctl_tcp_wmem[2], target_max);
-	tcpcc_compat_configure_tcp_mem(ram_pages, target_max);
+	if (requested_kib)
+		WRITE_ONCE(init_net.ipv4.sysctl_tcp_wmem[2], target_max);
+	tcpcc_compat_configure_tcp_mem(ram_pages, old_max, target_max);
 	pr_notice("tcpcc: TCP send-buffer ceiling %d -> %d bytes (%s, hosted RAM %lu MiB, on-demand, tcp_mem-governed)\n",
 		  old_max, target_max, policy, ram_mib);
 	pr_notice("tcpcc: TCP memory policy ram_pages=%lu tcp_mem=%ld/%ld/%ld tcp_wmem=%d/%d/%d pressure=%lu\n",
