@@ -4,6 +4,7 @@
 #include "tcpcc_process.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +58,16 @@ static int tcpcc_entry_error(const char *message)
 	return 1;
 }
 
+static int tcpcc_entry_ignore_sigpipe(void)
+{
+	struct sigaction action = { .sa_handler = SIG_IGN };
+
+	if (sigemptyset(&action.sa_mask) != 0 ||
+	    sigaction(SIGPIPE, &action, NULL) != 0)
+		return -1;
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	char **filtered;
@@ -65,6 +76,16 @@ int main(int argc, char **argv)
 	bool help = false;
 	int filtered_argc = 1;
 	int index;
+
+	/*
+	 * Runtime status is commonly piped through tee/logger. If that consumer
+	 * exits together with the initiating terminal, teardown must still reach
+	 * the owned firewall and TUN rollback rather than dying on the first
+	 * shutdown log write with SIGPIPE. stdio will instead observe EPIPE while
+	 * the supervisor continues through its cleanup path.
+	 */
+	if (tcpcc_entry_ignore_sigpipe())
+		return tcpcc_entry_error("ignoring SIGPIPE failed");
 
 	if (unsetenv(TCPCC_TCP_WMEM_MAX_KIB_ENV) != 0)
 		return tcpcc_entry_error("clearing internal tcp_wmem launch state failed");
