@@ -8,7 +8,7 @@ struct in6_addr;
 struct net_device;
 struct socket;
 
-/* Parsed hosted startup override; zero selects the RAM-sized auto policy. */
+/* Parsed hosted startup override; zero preserves upstream tcp_wmem policy. */
 extern unsigned long tcpcc_tcp_wmem_max_kib;
 
 /*
