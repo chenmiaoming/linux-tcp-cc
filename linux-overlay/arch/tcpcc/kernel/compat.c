@@ -4,12 +4,15 @@
 #include <linux/in.h>
 #include <linux/inetdevice.h>
 #include <linux/ipv6.h>
+#include <linux/jiffies.h>
 #include <linux/mm.h>
 #include <linux/netdevice.h>
 #include <linux/printk.h>
 #include <linux/rtnetlink.h>
 #include <linux/sockios.h>
 #include <linux/string.h>
+#include <linux/vmstat.h>
+#include <linux/workqueue.h>
 #include <net/addrconf.h>
 #include <net/ip_fib.h>
 #include <net/ip6_fib.h>
@@ -24,6 +27,12 @@
 #define TCPCC_TCP_WMEM_MAX_128M  (2U * 1024U * 1024U)
 #define TCPCC_TCP_WMEM_MAX_LARGE (4U * 1024U * 1024U)
 #define TCPCC_RAM_PAGES(mib) (((mib) * 1024UL * 1024UL) >> PAGE_SHIFT)
+#define TCPCC_MEMORY_TELEMETRY_INTERVAL (10 * HZ)
+
+static bool tcpcc_memory_telemetry_started;
+static void tcpcc_memory_telemetry_workfn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(tcpcc_memory_telemetry_work,
+			    tcpcc_memory_telemetry_workfn);
 
 static int tcpcc_auto_tcp_wmem_max(unsigned long ram_pages)
 {
@@ -34,6 +43,49 @@ static int tcpcc_auto_tcp_wmem_max(unsigned long ram_pages)
 	if (ram_pages <= TCPCC_RAM_PAGES(128UL))
 		return TCPCC_TCP_WMEM_MAX_128M;
 	return TCPCC_TCP_WMEM_MAX_LARGE;
+}
+
+void tcpcc_compat_log_memory_state(const char *phase)
+{
+	unsigned long total_pages = totalram_pages();
+	unsigned long free_pages = global_zone_page_state(NR_FREE_PAGES);
+	long available_pages = si_mem_available();
+	unsigned long file_pages = global_node_page_state(NR_FILE_PAGES);
+	unsigned long slab_reclaimable_pages =
+		global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B);
+	unsigned long slab_unreclaimable_pages =
+		global_node_page_state_pages(NR_SLAB_UNRECLAIMABLE_B);
+	long tcp_allocated_pages = tcp_prot.memory_allocated ?
+		atomic_long_read(tcp_prot.memory_allocated) : -1L;
+
+	pr_notice("tcpcc: memory snapshot phase=%s total_pages=%lu free_pages=%lu available_pages=%ld file_pages=%lu slab_reclaimable_pages=%lu slab_unreclaimable_pages=%lu tcp_allocated_pages=%ld tcp_mem=%ld/%ld/%ld tcp_wmem=%d/%d/%d pressure=%lu\n",
+		  phase ? phase : "unknown", total_pages, free_pages,
+		  available_pages, file_pages, slab_reclaimable_pages,
+		  slab_unreclaimable_pages, tcp_allocated_pages,
+		  READ_ONCE(sysctl_tcp_mem[0]), READ_ONCE(sysctl_tcp_mem[1]),
+		  READ_ONCE(sysctl_tcp_mem[2]),
+		  READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[0]),
+		  READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[1]),
+		  READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[2]),
+		  READ_ONCE(tcp_memory_pressure));
+}
+
+static void tcpcc_memory_telemetry_workfn(struct work_struct *work)
+{
+	(void)work;
+	tcpcc_compat_log_memory_state("runtime");
+	schedule_delayed_work(&tcpcc_memory_telemetry_work,
+			      TCPCC_MEMORY_TELEMETRY_INTERVAL);
+}
+
+static void tcpcc_compat_start_memory_telemetry(void)
+{
+	if (READ_ONCE(tcpcc_memory_telemetry_started))
+		return;
+	WRITE_ONCE(tcpcc_memory_telemetry_started, true);
+	tcpcc_compat_log_memory_state("runtime-start");
+	schedule_delayed_work(&tcpcc_memory_telemetry_work,
+			      TCPCC_MEMORY_TELEMETRY_INTERVAL);
 }
 
 void tcpcc_compat_configure_tcp_wmem(void)
@@ -66,6 +118,7 @@ void tcpcc_compat_configure_tcp_wmem(void)
 		  READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[1]),
 		  READ_ONCE(init_net.ipv4.sysctl_tcp_wmem[2]),
 		  READ_ONCE(tcp_memory_pressure));
+	tcpcc_compat_start_memory_telemetry();
 }
 
 int tcpcc_compat_configure_ipv4(struct net_device *dev, u32 address,
