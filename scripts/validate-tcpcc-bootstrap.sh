@@ -65,6 +65,26 @@ strace -ff -ttt -s 256 -o "$STRACE_LOG" \
 
 cat "$BOOT_LOG"
 
+assert_tcp_mem_budget_raised() {
+  local boot_log="$1"
+  local line
+  local old_pressure
+  local new_pressure
+
+  line="$(grep -F 'tcpcc: TCP memory budget ' "$boot_log" | tail -n 1)"
+  printf '%s\n' "$line" |
+    grep -F 'send-buffer coordinated, pressure cap 12.5% hosted RAM' >/dev/null
+  old_pressure="$(printf '%s\n' "$line" |
+    sed -E 's/.*TCP memory budget [0-9]+\/([0-9]+)\/[0-9]+ ->.*/\1/')"
+  new_pressure="$(printf '%s\n' "$line" |
+    sed -E 's/.*-> [0-9]+\/([0-9]+)\/[0-9]+ pages.*/\1/')"
+  if [[ ! "$old_pressure" =~ ^[0-9]+$ || ! "$new_pressure" =~ ^[0-9]+$ ||
+        "$new_pressure" -le "$old_pressure" ]]; then
+    echo "tcpcc tcp_mem pressure budget was not raised: $line" >&2
+    exit 1
+  fi
+}
+
 grep -F "Linux version $LINUX_VERSION" "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 host RAM 128 MiB at' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 setup_arch memory initialization complete' "$BOOT_LOG" >/dev/null
@@ -98,6 +118,7 @@ grep -F 'tcpcc: M11 L3 netdevice tcpcc' "$BOOT_LOG" |
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: TCP send-buffer ceiling ' "$BOOT_LOG" |
   grep -F -- '-> 2097152 bytes (auto, hosted RAM 126 MiB, on-demand, tcp_mem-governed)' >/dev/null
+assert_tcp_mem_budget_raised "$BOOT_LOG"
 grep -F 'tcpcc: TCP memory policy ram_pages=' "$BOOT_LOG" |
   grep -F ' tcp_mem=' |
   grep -F ' tcp_wmem=' |
@@ -150,6 +171,7 @@ EOF
   grep -F "tcpcc: M3.1 host RAM $memory_mib MiB at" "$boot_log" >/dev/null
   grep -F 'tcpcc: TCP send-buffer ceiling ' "$boot_log" |
     grep -F -- "-> $expected_bytes bytes ($expected_policy," >/dev/null
+  assert_tcp_mem_budget_raised "$boot_log"
   grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$boot_log" >/dev/null
   grep -F 'tcpcc-host: panic boundary -> exit(86)' "$boot_log" >/dev/null
 }
@@ -158,7 +180,8 @@ EOF
 # complete M6 diagnostic boundary.  Zero selects the RAM-sized auto policy.
 run_memory_profile memory32-auto 32 0 524288 auto
 run_memory_profile memory64-auto 64 0 1048576 auto
-# Also prove that an explicit qualification override replaces the auto ceiling.
+# Also prove that an explicit qualification override replaces the auto ceiling
+# and remains bounded by the coordinated global tcp_mem policy.
 run_memory_profile memory128-explicit 128 3072 3145728 explicit
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
