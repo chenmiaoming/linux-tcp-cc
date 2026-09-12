@@ -33,7 +33,9 @@ GUEST_PREFIX = 32
 LISTEN_PORT = 18453
 EXPECTED_LOGS = (
     "tcpcc: M8.4 default IPv4 route active on tcpcc0",
+    "tcpcc: memory snapshot phase=runtime-start",
     "tcpcc: M8.4 hosted runtime stopped cleanly",
+    "tcpcc: memory snapshot phase=shutdown",
 )
 
 
