@@ -213,11 +213,15 @@ pages proven free by the guest are returned to the host; the project does not
 currently perform online guest-memory hotplug. An oversized request or later
 host memory policy failure still fails explicitly.
 
-The hosted TCP send-autotuning ceiling is sized from that arena by default:
-512 KiB at 32 MiB, 1 MiB through 64 MiB, 2 MiB through 128 MiB, and 4 MiB above
-128 MiB. This is a ceiling, not an eager allocation; normal TCP autotuning and
-the shared `tcp_mem` pressure governor remain active. Qualification or unusual
-high-BDP deployments may override only this ceiling explicitly, for example:
+By default the hosted TCP memory policy is the policy produced by upstream
+Linux `tcp_init()` for that arena: tcpcc preserves both the RAM-derived
+`tcp_wmem[2]` send-autotuning ceiling and the shared `tcp_mem`
+low/pressure/high thresholds. On the current kernel this is roughly a 1-MiB
+send ceiling for a 128-MiB arena and the ordinary 4-MiB Linux ceiling by about
+512 MiB. These are accounting/autotuning limits, not eager allocations.
+
+Qualification or unusual high-BDP deployments may override only the send
+ceiling explicitly, for example:
 
 ```bash
 sudo tcpcc \
@@ -228,9 +232,12 @@ sudo tcpcc \
   --tcp-wmem-max-kib 3072
 ```
 
-The receive-side `tcp_rmem` policy remains upstream-derived; the explicit knob
-is intentionally limited to the send side while low-memory BBR behavior is
-being qualified.
+An explicit ceiling at or below the upstream value leaves the upstream
+aggregate `tcp_mem` budget unchanged. If an explicit ceiling raises
+`tcp_wmem[2]`, tcpcc raises `tcp_mem` only as needed to retain approximately the
+upstream eight-to-one pressure-to-send-ceiling scale, with the pressure point
+capped at 12.5% of hosted RAM. The receive-side `tcp_rmem` policy remains
+upstream-derived.
 
 The public connection terminates in the hosted Linux stack using the algorithm
 selected by `--cc`; the ordinary loopback connection to the application is a
