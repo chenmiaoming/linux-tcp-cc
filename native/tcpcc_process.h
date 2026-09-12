@@ -13,8 +13,9 @@
 /*
  * The installed CLI consumes --tcp-wmem-max-kib and passes the selected value
  * to the hosted image through this private process-launch environment slot.
- * A missing value means the hosted kernel should apply its RAM-sized auto
- * policy.  The byte value must fit the signed int used by tcp_wmem[].
+ * A missing value means the hosted kernel preserves upstream Linux's RAM-
+ * derived tcp_wmem policy. The byte value must fit the signed int used by
+ * tcp_wmem[].
  */
 #define TCPCC_TCP_WMEM_MAX_KIB_ENV "TCPCC_TCP_WMEM_MAX_KIB"
 #define TCPCC_TCP_WMEM_MAX_KIB_MINIMUM 64UL

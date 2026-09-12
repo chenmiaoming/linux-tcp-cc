@@ -65,6 +65,62 @@ strace -ff -ttt -s 256 -o "$STRACE_LOG" \
 
 cat "$BOOT_LOG"
 
+assert_tcp_mem_budget_preserved() {
+  local boot_log="$1"
+  local line
+  local old_triplet
+  local new_triplet
+
+  line="$(grep -F 'tcpcc: TCP memory budget ' "$boot_log" | tail -n 1)"
+  printf '%s\n' "$line" | grep -F '(upstream-preserved)' >/dev/null
+  old_triplet="$(printf '%s\n' "$line" |
+    sed -E 's/.*TCP memory budget ([0-9]+\/[0-9]+\/[0-9]+) ->.*/\1/')"
+  new_triplet="$(printf '%s\n' "$line" |
+    sed -E 's/.*-> ([0-9]+\/[0-9]+\/[0-9]+) pages.*/\1/')"
+  if [[ "$old_triplet" != "$new_triplet" ]]; then
+    echo "tcpcc changed upstream tcp_mem unexpectedly: $line" >&2
+    exit 1
+  fi
+}
+
+assert_tcp_mem_budget_raised() {
+  local boot_log="$1"
+  local line
+  local old_pressure
+  local new_pressure
+
+  line="$(grep -F 'tcpcc: TCP memory budget ' "$boot_log" | tail -n 1)"
+  printf '%s\n' "$line" |
+    grep -F 'send-buffer coordinated, pressure cap 12.5% hosted RAM' >/dev/null
+  old_pressure="$(printf '%s\n' "$line" |
+    sed -E 's/.*TCP memory budget [0-9]+\/([0-9]+)\/[0-9]+ ->.*/\1/')"
+  new_pressure="$(printf '%s\n' "$line" |
+    sed -E 's/.*-> [0-9]+\/([0-9]+)\/[0-9]+ pages.*/\1/')"
+  if [[ ! "$old_pressure" =~ ^[0-9]+$ || ! "$new_pressure" =~ ^[0-9]+$ ||
+        "$new_pressure" -le "$old_pressure" ]]; then
+    echo "tcpcc tcp_mem pressure budget was not raised: $line" >&2
+    exit 1
+  fi
+}
+
+assert_tcp_send_ceiling_preserved() {
+  local boot_log="$1"
+  local line
+  local old_max
+  local new_max
+
+  line="$(grep -F 'tcpcc: TCP send-buffer ceiling ' "$boot_log" | tail -n 1)"
+  printf '%s\n' "$line" | grep -F '(upstream,' >/dev/null
+  old_max="$(printf '%s\n' "$line" |
+    sed -E 's/.*ceiling ([0-9]+) -> [0-9]+ bytes.*/\1/')"
+  new_max="$(printf '%s\n' "$line" |
+    sed -E 's/.*-> ([0-9]+) bytes.*/\1/')"
+  if [[ ! "$old_max" =~ ^[0-9]+$ || "$old_max" != "$new_max" ]]; then
+    echo "tcpcc changed upstream tcp_wmem unexpectedly: $line" >&2
+    exit 1
+  fi
+}
+
 grep -F "Linux version $LINUX_VERSION" "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 host RAM 128 MiB at' "$BOOT_LOG" >/dev/null
 grep -F 'tcpcc: M3.1 setup_arch memory initialization complete' "$BOOT_LOG" >/dev/null
@@ -96,8 +152,8 @@ grep -F 'tcpcc: M4.2 host control bridge passed native loopback TCP and Reno/CUB
 grep -F 'tcpcc: M11 L3 netdevice tcpcc' "$BOOT_LOG" |
   grep -F 'single budgeted event pump' >/dev/null
 grep -F 'tcpcc: M6.1 root qdisc fq active on tcpcc0' "$BOOT_LOG" >/dev/null
-grep -F 'tcpcc: TCP send-buffer ceiling ' "$BOOT_LOG" |
-  grep -F -- '-> 2097152 bytes (auto, hosted RAM 126 MiB, on-demand, tcp_mem-governed)' >/dev/null
+assert_tcp_send_ceiling_preserved "$BOOT_LOG"
+assert_tcp_mem_budget_preserved "$BOOT_LOG"
 grep -F 'tcpcc: TCP memory policy ram_pages=' "$BOOT_LOG" |
   grep -F ' tcp_mem=' |
   grep -F ' tcp_wmem=' |
@@ -134,6 +190,7 @@ run_memory_profile() {
   local tcp_wmem_kib="$3"
   local expected_bytes="$4"
   local expected_policy="$5"
+  local expected_mem_policy="$6"
   local wrapper="$ROOT/.build/tcpcc-${label}-kernel.sh"
   local boot_log="$ROOT/.build/tcpcc-${label}-bootstrap.log"
   local responses="$ROOT/.build/tcpcc-${label}-control.responses"
@@ -148,18 +205,31 @@ EOF
     --boot-log "$boot_log" \
     --responses "$responses"
   grep -F "tcpcc: M3.1 host RAM $memory_mib MiB at" "$boot_log" >/dev/null
-  grep -F 'tcpcc: TCP send-buffer ceiling ' "$boot_log" |
-    grep -F -- "-> $expected_bytes bytes ($expected_policy," >/dev/null
+  if [[ "$expected_policy" == "upstream" ]]; then
+    assert_tcp_send_ceiling_preserved "$boot_log"
+  else
+    grep -F 'tcpcc: TCP send-buffer ceiling ' "$boot_log" |
+      grep -F -- "-> $expected_bytes bytes ($expected_policy," >/dev/null
+  fi
+  if [[ "$expected_mem_policy" == "raised" ]]; then
+    assert_tcp_mem_budget_raised "$boot_log"
+  else
+    assert_tcp_mem_budget_preserved "$boot_log"
+  fi
   grep -F 'tcpcc: M5.1 hosted L3 netdevice passed (' "$boot_log" >/dev/null
   grep -F 'tcpcc-host: panic boundary -> exit(86)' "$boot_log" >/dev/null
 }
 
-# Small hosted arenas remain opt-in, but they must at least boot through the
-# complete M6 diagnostic boundary.  Zero selects the RAM-sized auto policy.
-run_memory_profile memory32-auto 32 0 524288 auto
-run_memory_profile memory64-auto 64 0 1048576 auto
-# Also prove that an explicit qualification override replaces the auto ceiling.
-run_memory_profile memory128-explicit 128 3072 3145728 explicit
+# Small hosted arenas remain opt-in, but their default TCP memory policy must
+# remain exactly the upstream RAM-derived policy. Zero selects that upstream
+# tcp_wmem ceiling instead of a tcpcc-specific tier.
+run_memory_profile memory32-upstream 32 0 0 upstream preserved
+run_memory_profile memory64-upstream 64 0 0 upstream preserved
+# Raising the explicit send ceiling coordinates tcp_mem; lowering it preserves
+# the upstream aggregate tcp_mem budget. The latter mirrors the 512 MiB / 1 MiB
+# real-machine qualification profile.
+run_memory_profile memory128-explicit-high 128 3072 3145728 explicit raised
+run_memory_profile memory512-explicit-low 512 1024 1048576 explicit preserved
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
-printf 'M6.1 hosted native BBR/default-fq configuration and 32/64/128 MiB memory-profile validation succeeded\n'
+printf 'M6.1 hosted native BBR/default-fq configuration and upstream/override TCP memory-profile validation succeeded\n'
