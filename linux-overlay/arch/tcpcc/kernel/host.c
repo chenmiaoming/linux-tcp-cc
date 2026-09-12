@@ -3,6 +3,7 @@
 #include <linux/types.h>
 #include <asm/host.h>
 #include <asm/host_mman.h>
+#include <asm/tcpcc_compat.h>
 
 #if !defined(__x86_64__)
 #error "tcpcc host ABI currently requires an x86-64 Linux host"
@@ -671,6 +672,8 @@ out:
 
 void __noreturn tcpcc_host_exit(int status)
 {
+	if (!status)
+		tcpcc_compat_log_memory_state("shutdown");
 	(void)tcpcc_host_syscall1(TCPCC_HOST_NR_EXIT_GROUP, status & 0xff);
 
 	/* exit_group() should not return. Keep failure deterministic if it does. */
