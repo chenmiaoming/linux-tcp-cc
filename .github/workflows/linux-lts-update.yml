@@ -50,11 +50,89 @@ jobs:
         if: >-
           steps.lts.outputs.update_available == 'true' &&
           steps.pending.outputs.blocked == 'false'
+        id: prepare
         env:
           TARGET_TAG: ${{ steps.lts.outputs.next_tag }}
         run: |
+          cp upstream/protected.sha256 "$RUNNER_TEMP/protected-before.sha256"
           bash scripts/update-linux-lts.sh "$TARGET_TAG"
           git diff --check
+
+          python3 - \
+            "$RUNNER_TEMP/protected-before.sha256" \
+            upstream/protected.sha256 \
+            "$RUNNER_TEMP/protected-delta.md" \
+            "$GITHUB_OUTPUT" <<'PY'
+          from pathlib import Path
+          import sys
+
+          before_path, after_path, report_path, output_path = map(Path, sys.argv[1:])
+
+          def read_hashes(path):
+              hashes = {}
+              for raw in path.read_text(encoding="utf-8").splitlines():
+                  line = raw.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  digest, source = line.split(None, 1)
+                  hashes[source] = digest
+              return hashes
+
+          before = read_hashes(before_path)
+          after = read_hashes(after_path)
+          changed = []
+
+          lines = [
+              "## Protected upstream delta",
+              "",
+              "| Source | Status |",
+              "| --- | --- |",
+          ]
+
+          for source in sorted(set(before) | set(after)):
+              old = before.get(source)
+              new = after.get(source)
+              if old == new:
+                  status = "unchanged"
+              elif old is None:
+                  status = "ADDED ⚠️"
+                  changed.append(source)
+              elif new is None:
+                  status = "REMOVED ⚠️"
+                  changed.append(source)
+              else:
+                  status = f"CHANGED ⚠️ (`{old[:12]}` → `{new[:12]}`)"
+                  changed.append(source)
+              lines.append(f"| `{source}` | {status} |")
+
+          lines.extend(
+              [
+                  "",
+                  (
+                      "**Risk classification: MANUAL REVIEW REQUIRED.**"
+                      if changed
+                      else "**Risk classification: ROUTINE.**"
+                  ),
+              ]
+          )
+
+          if changed:
+              lines.extend(
+                  [
+                      "",
+                      "The new upstream hashes become the baseline only after a maintainer "
+                      "reviews the upstream changes and explicitly marks the draft ready.",
+                  ]
+              )
+
+          report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          with output_path.open("a", encoding="utf-8") as output:
+              output.write(f"protected_changed={'true' if changed else 'false'}\n")
+
+          print(report_path.read_text(encoding="utf-8"), end="")
+          PY
+
+          cat "$RUNNER_TEMP/protected-delta.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create the sequential update pull request
         if: >-
@@ -65,6 +143,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARGET_TAG: ${{ steps.lts.outputs.next_tag }}
           LATEST_TAG: ${{ steps.lts.outputs.latest_tag }}
+          PROTECTED_CHANGED: ${{ steps.prepare.outputs.protected_changed }}
         run: |
           branch="automation/linux-$TARGET_TAG"
           if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
@@ -86,17 +165,38 @@ jobs:
           later patches deliberately wait so every upstream version receives its
           own CI result and tcpcc Release.
 
+          EOF
+
+          if [[ "$PROTECTED_CHANGED" == "true" ]]; then
+            cat >> "$body" <<'EOF'
+          > [!WARNING]
+          > Protected upstream congestion-control or fq source changed.
+          > This PR is intentionally opened as a draft and requires explicit
+          > maintainer review before it is marked ready.
+
+          EOF
+          fi
+
+          cat "$RUNNER_TEMP/protected-delta.md" >> "$body"
+          cat >> "$body" <<EOF
+
           - upstream tag: https://git.kernel.org/stable/h/$TARGET_TAG
           - changelog: https://cdn.kernel.org/pub/linux/kernel/v6.x/ChangeLog-${TARGET_TAG#v}
           - protected congestion-control hashes regenerated from the annotated tag
           - merge only after the dispatched CI workflows are green
           EOF
 
+          draft_args=()
+          if [[ "$PROTECTED_CHANGED" == "true" ]]; then
+            draft_args+=(--draft)
+          fi
+
           pr_url=$(gh pr create \
             --base 6.18.y \
             --head "$branch" \
             --title "LTS: update Linux to $TARGET_TAG" \
-            --body-file "$body")
+            --body-file "$body" \
+            "${draft_args[@]}")
           echo "url=$pr_url" >> "$GITHUB_OUTPUT"
           echo "Created $pr_url" >> "$GITHUB_STEP_SUMMARY"
 
