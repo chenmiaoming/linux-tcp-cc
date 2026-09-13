@@ -26,3 +26,64 @@ metrics from these artifacts. Changes intended to reduce real low-memory VPS
 usage must still be qualified separately with hosted runtime telemetry and the
 outer container/hypervisor physical-memory accounting; static ELF savings alone
 are not a runtime-memory result.
+
+## First resolved-Kconfig audit
+
+The Linux 6.18.51 baseline resolves to 116 `CONFIG_*=y/m` symbols, but that
+number is not a count of optional product features. Many entries are compiler,
+architecture, or dependency capability symbols and carry no independently
+removable runtime subsystem.
+
+Several apparently removable entries are also not normal defconfig choices:
+
+- `BPF` is selected by upstream `NET`;
+- `DEBUG_KERNEL` is selected by upstream `EXPERT`;
+- `NET_RX_BUSY_POLL` is a hidden upstream networking symbol that defaults on in
+  this configuration; and
+- `PAGE_MAPCOUNT` can only be inverted through the experimental
+  `NO_PAGE_MAPCOUNT` option and does not remove the fixed page-type/mapcount
+  storage from `struct page`.
+
+TCPCC already disables modules, SMP, BPF user-facing facilities, io_uring,
+block, proc/sysfs, TTY, USB, wireless, KALLSYMS and the normal debug machinery,
+while using `BASE_SMALL`, `TINY_RCU`, a 4 KiB printk data ring and linker dead
+code/data elimination. The audit therefore does not justify adding generic
+Linux patches merely to force hidden dependency symbols off.
+
+### Rejected SLUB_TINY experiment
+
+PR #123 tested `CONFIG_SLUB_TINY` as one isolated allocator-policy change. It
+reduced idle startup RSS by about 2 MiB but materially worsened the sustained
+high-connection memory floor. In the 512 MiB M10 test, the post-reclaim
+anonymous footprint moved from 40,320 KiB to 63,100 KiB and the six-round final
+floor from 46,036 KiB to 70,708 KiB. Half-recovery was no longer observed within
+the 120 second window. The linked image was effectively unchanged (+209 bytes
+of GNU allocated size). The experiment was therefore closed without merging.
+
+This is an important constraint for later work: TCPCC's connection-heavy
+workload benefits from normal SLUB partial-slab behavior, so lower idle allocator
+metadata is not automatically a lower production memory footprint.
+
+## Reclaim temporary loopback selftest buffers
+
+The baseline symbol report identified three 64 KiB arrays used only by the M4.1
+loopback TCP startup stress test. They account for 192 KiB of process-lifetime
+`.bss` even though their contents are dead once the selftest passes.
+
+Simply annotating them `__initdata` would not reclaim them in the current hosted
+architecture. The production control runtime blocks inside a synchronous late
+initcall until shutdown, so generic `kernel_init()` never reaches its normal
+`free_initmem()` step during service life. In addition, the executable image is
+a host mapping separate from TCPCC's guest buddy-managed RAM.
+
+The supported optimization is therefore to allocate each 64 KiB selftest buffer
+as an order-4 guest page allocation immediately before M4.1, then return all
+three allocations to the guest allocator when the test completes. The existing
+page-reporting path accepts order >= 2 frees, so these temporary order-4 ranges
+can subsequently be discarded from host backing while the production runtime
+continues. The M4.1 stress workload itself remains 16 rounds of 64 KiB in each
+direction.
+
+The link validation also places a 192 KiB ceiling on permanent `.bss`. This is a
+drift guard against reintroducing large temporary diagnostics as process-lifetime
+static state; it is not a claim that `.bss` size alone equals runtime RSS.
