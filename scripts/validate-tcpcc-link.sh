@@ -32,9 +32,18 @@ fi
 test -s "$OUT/vmlinux"
 readelf -h "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.elf-header"
 size -A "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.sections"
+size "$OUT/vmlinux" > "$ROOT/.build/tcpcc-vmlinux.size"
 nm --print-size --size-sort --radix=d "$OUT/vmlinux" \
   > "$ROOT/.build/tcpcc-vmlinux.symbols"
+tail -n 40 "$ROOT/.build/tcpcc-vmlinux.symbols" | tac \
+  > "$ROOT/.build/tcpcc-vmlinux.top-symbols"
+
+# Keep the historical filename while also exporting the resolved config through
+# a stable non-hidden baseline name shared with the architecture validation.
 cp "$OUT/.config" "$ROOT/.build/tcpcc-vmlinux.config"
+cp "$OUT/.config" "$ROOT/.build/tcpcc-final.config"
+grep -E '^CONFIG_[A-Z0-9_]+=(y|m)$' "$OUT/.config" | sort \
+  > "$ROOT/.build/tcpcc-enabled.config"
 
 section_size() {
   awk -v section="$1" '$1 == section { print $2; found = 1 } END { if (!found) print 0 }' \
@@ -42,10 +51,13 @@ section_size() {
 }
 
 vmlinux_size=$(stat -c '%s' "$OUT/vmlinux")
-config_enabled_count=$(grep -Ec '^CONFIG_[A-Z0-9_]+=(y|m)$' "$OUT/.config")
+config_enabled_count=$(wc -l < "$ROOT/.build/tcpcc-enabled.config")
+config_sha256=$(sha256sum "$OUT/.config" | awk '{print $1}')
 eh_frame_size=$(section_size .eh_frame)
 vmlinux_max_bytes=${TCPCC_VMLINUX_MAX_BYTES:-3407872}
 config_max_enabled=${TCPCC_CONFIG_MAX_ENABLED:-116}
+read -r gnu_text_size gnu_data_size gnu_bss_size gnu_allocated_size _ _ \
+  < <(tail -n 1 "$ROOT/.build/tcpcc-vmlinux.size")
 
 if (( vmlinux_size > vmlinux_max_bytes )); then
   printf 'vmlinux size %d exceeds production ceiling %d bytes\n' \
@@ -76,8 +88,37 @@ LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
   echo "VMLINUX_DATA_SIZE=$(section_size .data)"
   echo "VMLINUX_BSS_SIZE=$(section_size .bss)"
   echo "VMLINUX_EH_FRAME_SIZE=$eh_frame_size"
+  echo "GNU_SIZE_TEXT=$gnu_text_size"
+  echo "GNU_SIZE_DATA=$gnu_data_size"
+  echo "GNU_SIZE_BSS=$gnu_bss_size"
+  echo "GNU_SIZE_ALLOCATED=$gnu_allocated_size"
+  echo "CONFIG_SHA256=$config_sha256"
   echo "CONFIG_ENABLED_COUNT=$config_enabled_count"
   echo "CONFIG_MAX_ENABLED=$config_max_enabled"
 } > "$ROOT/.build/tcpcc-link.env"
+
+cat > "$ROOT/.build/tcpcc-footprint.md" <<EOF
+## TCPCC static footprint baseline
+
+| Metric | Value |
+| --- | ---: |
+| vmlinux file size | $vmlinux_size B |
+| GNU size text | $gnu_text_size B |
+| GNU size data | $gnu_data_size B |
+| GNU size bss | $gnu_bss_size B |
+| GNU size allocated total | $gnu_allocated_size B |
+| ELF .text | $(section_size .text) B |
+| ELF .rodata | $(section_size .rodata) B |
+| ELF .data | $(section_size .data) B |
+| ELF .bss | $(section_size .bss) B |
+| enabled CONFIG=y/m | $config_enabled_count |
+| final config SHA-256 | \`$config_sha256\` |
+
+### Largest linked symbols
+
+\`\`\`text
+$(cat "$ROOT/.build/tcpcc-vmlinux.top-symbols")
+\`\`\`
+EOF
 
 printf 'ARCH=tcpcc vmlinux linked successfully\n'
