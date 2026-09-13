@@ -10,6 +10,7 @@ on:
       - 'patches/**'
       - 'scripts/prepare-linux.sh'
       - 'scripts/validate-tcpcc-link.sh'
+      - 'scripts/check-footprint-artifacts.sh'
       - 'upstream/**'
       - 'protected/**'
   workflow_dispatch:
@@ -42,9 +43,13 @@ jobs:
           bash -n scripts/verify-protected.sh
           bash -n scripts/prepare-linux.sh
           bash -n scripts/validate-tcpcc-link.sh
+          bash -n scripts/check-footprint-artifacts.sh
 
       - name: Link ARCH=tcpcc vmlinux
         run: bash scripts/validate-tcpcc-link.sh
+
+      - name: Validate footprint artifacts
+        run: bash scripts/check-footprint-artifacts.sh
 
       # Final-link failures are expected while the architecture contract is
       # being brought up. Preserve the exact Kbuild/ld transcript and generated
