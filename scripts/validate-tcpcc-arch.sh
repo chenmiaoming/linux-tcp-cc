@@ -22,7 +22,7 @@ grep -E '^CONFIG_[A-Z0-9_]+=(y|m)$' "$OUT/.config" | sort \
 
 # Always print the architecture gating symbols before assertions so a failed
 # CI run explains which Kconfig dependency disabled the port.
-grep -E '^(CONFIG_(TCPCC|64BIT|MMU|SMP|COREDUMP|COMPAT|NR_CPUS|PREEMPT|FLATMEM|GENERIC_ATOMIC64|THREAD_INFO_IN_TASK))' \
+grep -E '^(CONFIG_(TCPCC|64BIT|MMU|SMP|COREDUMP|COMPAT|NR_CPUS|PREEMPT|FLATMEM|GENERIC_ATOMIC64|THREAD_INFO_IN_TASK|SLUB_TINY))' \
   "$OUT/.config" | sort || true
 
 required=(
@@ -36,6 +36,7 @@ required=(
   CONFIG_NO_HZ_IDLE=y
   CONFIG_NO_HZ_COMMON=y
   CONFIG_TICK_ONESHOT=y
+  CONFIG_SLUB_TINY=y
 )
 for opt in "${required[@]}"; do
   if ! grep -qx "$opt" "$OUT/.config"; then
