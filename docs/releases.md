@@ -18,6 +18,17 @@ request containing:
   sources; and
 - the human-facing baseline in `README.md`.
 
+Before replacing those protected hashes, the workflow snapshots the previous
+baseline and compares the per-path digests with the new annotated upstream tag.
+A routine LTS update whose protected sources are byte-identical is opened as a
+normal pull request and records the per-file `unchanged` status in the pull
+request body. If any protected source digest changes, appears, or disappears,
+the pull request records the affected paths, classifies the update as **manual
+review required**, and is opened as a draft. Upstream owns congestion-control
+semantics, so upstream changes are not rejected automatically; a maintainer
+must inspect the upstream change and explicitly mark the draft ready before it
+can follow the normal merge path.
+
 The workflow explicitly dispatches every validation workflow because GitHub
 places pull-request runs created through the repository `GITHUB_TOKEN` behind
 an additional approval gate. It never merges the pull request. A maintainer
