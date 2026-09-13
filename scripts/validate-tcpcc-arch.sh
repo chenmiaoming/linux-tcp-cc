@@ -8,9 +8,17 @@ OUT="${TCPCC_OUT:-$ROOT/.build/tcpcc-out}"
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/prepare-linux.sh"
 rm -rf "$OUT"
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$ROOT/.build"
 
 make -s -C "$SRC" O="$OUT" ARCH=tcpcc defconfig
+
+# Export the fully resolved configuration under non-hidden filenames.  GitHub's
+# artifact uploader excludes dotfiles by default, so uploading $OUT/.config
+# directly silently drops the file.  These copies are the durable baseline for
+# later memory-footprint pruning work.
+cp "$OUT/.config" "$ROOT/.build/tcpcc-final.config"
+grep -E '^CONFIG_[A-Z0-9_]+=(y|m)$' "$OUT/.config" | sort \
+  > "$ROOT/.build/tcpcc-enabled.config"
 
 # Always print the architecture gating symbols before assertions so a failed
 # CI run explains which Kconfig dependency disabled the port.
@@ -57,10 +65,12 @@ make -s -C "$SRC" O="$OUT" ARCH=tcpcc -j"$(nproc)" prepare
 
 LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
 
+config_enabled_count=$(wc -l < "$ROOT/.build/tcpcc-enabled.config")
 {
   echo "ARCH=tcpcc"
   echo "KERNEL_VERSION=$(make -s -C "$SRC" kernelversion)"
   echo "CONFIG_SHA256=$(sha256sum "$OUT/.config" | awk '{print $1}')"
+  echo "CONFIG_ENABLED_COUNT=$config_enabled_count"
 } > "$ROOT/.build/tcpcc-arch.env"
 
 printf 'ARCH=tcpcc defconfig + prepare succeeded\n'
