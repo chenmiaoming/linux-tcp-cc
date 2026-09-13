@@ -43,7 +43,7 @@ jobs:
         run: |
           cat .build/tcpcc-arch.env
           grep -E '^(CONFIG_(TCPCC|64BIT|MMU|SMP|NR_CPUS|PREEMPT|FLATMEM))' \
-            .build/tcpcc-out/.config | sort
+            .build/tcpcc-final.config | sort
 
       - name: Upload architecture provenance
         uses: actions/upload-artifact@v4
@@ -51,7 +51,8 @@ jobs:
           name: tcpcc-arch-m2-1
           path: |
             .build/tcpcc-arch.env
-            .build/tcpcc-out/.config
+            .build/tcpcc-final.config
+            .build/tcpcc-enabled.config
             .build/prepared.env
             .build/patches.sha256
           if-no-files-found: error
