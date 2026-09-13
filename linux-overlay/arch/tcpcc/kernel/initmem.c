@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/panic.h>
 #include <linux/printk.h>
 #include <asm/host.h>
 #include <asm/page.h>
