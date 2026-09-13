@@ -55,7 +55,10 @@ config_enabled_count=$(wc -l < "$ROOT/.build/tcpcc-enabled.config")
 config_sha256=$(sha256sum "$OUT/.config" | awk '{print $1}')
 eh_frame_size=$(section_size .eh_frame)
 vmlinux_max_bytes=${TCPCC_VMLINUX_MAX_BYTES:-3407872}
-config_max_enabled=${TCPCC_CONFIG_MAX_ENABLED:-116}
+# CONFIG_SLUB_TINY is a footprint-control symbol: adding it intentionally raises
+# the resolved-symbol count by one while reducing allocator memory retention.
+# Keep this count as a drift guard, not as a proxy for bytes of memory.
+config_max_enabled=${TCPCC_CONFIG_MAX_ENABLED:-117}
 read -r gnu_text_size gnu_data_size gnu_bss_size gnu_allocated_size _ _ \
   < <(tail -n 1 "$ROOT/.build/tcpcc-vmlinux.size")
 
