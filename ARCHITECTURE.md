@@ -166,6 +166,15 @@ In steady state it does not accept public sockets and does not copy application
 payload. It sleeps on event-driven process/signal state while the hosted
 runtime owns network activity.
 
+SIGINT and SIGTERM are blocked and consumed through `signalfd`, so shutdown
+enters the ordinary drain/stop/rollback path instead of an asynchronous handler.
+The hosted child calls `setsid()` and installs `PR_SET_PDEATHSIG=SIGKILL` before
+`execve()`. Child death is observed through `pidfd_open()` when available, with
+an event-driven control-pipe `EPOLLHUP` fallback on older hosts. The supervisor
+also ignores SIGPIPE so a broken status-output consumer cannot terminate it
+before firewall/TUN cleanup. Exact process and signal ordering lives in
+[`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md).
+
 ### Hosted Linux executable
 
 The project builds Linux with `ARCH=tcpcc` as a normal `ET_EXEC` userspace
@@ -177,6 +186,14 @@ The hosted image contains the upstream TCP implementations needed by the
 product, including CUBIC, BBR, TCP recovery/rate sampling, and fq. Project
 specific code is concentrated under `linux-overlay/arch/tcpcc/` plus a small,
 explicit generic patch surface.
+
+The hosted kernel completes generic boot finalization before it becomes
+operator-visible as ready. Its late control initcall creates the long-lived
+control worker and returns; generic `kernel_init()` can then reclaim init memory,
+enter `SYSTEM_RUNNING`, and end the in-kernel RCU boot phase. Only after those
+steps does the architecture's post-kernel-init hook publish the control-ready
+marker and enter the long-lived runtime. This ordering is a product lifecycle
+invariant, not merely a boot-log detail.
 
 ### L3 TUN adapter
 
@@ -259,9 +276,11 @@ Unrelated firewall state is not adopted.
 
 On orderly shutdown tcpcc closes admission, allows active flows to drain for the
 configured grace period, cancels only the remainder, stops hosted Linux,
-removes the exact firewall resource, and closes the nonpersistent TUN. SIGKILL
-cannot execute userspace firewall cleanup, so a surviving marked resource is
-reported on the next startup rather than guessed away.
+removes the exact firewall resource, and closes the nonpersistent TUN. If the
+normal hosted control path fails, cleanup attempts `SERVICE_STOP`, then kills
+and reaps the child before rolling host resources back. SIGKILL delivered to the
+supervisor itself cannot execute userspace firewall cleanup, so a surviving
+marked resource is reported on the next startup rather than guessed away.
 
 ## Memory model
 
@@ -277,6 +296,14 @@ Guest pages proven free by Linux page reporting are batched and returned to the
 host with `MADV_DONTNEED` from sleepable context. CI verifies that RSS rises
 under load, materially falls after flows are reaped, and that the same hosted
 process can reuse reclaimed pages for fresh bidirectional traffic.
+
+The host ELF image is a separate ownership domain from the anonymous guest RAM.
+Discardable `__init` code/data therefore cannot be returned through the guest
+buddy allocator. After generic boot finalization, `ARCH=tcpcc` overrides
+`free_initmem()` and unmaps the page-aligned host ELF init range with host
+`munmap(2)`; the current Linux 6.18.51 image reclaims 96 KiB before readiness.
+Final-link CI requires `.data..percpu == 0` while the linker still places
+`PERCPU_SECTION` inside those discardable bounds.
 
 The current architecture deliberately keeps a startup-sized contiguous
 `FLATMEM` arena. M10.4 evaluated whether true online guest-memory growth was
@@ -332,15 +359,15 @@ The following are useful non-goals because they prevent architectural drift:
 
 | Area | Primary source |
 | --- | --- |
-| Installed CLI / lifecycle supervisor | `native/tcpcc_cli.c`, `native/tcpcc_process.c` |
+| Installed CLI / lifecycle supervisor | `native/tcpcc_cli.c`, `native/tcpcc_process.c`, `native/tcpcc_entry.c` |
 | Native fixed-record control client | `native/tcpcc_control.c` |
 | Host TUN/firewall lifecycle | native supervisor/lifecycle sources and host helpers |
 | Hosted architecture/runtime | `linux-overlay/arch/tcpcc/` |
-| Hosted control operations | `linux-overlay/arch/tcpcc/kernel/control.c` |
+| Hosted control / post-init runtime | `linux-overlay/arch/tcpcc/kernel/control.c`, `patches/0002-init-add-arch-post-kernel-init-hook.patch` |
 | Hosted service/accept ownership | `linux-overlay/arch/tcpcc/kernel/service.c` |
 | Stream bridge/dispatcher | `linux-overlay/arch/tcpcc/kernel/bridge.c` |
 | L3 TUN netdevice path | `linux-overlay/arch/tcpcc/kernel/l3net.c` |
-| Memory mapping/reclaim | `linux-overlay/arch/tcpcc/kernel/host.c`, `reclaim.c` |
+| Guest RAM / host init-image reclaim | `linux-overlay/arch/tcpcc/kernel/host.c`, `host_mman.c`, `initmem.c`, `reclaim.c` |
 | Linux internal API containment | compatibility units described by `docs/porting.md` |
 | Production kernel selection | `config/tcpcc_defconfig` and build scripts |
 | Integration/benchmark harnesses | `scripts/` and `.github/workflows/` |
@@ -361,10 +388,11 @@ version-dependency map and mainline-canary process.
 ## Documentation model
 
 `README.md` is the product front door. This file is the current architectural
-source of truth. `docs/index.md` points to detailed current mechanism and design
-history. Milestone documents are retained because they explain why constraints
-exist and contain valuable CI evidence, but historical intermediate behavior
-must not override the current architecture.
+source of truth. `docs/runtime-lifecycle.md` is the exact process/signal/boot
+ordering reference, and `docs/index.md` maps the remaining current mechanism and
+design history. Milestone documents are retained because they explain why
+constraints exist and contain valuable CI evidence, but historical intermediate
+behavior must not override the current architecture.
 
 When a code change invalidates a statement here, update the documentation in
 the same PR. The repository should contain enough product intent and design
