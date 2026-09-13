@@ -51,10 +51,14 @@ section_size() {
 }
 
 vmlinux_size=$(stat -c '%s' "$OUT/vmlinux")
+vmlinux_bss_size=$(section_size .bss)
 config_enabled_count=$(wc -l < "$ROOT/.build/tcpcc-enabled.config")
 config_sha256=$(sha256sum "$OUT/.config" | awk '{print $1}')
 eh_frame_size=$(section_size .eh_frame)
 vmlinux_max_bytes=${TCPCC_VMLINUX_MAX_BYTES:-3407872}
+# Keep permanent zero-initialized state bounded.  Temporary diagnostics belong
+# in reclaimable guest RAM rather than in the process-lifetime ELF BSS.
+vmlinux_bss_max_bytes=${TCPCC_VMLINUX_BSS_MAX_BYTES:-196608}
 config_max_enabled=${TCPCC_CONFIG_MAX_ENABLED:-116}
 read -r gnu_text_size gnu_data_size gnu_bss_size gnu_allocated_size _ _ \
   < <(tail -n 1 "$ROOT/.build/tcpcc-vmlinux.size")
@@ -62,6 +66,11 @@ read -r gnu_text_size gnu_data_size gnu_bss_size gnu_allocated_size _ _ \
 if (( vmlinux_size > vmlinux_max_bytes )); then
   printf 'vmlinux size %d exceeds production ceiling %d bytes\n' \
     "$vmlinux_size" "$vmlinux_max_bytes" >&2
+  exit 1
+fi
+if (( vmlinux_bss_size > vmlinux_bss_max_bytes )); then
+  printf 'vmlinux .bss size %d exceeds production ceiling %d bytes\n' \
+    "$vmlinux_bss_size" "$vmlinux_bss_max_bytes" >&2
   exit 1
 fi
 if (( config_enabled_count > config_max_enabled )); then
@@ -86,7 +95,8 @@ LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
   echo "VMLINUX_TEXT_SIZE=$(section_size .text)"
   echo "VMLINUX_RODATA_SIZE=$(section_size .rodata)"
   echo "VMLINUX_DATA_SIZE=$(section_size .data)"
-  echo "VMLINUX_BSS_SIZE=$(section_size .bss)"
+  echo "VMLINUX_BSS_SIZE=$vmlinux_bss_size"
+  echo "VMLINUX_BSS_MAX_BYTES=$vmlinux_bss_max_bytes"
   echo "VMLINUX_EH_FRAME_SIZE=$eh_frame_size"
   echo "GNU_SIZE_TEXT=$gnu_text_size"
   echo "GNU_SIZE_DATA=$gnu_data_size"
@@ -110,7 +120,8 @@ cat > "$ROOT/.build/tcpcc-footprint.md" <<EOF
 | ELF .text | $(section_size .text) B |
 | ELF .rodata | $(section_size .rodata) B |
 | ELF .data | $(section_size .data) B |
-| ELF .bss | $(section_size .bss) B |
+| ELF .bss | $vmlinux_bss_size B |
+| ELF .bss ceiling | $vmlinux_bss_max_bytes B |
 | enabled CONFIG=y/m | $config_enabled_count |
 | final config SHA-256 | \`$config_sha256\` |
 
