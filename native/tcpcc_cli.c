@@ -108,7 +108,7 @@ static void tcpcc_usage(FILE *stream)
 		"one local backend. The installed command has no Python dependency.\n"
 		"\n"
 		"  --kernel PATH                 hosted vmlinux (or TCPCC_KERNEL)\n"
-		"  --memory-mib MIB              hosted memory, minimum 128 (default 128)\n"
+		"  --memory-mib MIB              hosted memory, minimum %lu (default %lu)\n"
 		"  --firewall-backend NAME       nft-lib, nft-exec, or iptables\n"
 		"  --iptables-variant NAME       iptables, iptables-nft, or iptables-legacy\n"
 		"  --tun-name NAME               exclusive nonpersistent TUN name\n"
@@ -116,12 +116,21 @@ static void tcpcc_usage(FILE *stream)
 		"  --tun-guest-address IP        hosted point-to-point address\n"
 		"  --backlog N                   listener backlog (default 128)\n"
 		"  --max-connections N           0 means no policy limit (default 0)\n"
-		"  --shutdown-grace-period SEC   graceful drain timeout (default 5)\n");
+		"  --shutdown-grace-period SEC   graceful drain timeout (default 5)\n",
+		TCPCC_HOSTED_MINIMUM_MEMORY_MIB,
+		TCPCC_HOSTED_DEFAULT_MEMORY_MIB);
 }
 
 static int tcpcc_error(const char *message)
 {
 	fprintf(stderr, "tcpcc: error: %s\n", message);
+	return -1;
+}
+
+static int tcpcc_memory_error(void)
+{
+	fprintf(stderr, "tcpcc: error: hosted memory must be at least %lu MiB\n",
+		TCPCC_HOSTED_MINIMUM_MEMORY_MIB);
 	return -1;
 }
 
@@ -320,7 +329,7 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 		case 'm':
 			if (tcpcc_parse_unsigned(optarg, ~0UL, &value) ||
 			    value < TCPCC_HOSTED_MINIMUM_MEMORY_MIB)
-				return tcpcc_error("hosted memory must be at least 128 MiB");
+				return tcpcc_memory_error();
 			config->memory_mib = value;
 			break;
 		case 'f':
