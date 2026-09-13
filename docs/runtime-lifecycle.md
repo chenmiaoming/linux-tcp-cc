@@ -74,9 +74,8 @@ does not abandon cleanup: the supervisor proceeds to `SERVICE_STOP` and tears
 down the owned resources.
 
 A clean signal-driven shutdown currently exits with status 0 and records the
-received signal in the final `tcpcc.runtime.v1` `stopped` event. This is a
-deliberate service-style success convention rather than shell-style `128 +
-signal` exit status.
+received signal in the final `tcpcc.runtime.v1` `stopped` event. This is the
+current service-style exit behavior; it is not shell-style `128 + signal`.
 
 Because the signal mask is established before `fork()`, the hosted image also
 inherits blocked `SIGINT`/`SIGTERM`. Combined with `setsid()`, Ctrl+C is therefore
