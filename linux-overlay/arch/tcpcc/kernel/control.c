@@ -1159,7 +1159,7 @@ static int tcpcc_control_thread(void *unused)
 		}
 	}
 
-	/* Keep the task object joinable until the initcall reaps it. */
+	/* Keep the task object joinable until the post-init runtime reaps it. */
 	while (!kthread_should_stop())
 		schedule_timeout_uninterruptible(1);
 
@@ -1175,9 +1175,8 @@ static irqreturn_t tcpcc_control_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int __init tcpcc_control_selftest(void)
+static int __init tcpcc_control_init(void)
 {
-	struct tcpcc_l3_stats l3_stats = { };
 	int ret;
 
 	BUILD_BUG_ON(sizeof(struct tcpcc_control_request) != 280);
@@ -1219,6 +1218,22 @@ static int __init tcpcc_control_selftest(void)
 		panic("tcpcc: M4.2 control kthread creation failed: %ld",
 		      PTR_ERR(tcpcc_control_task));
 
+	return 0;
+}
+
+void arch_post_kernel_init(void);
+
+void arch_post_kernel_init(void)
+{
+	struct tcpcc_l3_stats l3_stats = { };
+	int ret;
+
+	/*
+	 * Readiness is deliberately published only after generic kernel_init()
+	 * has reclaimed init memory, entered SYSTEM_RUNNING, and ended the RCU
+	 * boot phase.  The supervisor therefore cannot submit a control request
+	 * while Linux is still finalizing boot.
+	 */
 	pr_notice("tcpcc: M4.2 host control bridge ready on stdin/stdout\n");
 	wait_for_completion(&tcpcc_control_finished);
 
@@ -1260,8 +1275,10 @@ static int __init tcpcc_control_selftest(void)
 		  (unsigned long long)l3_stats.rx_dropped);
 	panic("tcpcc: M5.1 reached hosted L3 netdevice boundary after packet-fd validation");
 }
+
 /*
- * Run after ordinary late initcalls such as sch_default_qdisc(), because M6.1
- * attaches tcpcc0 and validates the configured default fq qdisc at runtime.
+ * Initialize the host-control worker after ordinary late initcalls such as
+ * sch_default_qdisc().  The long-lived runtime itself starts only from
+ * arch_post_kernel_init(), after generic boot finalization has completed.
  */
-late_initcall_sync(tcpcc_control_selftest);
+late_initcall_sync(tcpcc_control_init);
