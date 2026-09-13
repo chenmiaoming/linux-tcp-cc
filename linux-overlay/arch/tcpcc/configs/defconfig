@@ -8,6 +8,10 @@ CONFIG_LOG_BUF_SHIFT=12
 CONFIG_LD_DEAD_CODE_DATA_ELIMINATION=y
 CONFIG_BASE_SMALL=y
 CONFIG_PAGE_SIZE_4KB=y
+# tcpcc is fixed to one vCPU, so retain no empty/partial SLUB slabs purely for
+# allocator scalability.  The upstream SLUB_TINY profile trades scalability and
+# allocator diagnostics for a smaller steady-state memory footprint.
+CONFIG_SLUB_TINY=y
 # CONFIG_MODULES is not set
 # CONFIG_SMP is not set
 
