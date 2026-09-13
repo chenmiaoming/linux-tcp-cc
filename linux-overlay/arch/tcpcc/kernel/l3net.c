@@ -26,7 +26,8 @@
 #define TCPCC_L3_MIN_MTU          68U
 #define TCPCC_L3_TX_QUEUE_LIMIT   64U
 #define TCPCC_L3_TX_LOW_WATERMARK 32U
-#define TCPCC_L3_RX_BUFFER_SIZE   65535U
+/* One byte beyond MTU preserves detection of truncated oversize TUN frames. */
+#define TCPCC_L3_RX_BUFFER_SIZE   (TCPCC_L3_MTU + 1U)
 #define TCPCC_L3_IO_BUDGET        64U
 #define TCPCC_L3_MIN_TEST_PACKETS 33U
 #define TCPCC_HOST_EAGAIN         11
