@@ -284,18 +284,30 @@ marked resource is reported on the next startup rather than guessed away.
 
 ## Memory model
 
-Guest-visible RAM capacity, host virtual address space, resident memory, and
-connection admission are different quantities.
+Guest-visible RAM capacity, host virtual address space, resident memory, TCP
+memory policy, and connection admission are different quantities.
 
 `--memory-mib=N` creates a contiguous anonymous guest arena and establishes the
-hosted buddy allocator's capacity ceiling. The mapping uses `MAP_NORESERVE` and
-is demand paged; setting a 512-MiB guest capacity does not eagerly consume
-512 MiB of host RSS.
+hosted buddy allocator's capacity ceiling. The production default is 128 MiB;
+32 MiB is the explicit minimum and there is no project-defined maximum. The
+mapping uses `MAP_NORESERVE` and is demand paged, so a larger guest capacity does
+not eagerly consume the same amount of host RSS.
 
 Guest pages proven free by Linux page reporting are batched and returned to the
 host with `MADV_DONTNEED` from sleepable context. CI verifies that RSS rises
 under load, materially falls after flows are reaped, and that the same hosted
 process can reuse reclaimed pages for fresh bidirectional traffic.
+
+Hosted TCP memory remains upstream-derived by default. After Linux `tcp_init()`
+computes `tcp_wmem[2]` and the aggregate `tcp_mem` low/pressure/high thresholds
+from the configured arena size, tcpcc leaves both values unchanged unless the
+operator supplies `--tcp-wmem-max-kib`. An explicit send ceiling at or below the
+upstream value changes only that ceiling. If an explicit ceiling raises
+`tcp_wmem[2]`, tcpcc raises the aggregate TCP-memory budget only as needed to
+retain approximately the upstream pressure-to-send-ceiling scale, while capping
+the pressure point at 12.5% of hosted RAM and never lowering the upstream
+thresholds. `tcp_rmem` remains upstream-derived. These values are accounting and
+autotuning limits, not eager per-connection allocations.
 
 The host ELF image is a separate ownership domain from the anonymous guest RAM.
 Discardable `__init` code/data therefore cannot be returned through the guest
