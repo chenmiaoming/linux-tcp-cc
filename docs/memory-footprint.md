@@ -70,11 +70,12 @@ The baseline symbol report identified three 64 KiB arrays used only by the M4.1
 loopback TCP startup stress test. They account for 192 KiB of process-lifetime
 `.bss` even though their contents are dead once the selftest passes.
 
-Simply annotating them `__initdata` would not reclaim them in the current hosted
-architecture. The production control runtime blocks inside a synchronous late
-initcall until shutdown, so generic `kernel_init()` never reaches its normal
-`free_initmem()` step during service life. In addition, the executable image is
-a host mapping separate from TCPCC's guest buddy-managed RAM.
+At the time this optimization was introduced, simply annotating those arrays
+`__initdata` would not have reclaimed them: the production control runtime
+blocked inside a synchronous late initcall until shutdown, so generic
+`kernel_init()` never reached its normal `free_initmem()` step during service
+life. In addition, the executable image is a host mapping separate from TCPCC's
+guest buddy-managed RAM.
 
 The supported optimization is therefore to allocate each 64 KiB selftest buffer
 as an order-4 guest page allocation immediately before M4.1, then return all
@@ -87,3 +88,32 @@ direction.
 The link validation also places a 192 KiB ceiling on permanent `.bss`. This is a
 drift guard against reintroducing large temporary diagnostics as process-lifetime
 static state; it is not a claim that `.bss` size alone equals runtime RSS.
+
+## Reclaim the hosted init image
+
+The hosted lifecycle now allows generic `kernel_init()` to finish instead of
+keeping the kernel in a synchronous late initcall for the full service lifetime.
+The control late initcall creates its IRQ/event/kthread state and returns. Linux
+can then execute its ordinary finalization sequence, including `free_initmem()`,
+transition to `SYSTEM_RUNNING`, and `rcu_end_inkernel_boot()`. Only after those
+steps does the architecture's post-kernel-init hook publish the existing control
+ready marker and own the long-running service wait/cleanup path.
+
+TCPCC cannot use generic `free_initmem_default()`: the `vmlinux` executable is a
+host ELF mapping, while `virt_to_page()` deliberately addresses only the
+separate `tcpcc_physmem` guest-RAM arena. The architecture therefore overrides
+`free_initmem()` and `munmap()`s the page-aligned `__init_begin` to `__init_end`
+range through the host boundary. Unlike `MADV_DONTNEED` on a file-backed ELF
+mapping, removing the mapping also turns an accidental post-init reference into
+an immediate fault rather than allowing discarded code to be faulted back in.
+
+The linker currently places `PERCPU_SECTION` inside those init bounds. The
+resolved production image has a zero-byte `.data..percpu` section; final-link
+validation makes that a hard invariant. If a future configuration introduces
+runtime per-CPU storage, the linker layout must move that storage outside the
+discarded range before the build is accepted.
+
+This lifecycle change is not expected to reduce static ELF file size. Its
+runtime saving is the resident host mapping occupied by the aligned init image
+(about 96 KiB on the pre-change Linux 6.18.51 baseline), with no intended
+TCP/BBR/fq or packet-processing hot-path change.

@@ -52,6 +52,7 @@ section_size() {
 
 vmlinux_size=$(stat -c '%s' "$OUT/vmlinux")
 vmlinux_bss_size=$(section_size .bss)
+percpu_size=$(section_size .data..percpu)
 config_enabled_count=$(wc -l < "$ROOT/.build/tcpcc-enabled.config")
 config_sha256=$(sha256sum "$OUT/.config" | awk '{print $1}')
 eh_frame_size=$(section_size .eh_frame)
@@ -71,6 +72,15 @@ fi
 if (( vmlinux_bss_size > vmlinux_bss_max_bytes )); then
   printf 'vmlinux .bss size %d exceeds production ceiling %d bytes\n' \
     "$vmlinux_bss_size" "$vmlinux_bss_max_bytes" >&2
+  exit 1
+fi
+# vmlinux.lds.S currently places PERCPU_SECTION inside the page-aligned
+# __init_begin/__init_end host mapping.  That mapping is discarded after boot,
+# so a future non-empty runtime per-CPU section must fail loudly until the
+# linker layout is changed to preserve it outside the init bounds.
+if (( percpu_size != 0 )); then
+  printf 'runtime .data..percpu (%d bytes) overlaps discardable init image\n' \
+    "$percpu_size" >&2
   exit 1
 fi
 if (( config_enabled_count > config_max_enabled )); then
@@ -97,6 +107,7 @@ LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
   echo "VMLINUX_DATA_SIZE=$(section_size .data)"
   echo "VMLINUX_BSS_SIZE=$vmlinux_bss_size"
   echo "VMLINUX_BSS_MAX_BYTES=$vmlinux_bss_max_bytes"
+  echo "VMLINUX_PERCPU_SIZE=$percpu_size"
   echo "VMLINUX_EH_FRAME_SIZE=$eh_frame_size"
   echo "GNU_SIZE_TEXT=$gnu_text_size"
   echo "GNU_SIZE_DATA=$gnu_data_size"
@@ -122,6 +133,7 @@ cat > "$ROOT/.build/tcpcc-footprint.md" <<EOF
 | ELF .data | $(section_size .data) B |
 | ELF .bss | $vmlinux_bss_size B |
 | ELF .bss ceiling | $vmlinux_bss_max_bytes B |
+| ELF .data..percpu | $percpu_size B |
 | enabled CONFIG=y/m | $config_enabled_count |
 | final config SHA-256 | \`$config_sha256\` |
 
