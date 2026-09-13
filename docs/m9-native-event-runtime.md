@@ -33,7 +33,7 @@ Only descriptors 0 through 3 cross the exec boundary:
 
 ```text
 native tcpcc supervisor
-  epoll + signalfd + pidfd
+  epoll + signalfd + child-event fd
         |
         +-- stdin/stdout: fixed-record control ABI
         +-- fd 3: one nonpersistent TUN queue
@@ -42,6 +42,11 @@ native tcpcc supervisor
                |
                `-- hosted TCP + event-driven bridge
 ```
+
+The child-event fd is a `pidfd` when `pidfd_open()` is available. On older
+hosts, the supervisor duplicates the control-response read end and uses its
+`EPOLLHUP` as the child-death event. Both paths stay event-driven; there is no
+steady-state `waitpid()` polling loop or helper thread.
 
 The TUN fd is passed once to `L3_ATTACH`. Packet ingress and egress then remain
 between the host kernel's TUN implementation and the hosted network stack;
@@ -120,13 +125,14 @@ address and route; the named nftables table or iptables chain and jump are
 explicitly deleted.
 
 There is no steady-state timer and no host-side accept/join loop. The native
-supervisor blocks indefinitely in edge-triggered epoll on two descriptors:
-`signalfd` for SIGINT/SIGTERM and the hosted child's `pidfd`. A host without
-`pidfd_open` support is rejected during startup instead of silently falling
-back to periodic `waitpid` polling. All connection readiness and payload work
-stays in the hosted service dispatcher. Shutdown performs one aggregate stats
-snapshot, requests a bounded drain, obtains the final aggregate, and tears
-down the child and host resources.
+supervisor blocks indefinitely in edge-triggered epoll on `signalfd` for
+SIGINT/SIGTERM and one hosted-child event descriptor. That descriptor is a
+`pidfd` on hosts that support `pidfd_open()`; otherwise the sole writer of the
+control-response pipe disappearing produces `EPOLLHUP` on a duplicated read end.
+This preserves event-driven child-death detection without periodic polling. All
+connection readiness and payload work stays in the hosted service dispatcher.
+Shutdown performs one aggregate stats snapshot, requests a bounded drain,
+obtains the final aggregate, and tears down the child and host resources.
 
 The stable JSON stream consequently keeps lifecycle events (`ready`,
 `draining`, optional `drain-timeout`, `service-stats`, and `stopped`) but drops
@@ -252,11 +258,12 @@ runs 8192 and 16384 stages with 512 MiB of hosted RAM. Because the CI driver
 creates both the public clients and local backend sockets on one host, that job
 uses the full 1024-65535 ephemeral-port range and records it in the report; this
 prevents the load generator from consuming two default-range ports per flow and
-masquerading as a bridge limit. The vmlinux launcher now
-passes `--memory-mib=N`; 128 MiB remains the low-resource default and safety
-minimum, but no project-defined maximum remains. Capacity stages use explicit
-targets and do not select a default connection limit. An ABI bit allocation
-must not become the product's final concurrency claim.
+masquerading as a bridge limit. The vmlinux launcher now passes
+`--memory-mib=N`; 128 MiB remains the production default, but later low-memory
+qualification lowered the explicit minimum to 32 MiB. There is no
+project-defined maximum. Capacity stages use explicit targets and do not select
+a default connection limit. An ABI bit allocation must not become the
+product's final concurrency claim.
 
 ## M9.7 production kernel configuration
 

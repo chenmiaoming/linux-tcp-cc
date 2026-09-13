@@ -37,11 +37,20 @@ Authoritative current system model. It defines:
 When another document describes an old milestone state that conflicts with the
 current architecture, this document wins and the stale text should be repaired.
 
+### `docs/runtime-lifecycle.md`
+
+Current process and lifecycle mechanics: supervisor/hosted-process ownership,
+`signalfd` handling for SIGINT/SIGTERM, SIGPIPE policy, child `setsid()` and
+`PDEATHSIG`, failure cleanup, and the post-PR-127 hosted-Linux boot-finalization
+sequence from late initcall through `free_initmem()`, `SYSTEM_RUNNING`, readiness,
+and long-lived runtime.
+
 ### `docs/porting.md`
 
 Current Linux-version maintenance boundary: pinned upstream source, overlay and
-patch reconstruction, compatibility units, protected upstream behavior, and the
-mainline canary.
+patch reconstruction, compatibility units, both generic patch surfaces
+(IPv6-address helper and post-kernel-init hook), protected upstream behavior,
+and the mainline canary.
 
 ### `docs/releases.md`
 
@@ -56,10 +65,10 @@ an intermediate milestone should be read as design history.
 
 ### `docs/memory-footprint.md`
 
-Static memory-footprint measurement contract for later pruning work: resolved
-Kconfig artifacts, linked-image/section/symbol metrics, and the requirement to
-keep static ELF size, guest memory ownership, and outer-host physical charging
-as separate measurements.
+Static/runtime memory-footprint measurement contract and the current pruning
+decision record. It contains the resolved-Kconfig audit, accepted #124/#126/#127
+memory changes, rejected #123 allocator and #125 `-Os` experiments, the composed
+current footprint, and the evidence threshold for any further memory work.
 
 ### `docs/m8-server-ingress-design.md`
 
@@ -72,25 +81,32 @@ model.
 ### `docs/m8-high-bdp-iperf.md`
 
 High-BDP/loss benchmark methodology comparing native and tcpcc CUBIC/BBR paths.
-It is a benchmark contract, not the general product architecture document.
+It is a benchmark contract, not the general product architecture document. The
+document also marks the original automatic 4-MiB hosted `tcp_wmem` policy as
+historical; current runs use the upstream RAM-derived TCP memory policy unless
+an explicit override is added.
 
 ### `docs/m9-native-event-runtime.md`
 
 Migration to the installed native C supervisor, fixed-record control ABI,
 single-owner hosted bridge dispatcher, dynamic flows, admission policy, and
 capacity gates. Early M9 subsections intentionally describe intermediate
-compatibility states.
+compatibility states; current notes include the pidfd/control-pipe child-event
+fallback and the later 32-MiB explicit memory minimum.
 
 ### `docs/m10-hosted-memory-lifecycle.md`
 
 Demand-backed guest arena, page-reporting reclaim, RSS lifecycle measurement,
 reuse/stability gates, and the decision boundary between reclaim and true online
-guest-memory growth.
+guest-memory growth. Later static/lifecycle footprint decisions are recorded in
+`docs/memory-footprint.md` rather than retroactively rewriting M10 history.
 
 ### `docs/m11-cpu-efficiency.md`
 
 Tickless idle, coalesced TUN wakeups, budgeted packet pumping, and cgroup CPU
-efficiency gates.
+efficiency gates. Its active small-packet probe is also the guard used to reject
+memory optimizations such as `-Os` when they materially increase packet-path CPU
+cost.
 
 ## Historical plans
 
@@ -113,8 +129,8 @@ agents:
 - `scripts/` contains tests and benchmark/build drivers, not necessarily
   production implementation; and
 - `.github/workflows/` is a major part of the executable specification because
-  privileged TUN/DNAT, IPv6, memory, CPU, and high-BDP properties are validated
-  there.
+  privileged TUN/DNAT, IPv6, memory, CPU, signal/lifecycle, and high-BDP
+  properties are validated there.
 
 ## Keeping the repository as project memory
 
@@ -124,7 +140,11 @@ repository itself. In practice:
 - update `ARCHITECTURE.md` when an ownership boundary or product invariant
   changes;
 - update README when the operator contract or supported environment changes;
-- keep detailed mechanism and measurement in the relevant design/benchmark doc;
+- keep exact process/signal/boot ordering in `docs/runtime-lifecycle.md`;
+- keep footprint experiments and accepted/rejected memory decisions in
+  `docs/memory-footprint.md`;
+- keep detailed milestone mechanism and measurements in the relevant M8–M11
+  design/benchmark docs;
 - retain historical reasoning, but label superseded behavior instead of leaving
   it indistinguishable from current behavior; and
 - prefer mechanical tests/CI for invariants that can be checked automatically.

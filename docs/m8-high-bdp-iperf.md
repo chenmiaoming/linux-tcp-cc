@@ -2,7 +2,9 @@
 
 > This document defines a benchmark contract, not the overall product
 > architecture. For the current ownership model, start with
-> [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+> [`../ARCHITECTURE.md`](../ARCHITECTURE.md). The original M8 experiments
+> predated the current TCP-memory policy; historical runs that used an automatic
+> 4-MiB hosted `tcp_wmem` ceiling must not be read as the current default.
 
 This CI experiment compares the shipped tcpcc server-ingress path with ordinary
 native Linux TCP under the same emulated bottleneck. It measures delivered
@@ -87,12 +89,24 @@ delivered goodput and retransmissions for:
 - tcpcc public-side CUBIC; and
 - tcpcc public-side BBR.
 
-Linux normally derives its automatic per-socket `tcp_wmem` ceiling from
-available RAM, up to 4 MiB. That policy reduced a 128-MiB hosted arena to about
-1 MiB and throttled BBR on this 200-ms path. TCPCC restores the ordinary 4-MiB
-autotuning ceiling without allocating 4 MiB per connection: buffers grow only
-when a flow needs them, while Linux's aggregate `tcp_mem` pressure thresholds
-continue to govern the shared arena.
+Current production policy preserves the `tcp_wmem[2]` and aggregate `tcp_mem`
+values derived by upstream Linux `tcp_init()` from the configured hosted RAM.
+On the current kernel a 128-MiB arena therefore has a send autotuning ceiling of
+roughly 1 MiB rather than being automatically raised to 4 MiB. This is the
+policy exercised by the checked-in high-BDP harness unless an explicit
+`--tcp-wmem-max-kib` override is added to that experiment.
+
+Earlier M8-era work temporarily raised the 128-MiB default send ceiling toward
+4 MiB to improve one high-BDP case. Later real-machine memory qualification
+showed that changing the per-socket ceiling without preserving the matching
+RAM-derived aggregate policy was the wrong default. PR #119 restored upstream
+`tcp_wmem`/`tcp_mem` policy by default. An operator or qualification experiment
+may still raise the send ceiling explicitly; when that override exceeds the
+upstream value, tcpcc raises the aggregate TCP-memory budget only enough to keep
+approximately the upstream pressure-to-send-ceiling scale, subject to its hosted
+RAM safety cap. Historical benchmark numbers collected under the old automatic
+4-MiB policy are therefore a different configuration and should not be compared
+as if they were current-default results.
 
 The native paths use the GitHub runner kernel and report its release. tcpcc uses
 the pinned hosted Linux image built by the prerequisite CI job. Consequently,

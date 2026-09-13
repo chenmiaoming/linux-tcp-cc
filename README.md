@@ -59,8 +59,10 @@ It is not an embedded-Linux project, SOCKS/HTTP proxy, or generic userspace
 network stack.
 
 For the current ownership model, data path, lifecycle, memory/CPU model, and
-non-goals, read [`ARCHITECTURE.md`](ARCHITECTURE.md). The repository knowledge
-map is [`docs/index.md`](docs/index.md).
+non-goals, read [`ARCHITECTURE.md`](ARCHITECTURE.md). Exact supervisor signal,
+child-process, hosted boot-finalization, and shutdown ordering is documented in
+[`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md). The repository
+knowledge map is [`docs/index.md`](docs/index.md).
 
 ## Versioning model
 
@@ -251,7 +253,9 @@ on stdout. The native runtime emits aggregate lifecycle events rather than a
 per-flow event stream. On SIGINT or SIGTERM tcpcc closes the hosted listener,
 lets active streams finish for the configured grace period, cancels only the
 remainder, stops the hosted kernel, removes its exact DNAT resource, and finally
-closes the nonpersistent TUN.
+closes the nonpersistent TUN. Signal handling, SIGPIPE behavior, child death,
+and hosted boot readiness are specified in
+[`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md).
 
 ## Fetch the pinned Linux source
 
