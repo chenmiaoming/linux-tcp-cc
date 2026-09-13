@@ -54,6 +54,13 @@ These documents contain both useful current mechanism and the history of how it
 was introduced. Sections that explicitly say "historical", "original", or name
 an intermediate milestone should be read as design history.
 
+### `docs/memory-footprint.md`
+
+Static memory-footprint measurement contract for later pruning work: resolved
+Kconfig artifacts, linked-image/section/symbol metrics, and the requirement to
+keep static ELF size, guest memory ownership, and outer-host physical charging
+as separate measurements.
+
 ### `docs/m8-server-ingress-design.md`
 
 Public server-ingress design, TUN/DNAT lifecycle, firewall ownership,
