@@ -1,0 +1,41 @@
+From: tcpcc project <tcpcc@example.invalid>
+Subject: [PATCH] init: add a post-kernel-init architecture hook
+
+Hosted architectures can have no userspace init process while still needing
+normal kernel_init() finalization, including free_initmem(), SYSTEM_RUNNING,
+and the end of in-kernel RCU boot.  Add a no-op architecture hook after those
+steps and before Linux starts trying userspace init paths.
+
+Normal architectures retain identical behavior.  ARCH=tcpcc overrides the
+hook to enter its long-lived host-control runtime only after normal boot
+finalization has completed.
+
+---
+ init/main.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/init/main.c b/init/main.c
+--- a/init/main.c
++++ b/init/main.c
+@@ -1422,6 +1422,11 @@ void __weak free_initmem(void)
+ 	free_initmem_default(POISON_FREE_INITMEM);
+ }
+ 
++void __weak arch_post_kernel_init(void)
++{
++}
++
+ static int __ref kernel_init(void *unused)
+ {
+ 	int ret;
+@@ -1458,6 +1463,8 @@ static int __ref kernel_init(void *unused)
+ 
+ 	do_sysctl_args();
+ 
++	arch_post_kernel_init();
++
+ 	if (ramdisk_execute_command) {
+ 		ret = run_init_process(ramdisk_execute_command);
+ 		if (!ret)
+-- 
+2.43.0
