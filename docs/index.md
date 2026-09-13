@@ -48,8 +48,9 @@ and long-lived runtime.
 ### `docs/porting.md`
 
 Current Linux-version maintenance boundary: pinned upstream source, overlay and
-patch reconstruction, compatibility units, protected upstream behavior, and the
-mainline canary.
+patch reconstruction, compatibility units, both generic patch surfaces
+(IPv6-address helper and post-kernel-init hook), protected upstream behavior,
+and the mainline canary.
 
 ### `docs/releases.md`
 
@@ -80,14 +81,18 @@ model.
 ### `docs/m8-high-bdp-iperf.md`
 
 High-BDP/loss benchmark methodology comparing native and tcpcc CUBIC/BBR paths.
-It is a benchmark contract, not the general product architecture document.
+It is a benchmark contract, not the general product architecture document. The
+document also marks the original automatic 4-MiB hosted `tcp_wmem` policy as
+historical; current runs use the upstream RAM-derived TCP memory policy unless
+an explicit override is added.
 
 ### `docs/m9-native-event-runtime.md`
 
 Migration to the installed native C supervisor, fixed-record control ABI,
 single-owner hosted bridge dispatcher, dynamic flows, admission policy, and
 capacity gates. Early M9 subsections intentionally describe intermediate
-compatibility states.
+compatibility states; current notes include the pidfd/control-pipe child-event
+fallback and the later 32-MiB explicit memory minimum.
 
 ### `docs/m10-hosted-memory-lifecycle.md`
 
