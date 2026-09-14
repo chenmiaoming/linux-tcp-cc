@@ -401,7 +401,7 @@ static bool tcpcc_service_policy_matches(
 	       tcpcc_service.stats.accept_batch == config->accept_batch;
 }
 
-static void tcpcc_service_remove_listener(
+static void tcpcc_service_unlink_listener(
 				struct tcpcc_service_listener *entry)
 {
 	mutex_lock(&tcpcc_service_lock);
@@ -412,7 +412,6 @@ static void tcpcc_service_remove_listener(
 	}
 	mutex_unlock(&tcpcc_service_lock);
 	tcpcc_service_restore_listener_callback(entry);
-	kfree(entry);
 }
 
 int tcpcc_service_start(struct socket *listener,
@@ -476,7 +475,7 @@ int tcpcc_service_start(struct socket *listener,
 		task = kthread_run(tcpcc_service_thread, NULL, "tcpcc-m9-service");
 		if (IS_ERR(task)) {
 			ret = PTR_ERR(task);
-			goto remove_first;
+			goto unlink_first;
 		}
 		get_task_struct(task);
 		mutex_lock(&tcpcc_service_lock);
@@ -501,8 +500,8 @@ int tcpcc_service_start(struct socket *listener,
 	}
 	return 0;
 
-remove_first:
-	tcpcc_service_remove_listener(entry);
+unlink_first:
+	tcpcc_service_unlink_listener(entry);
 clear_first:
 	if (first)
 		tcpcc_bridge_clear_completion_notifier(tcpcc_service_wake,
@@ -514,13 +513,9 @@ reset_first:
 		tcpcc_service.listener_count = 0;
 		mutex_unlock(&tcpcc_service_lock);
 	}
-	if (!list_empty(&entry->node))
-		tcpcc_service_remove_listener(entry);
-	else if (entry->callback_installed) {
+	if (entry->callback_installed)
 		tcpcc_service_restore_listener_callback(entry);
-		kfree(entry);
-	} else if (first || ret)
-		kfree(entry);
+	kfree(entry);
 	return ret;
 
 unlock_free:
