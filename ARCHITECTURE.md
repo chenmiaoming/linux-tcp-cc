@@ -208,10 +208,36 @@ and timer-based polling.
 
 ### Hosted service and bridge dispatcher
 
-The public listener and accepted public Linux sockets stay inside hosted Linux.
-One bridge dispatcher is the mutable owner of active flows. It handles public
-socket readiness, loopback backend fd readiness, partial writes, half-close,
-reset/cancel state, and terminal accounting.
+The hosted service is one aggregate lifecycle and admission domain that may own
+one or more public listeners. Each listener owns its listening socket, loopback
+backend target, saved socket-readiness callback, and ready-queue membership.
+After the first successful `SERVICE_START`, another `SERVICE_START` with the
+same service-wide `max_connections` and `accept_batch` policy appends a listener
+and returns the same aggregate service handle. Statistics, drain, stop, and
+failure state remain aggregate across every listener. Version-1 `HELLO`
+advertises this optional behavior with
+`TCPCC_CONTROL_FEATURE_MULTI_LISTENER`; callers must negotiate that bit before
+relying on repeated `SERVICE_START`.
+
+Listener admission remains event driven without a periodic or full-list scan.
+`sk_data_ready` places each ready listener at most once on a service-wide FIFO
+queue protected for socket/BH callback context. The service worker consumes the
+queue head; after one successful accept it requeues that listener at the tail so
+another ready listener gets a bounded turn. An `EAGAIN` result leaves the
+listener off the queue until a later readiness callback. `accept_batch` is a
+total service-wide accepted-connection budget for one worker pass, not a
+per-listener budget.
+
+The current installed native CLI still constructs one public listener for one
+tcpcc instance. Multi-listener ownership is therefore a hosted service/control
+capability today; a future operator-facing multi-listener CLI must explicitly
+extend native configuration and host firewall ownership rather than being
+inferred from the hosted ABI alone.
+
+Accepted public Linux sockets stay inside hosted Linux. One bridge dispatcher
+is the mutable owner of active flows. It handles public socket readiness,
+loopback backend fd readiness, partial writes, half-close, reset/cancel state,
+and terminal accounting.
 
 The data path intentionally does **not** create forwarding threads per
 connection. Active flow objects are dynamic, and 16-KiB direction buffers are
