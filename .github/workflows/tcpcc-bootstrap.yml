@@ -24,6 +24,7 @@ on:
       - 'scripts/run-tcpcc-runtime-test.py'
       - 'scripts/run-tcpcc-m6-diagnostic.py'
       - 'scripts/run-tcpcc-tun-test.py'
+      - 'scripts/run-tcpcc-multi-listener-test.py'
       - 'scripts/run-tcpcc-capacity-discovery.py'
       - 'scripts/test-tcpcc-cli.py'
       - 'scripts/test-tcpcc-cli-integration.py'
@@ -77,6 +78,7 @@ jobs:
           python3 -m py_compile scripts/run-tcpcc-runtime-test.py
           python3 -m py_compile scripts/run-tcpcc-m6-diagnostic.py
           python3 -m py_compile scripts/run-tcpcc-tun-test.py
+          python3 -m py_compile scripts/run-tcpcc-multi-listener-test.py
           python3 -m py_compile scripts/run-tcpcc-capacity-discovery.py
           python3 -m py_compile scripts/test-tcpcc-cli.py
           python3 -m py_compile scripts/test-tcpcc-cli-integration.py
@@ -168,6 +170,8 @@ jobs:
             .build/tcpcc-tun-ping.log
             .build/tcpcc-tun-tcp.log
             .build/tcpcc-tun-link.txt
+            .build/tcpcc-multi-listener-bootstrap.log
+            .build/tcpcc-multi-listener-tcp.log
             .build/tcpcc-long-fat-bootstrap.log
             .build/tcpcc-long-fat-control.responses
             .build/tcpcc-long-fat-ping.log
