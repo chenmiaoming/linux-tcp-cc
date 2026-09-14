@@ -12,6 +12,8 @@ BOOT_LOG="$ROOT/.build/tcpcc-tun-bootstrap.log"
 CONTROL_RESPONSES="$ROOT/.build/tcpcc-tun-control.responses"
 PING_LOG="$ROOT/.build/tcpcc-tun-ping.log"
 TCP_LOG="$ROOT/.build/tcpcc-tun-tcp.log"
+MULTI_BOOT_LOG="$ROOT/.build/tcpcc-multi-listener-bootstrap.log"
+MULTI_TCP_LOG="$ROOT/.build/tcpcc-multi-listener-tcp.log"
 LINK_LOG="$ROOT/.build/tcpcc-tun-link.txt"
 
 if [[ ! -x "$KERNEL" ]]; then
@@ -48,7 +50,8 @@ sudo -n ip link set dev "$TUN_NAME" mtu 1500 up
 
 mkdir -p "$ROOT/.build"
 ip -details addr show dev "$TUN_NAME" > "$LINK_LOG"
-rm -f "$BOOT_LOG" "$CONTROL_RESPONSES" "$PING_LOG" "$TCP_LOG"
+rm -f "$BOOT_LOG" "$CONTROL_RESPONSES" "$PING_LOG" "$TCP_LOG" \
+  "$MULTI_BOOT_LOG" "$MULTI_TCP_LOG"
 
 python3 "$ROOT/scripts/run-tcpcc-tun-test.py" \
   --kernel "$KERNEL" \
@@ -59,9 +62,17 @@ python3 "$ROOT/scripts/run-tcpcc-tun-test.py" \
   --tcp-log "$TCP_LOG" \
   --exercise-listeners
 
+python3 "$ROOT/scripts/run-tcpcc-multi-listener-test.py" \
+  --kernel "$KERNEL" \
+  --tun-name "$TUN_NAME" \
+  --boot-log "$MULTI_BOOT_LOG" \
+  --tcp-log "$MULTI_TCP_LOG"
+
 cat "$PING_LOG"
 cat "$TCP_LOG"
 cat "$BOOT_LOG"
+cat "$MULTI_TCP_LOG"
+cat "$MULTI_BOOT_LOG"
 
 grep -F 'tcpcc: M8.2 host readiness masks passed (write/read/hup and 64-bit token)' \
   "$BOOT_LOG" >/dev/null
@@ -147,9 +158,19 @@ grep -F 'bridge-finish-cancel-bbr: guest=192.0.2.2:18452' \
 grep -F 'global_teardown=passed data_plane_control_bytes=0' \
   "$TCP_LOG" >/dev/null
 
+grep -F 'hosted-multi-listener: handles=1,1 routing=isolated accepted=2 completed=2 peak=2' \
+  "$MULTI_TCP_LOG" >/dev/null
+grep -F 'drain=aggregate stop=aggregate' "$MULTI_TCP_LOG" >/dev/null
+grep -F 'tcpcc: M9.2 hosted service 1 started (max 4, accept batch 4)' \
+  "$MULTI_BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M9.2 hosted service 1 added listener 2 (backend 127.0.0.1:' \
+  "$MULTI_BOOT_LOG" >/dev/null
+grep -F 'tcpcc: M9.2 hosted service 1 stopped (2 listeners, 2 accepted, 2 completed)' \
+  "$MULTI_BOOT_LOG" >/dev/null
+
 grep -F "${TUN_NAME}:" "$LINK_LOG" >/dev/null
 grep -F 'mtu 1500' "$LINK_LOG" >/dev/null
 grep -F "inet $HOST_ADDR peer $GUEST_ADDR/32" "$LINK_LOG" >/dev/null
 
 printf 'M8.5 real TUN adapter passed capacity, reset isolation, %s\n' \
-  'concurrent cancellation, and clean global teardown'
+  'concurrent cancellation, multi-listener routing, and clean global teardown'
