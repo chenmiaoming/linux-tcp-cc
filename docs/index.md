@@ -94,6 +94,14 @@ capacity gates. Early M9 subsections intentionally describe intermediate
 compatibility states; current notes include the pidfd/control-pipe child-event
 fallback and the later 32-MiB explicit memory minimum.
 
+### `docs/m9-multi-listener-service.md`
+
+Current detailed contract for one aggregate hosted service owning multiple
+public listeners. It records listener-local backend ownership, service-wide
+admission/stats/drain/stop policy, repeated `SERVICE_START` semantics, the
+`MULTI_LISTENER` HELLO capability, and the event-driven FIFO ready queue used to
+avoid listener-list polling while providing fair admission opportunity.
+
 ### `docs/m10-hosted-memory-lifecycle.md`
 
 Demand-backed guest arena, page-reporting reclaim, RSS lifecycle measurement,
@@ -143,8 +151,9 @@ repository itself. In practice:
 - keep exact process/signal/boot ordering in `docs/runtime-lifecycle.md`;
 - keep footprint experiments and accepted/rejected memory decisions in
   `docs/memory-footprint.md`;
-- keep detailed milestone mechanism and measurements in the relevant M8–M11
-  design/benchmark docs;
+- keep detailed subsystem mechanism and measurements in the relevant focused or
+  milestone design document, including multi-listener service scheduling in
+  `docs/m9-multi-listener-service.md`;
 - retain historical reasoning, but label superseded behavior instead of leaving
   it indistinguishable from current behavior; and
 - prefer mechanical tests/CI for invariants that can be checked automatically.
