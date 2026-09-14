@@ -158,7 +158,9 @@ grep -F 'bridge-finish-cancel-bbr: guest=192.0.2.2:18452' \
 grep -F 'global_teardown=passed data_plane_control_bytes=0' \
   "$TCP_LOG" >/dev/null
 
-grep -F 'hosted-multi-listener: handles=1,1 routing=isolated accepted=2 completed=2 peak=2' \
+grep -F 'hosted-multi-listener: hello=multi-listener features=0x' \
+  "$MULTI_TCP_LOG" >/dev/null
+grep -F 'handles=1,1 routing=isolated accepted=2 completed=2 peak=2' \
   "$MULTI_TCP_LOG" >/dev/null
 grep -F 'drain=aggregate stop=aggregate' "$MULTI_TCP_LOG" >/dev/null
 grep -F 'tcpcc: M9.2 hosted service 1 started (max 4, accept batch 4)' \
