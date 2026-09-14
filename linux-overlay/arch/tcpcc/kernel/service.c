@@ -487,14 +487,14 @@ int tcpcc_service_start(struct socket *listener,
 	complete(&tcpcc_service.work_ready);
 	if (first) {
 		if (config->max_connections)
-			pr_notice("tcpcc: hosted service %d started (max %u, accept batch %u)\n",
+			pr_notice("tcpcc: M9.2 hosted service %d started (max %u, accept batch %u)\n",
 				  *handle, config->max_connections,
 				  config->accept_batch);
 		else
-			pr_notice("tcpcc: hosted service %d started (max unlimited, accept batch %u)\n",
+			pr_notice("tcpcc: M9.2 hosted service %d started (max unlimited, accept batch %u)\n",
 				  *handle, config->accept_batch);
 	} else {
-		pr_notice("tcpcc: hosted service %d added listener %u (backend 127.0.0.1:%u)\n",
+		pr_notice("tcpcc: M9.2 hosted service %d added listener %u (backend 127.0.0.1:%u)\n",
 			  *handle, tcpcc_service.listener_count,
 			  config->backend_port);
 	}
@@ -632,10 +632,16 @@ int tcpcc_service_stop(int handle, unsigned long timeout,
 		*stats = tcpcc_service.stats;
 	tcpcc_service.allocated = false;
 	mutex_unlock(&tcpcc_service_lock);
-	pr_notice("tcpcc: hosted service %d stopped (%u listeners, %llu accepted, %llu completed)\n",
-		  handle, listeners,
-		  (unsigned long long)tcpcc_service.stats.accepted_connections,
-		  (unsigned long long)tcpcc_service.stats.completed_connections);
+	if (listeners == 1)
+		pr_notice("tcpcc: M9.2 hosted service %d stopped (%llu accepted, %llu completed)\n",
+			  handle,
+			  (unsigned long long)tcpcc_service.stats.accepted_connections,
+			  (unsigned long long)tcpcc_service.stats.completed_connections);
+	else
+		pr_notice("tcpcc: M9.2 hosted service %d stopped (%u listeners, %llu accepted, %llu completed)\n",
+			  handle, listeners,
+			  (unsigned long long)tcpcc_service.stats.accepted_connections,
+			  (unsigned long long)tcpcc_service.stats.completed_connections);
 	return 0;
 }
 
