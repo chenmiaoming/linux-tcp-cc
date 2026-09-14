@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 import os
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -23,6 +24,45 @@ control = tun_test.control
 PUBLIC_PORTS = (18474, 18475)
 SERVICE_MAX_CONNECTIONS = 4
 SERVICE_ACCEPT_BATCH = 4
+OP_HELLO = 22
+FEATURE_MULTI_LISTENER = 1 << 5
+HELLO = struct.Struct("<IIIIII64s")
+
+
+def require_multi_listener_capability(
+    proc: subprocess.Popen,
+    responses: bytearray,
+) -> int:
+    _, _, raw_hello = control.transact(
+        proc,
+        responses,
+        OP_HELLO,
+        control.request(OP_HELLO),
+        {"length": HELLO.size},
+    )
+    (
+        control_version,
+        feature_bits,
+        _session_limit,
+        _bridge_buffer_limit,
+        _bridge_total_buffer_limit,
+        reserved,
+        linux_release,
+    ) = HELLO.unpack(raw_hello)
+    if control_version != control.VERSION:
+        raise RuntimeError(
+            f"HELLO returned control version {control_version}, expected {control.VERSION}"
+        )
+    if reserved:
+        raise RuntimeError(f"HELLO reserved field is nonzero: {reserved}")
+    if not feature_bits & FEATURE_MULTI_LISTENER:
+        raise RuntimeError(
+            "HELLO did not advertise TCPCC_CONTROL_FEATURE_MULTI_LISTENER "
+            f"(features=0x{feature_bits:08x})"
+        )
+    if not linux_release.split(b"\0", 1)[0]:
+        raise RuntimeError("HELLO returned an empty Linux release")
+    return feature_bits
 
 
 def start_backend(payload: bytes) -> dict[str, object]:
@@ -149,6 +189,7 @@ def main() -> int:
     proc: subprocess.Popen | None = None
     tun_fd = -1
     service_handle: int | None = None
+    feature_bits: int | None = None
     error: Exception | None = None
     log = ""
 
@@ -164,6 +205,8 @@ def main() -> int:
         child_fd = tun_fd
         os.close(tun_fd)
         tun_fd = -1
+
+        feature_bits = require_multi_listener_capability(proc, responses)
 
         ifindex, _, _ = control.transact(
             proc,
@@ -274,8 +317,10 @@ def main() -> int:
         ):
             raise RuntimeError(f"unexpected aggregate multi-listener stats {stop_stats}")
 
+        assert feature_bits is not None
         log = (
-            "hosted-multi-listener: handles=1,1 routing=isolated "
+            "hosted-multi-listener: hello=multi-listener "
+            f"features=0x{feature_bits:08x} handles=1,1 routing=isolated "
             f"accepted={accepted} completed={completed} peak={peak} "
             f"public_to_backend={public_to_backend} "
             f"backend_to_public={backend_to_public} drain=aggregate stop=aggregate"
