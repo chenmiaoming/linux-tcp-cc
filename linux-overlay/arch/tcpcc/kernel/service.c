@@ -12,6 +12,7 @@
 #include <linux/printk.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
@@ -25,11 +26,12 @@ struct tcpcc_service_bridge {
 
 struct tcpcc_service_listener {
 	struct list_head node;
+	struct list_head ready_node;
 	struct socket *listener;
 	struct tcpcc_control_service_config config;
 	void (*saved_data_ready)(struct sock *sk);
 	bool callback_installed;
-	bool ready;
+	bool ready_queued;
 };
 
 struct tcpcc_service_manager {
@@ -42,11 +44,13 @@ struct tcpcc_service_manager {
 	struct completion stopped;
 	struct tcpcc_control_service_stats stats;
 	struct list_head listeners;
+	struct list_head ready_list;
 	struct list_head bridges;
 	unsigned int listener_count;
 };
 
 static DEFINE_MUTEX(tcpcc_service_lock);
+static DEFINE_SPINLOCK(tcpcc_service_ready_lock);
 static struct tcpcc_service_manager tcpcc_service;
 
 static void tcpcc_service_wake(void *data)
@@ -55,6 +59,77 @@ static void tcpcc_service_wake(void *data)
 
 	if (service && READ_ONCE(service->allocated))
 		complete(&service->work_ready);
+}
+
+static bool tcpcc_service_queue_listener(struct tcpcc_service_listener *entry)
+{
+	bool queued = false;
+
+	spin_lock_bh(&tcpcc_service_ready_lock);
+	if (!entry->ready_queued && READ_ONCE(entry->callback_installed) &&
+	    READ_ONCE(tcpcc_service.allocated) &&
+	    !READ_ONCE(tcpcc_service.draining) &&
+	    !READ_ONCE(tcpcc_service.stopping)) {
+		list_add_tail(&entry->ready_node, &tcpcc_service.ready_list);
+		entry->ready_queued = true;
+		queued = true;
+	}
+	spin_unlock_bh(&tcpcc_service_ready_lock);
+
+	if (queued)
+		complete(&tcpcc_service.work_ready);
+	return queued;
+}
+
+static void tcpcc_service_remove_ready_listener(
+				struct tcpcc_service_listener *entry)
+{
+	spin_lock_bh(&tcpcc_service_ready_lock);
+	if (entry->ready_queued) {
+		list_del_init(&entry->ready_node);
+		entry->ready_queued = false;
+	}
+	spin_unlock_bh(&tcpcc_service_ready_lock);
+}
+
+static void tcpcc_service_clear_ready(void)
+{
+	struct tcpcc_service_listener *entry;
+	struct tcpcc_service_listener *next;
+
+	spin_lock_bh(&tcpcc_service_ready_lock);
+	list_for_each_entry_safe(entry, next, &tcpcc_service.ready_list,
+				 ready_node) {
+		list_del_init(&entry->ready_node);
+		entry->ready_queued = false;
+	}
+	spin_unlock_bh(&tcpcc_service_ready_lock);
+}
+
+static struct tcpcc_service_listener *tcpcc_service_pop_ready(void)
+{
+	struct tcpcc_service_listener *entry = NULL;
+
+	spin_lock_bh(&tcpcc_service_ready_lock);
+	if (!list_empty(&tcpcc_service.ready_list)) {
+		entry = list_first_entry(&tcpcc_service.ready_list,
+					 struct tcpcc_service_listener,
+					 ready_node);
+		list_del_init(&entry->ready_node);
+		entry->ready_queued = false;
+	}
+	spin_unlock_bh(&tcpcc_service_ready_lock);
+	return entry;
+}
+
+static bool tcpcc_service_ready_pending(void)
+{
+	bool pending;
+
+	spin_lock_bh(&tcpcc_service_ready_lock);
+	pending = !list_empty(&tcpcc_service.ready_list);
+	spin_unlock_bh(&tcpcc_service_ready_lock);
+	return pending;
 }
 
 static void tcpcc_service_listener_data_ready(struct sock *sk)
@@ -67,10 +142,8 @@ static void tcpcc_service_listener_data_ready(struct sock *sk)
 	if (entry) {
 		saved_data_ready = entry->saved_data_ready;
 		if (entry->listener && entry->listener->sk == sk &&
-		    READ_ONCE(tcpcc_service.allocated)) {
-			WRITE_ONCE(entry->ready, true);
-			complete(&tcpcc_service.work_ready);
-		}
+		    READ_ONCE(tcpcc_service.allocated))
+			tcpcc_service_queue_listener(entry);
 	}
 	if (saved_data_ready)
 		saved_data_ready(sk);
@@ -91,8 +164,7 @@ static int tcpcc_service_install_listener_callback(
 	entry->saved_data_ready = sk->sk_data_ready;
 	sk->sk_user_data = entry;
 	WRITE_ONCE(sk->sk_data_ready, tcpcc_service_listener_data_ready);
-	entry->callback_installed = true;
-	WRITE_ONCE(entry->ready, true);
+	WRITE_ONCE(entry->callback_installed, true);
 unlock:
 	write_unlock_bh(&sk->sk_callback_lock);
 	return ret;
@@ -104,7 +176,7 @@ static void tcpcc_service_restore_listener_callback(
 	struct socket *listener = entry->listener;
 	struct sock *sk;
 
-	if (!listener || !entry->callback_installed)
+	if (!listener || !READ_ONCE(entry->callback_installed))
 		return;
 	sk = listener->sk;
 	write_lock_bh(&sk->sk_callback_lock);
@@ -112,7 +184,7 @@ static void tcpcc_service_restore_listener_callback(
 		sk->sk_user_data = NULL;
 		WRITE_ONCE(sk->sk_data_ready, entry->saved_data_ready);
 	}
-	entry->callback_installed = false;
+	WRITE_ONCE(entry->callback_installed, false);
 	write_unlock_bh(&sk->sk_callback_lock);
 }
 
@@ -137,16 +209,13 @@ static void tcpcc_service_detach_accepted_callback(
 }
 
 static unsigned int tcpcc_service_snapshot_listeners(
-				struct tcpcc_service_listener **snapshot,
-				bool ready_only)
+				struct tcpcc_service_listener **snapshot)
 {
 	struct tcpcc_service_listener *entry;
 	unsigned int count = 0;
 
 	mutex_lock(&tcpcc_service_lock);
 	list_for_each_entry(entry, &tcpcc_service.listeners, node) {
-		if (ready_only && !READ_ONCE(entry->ready))
-			continue;
 		if (count == TCPCC_SERVICE_MAX_LISTENERS)
 			break;
 		snapshot[count++] = entry;
@@ -161,7 +230,7 @@ static void tcpcc_service_shutdown_listeners(void)
 	unsigned int count;
 	unsigned int i;
 
-	count = tcpcc_service_snapshot_listeners(snapshot, false);
+	count = tcpcc_service_snapshot_listeners(snapshot);
 	for (i = 0; i < count; i++) {
 		if (snapshot[i]->listener)
 			kernel_sock_shutdown(snapshot[i]->listener, SHUT_RDWR);
@@ -216,6 +285,7 @@ static void tcpcc_service_fail(int status)
 	}
 	tcpcc_service.stats.last_error = status;
 	mutex_unlock(&tcpcc_service_lock);
+	tcpcc_service_clear_ready();
 	tcpcc_service_shutdown_listeners();
 }
 
@@ -243,11 +313,6 @@ static int tcpcc_service_accept_one(struct tcpcc_service_listener *entry)
 	if (!tcpcc_service_admission_available())
 		return 0;
 
-	/*
-	 * Clear readiness before the nonblocking accept. A callback racing after
-	 * this store will set it again, so an EAGAIN cannot lose a new edge.
-	 */
-	WRITE_ONCE(entry->ready, false);
 	ret = kernel_accept(entry->listener, &public_sock, O_NONBLOCK);
 	if (ret == -EAGAIN) {
 		mutex_lock(&tcpcc_service_lock);
@@ -260,8 +325,13 @@ static int tcpcc_service_accept_one(struct tcpcc_service_listener *entry)
 		return ret;
 	}
 
-	/* A successful accept may leave more sockets queued on this listener. */
-	WRITE_ONCE(entry->ready, true);
+	/*
+	 * One successful accept proves this listener had work. Requeue it at the
+	 * tail so another ready listener gets a turn before we probe for more
+	 * backlog. A concurrent data-ready callback observes ready_queued and does
+	 * not enqueue a duplicate entry.
+	 */
+	tcpcc_service_queue_listener(entry);
 	tcpcc_service_detach_accepted_callback(public_sock, entry);
 	bridge = kzalloc(sizeof(*bridge), GFP_KERNEL);
 	if (!bridge) {
@@ -308,7 +378,6 @@ static int tcpcc_service_accept_one(struct tcpcc_service_listener *entry)
 
 static bool tcpcc_service_accept_ready(void)
 {
-	struct tcpcc_service_listener *snapshot[TCPCC_SERVICE_MAX_LISTENERS];
 	unsigned int budget;
 	bool progress = false;
 
@@ -317,29 +386,22 @@ static bool tcpcc_service_accept_ready(void)
 	mutex_unlock(&tcpcc_service_lock);
 
 	while (budget && tcpcc_service_admission_available()) {
-		unsigned int count;
-		unsigned int i;
-		bool round_progress = false;
+		struct tcpcc_service_listener *entry;
+		int ret;
 
-		count = tcpcc_service_snapshot_listeners(snapshot, true);
-		if (!count)
+		entry = tcpcc_service_pop_ready();
+		if (!entry)
 			break;
-		for (i = 0; i < count && budget; i++) {
-			int ret = tcpcc_service_accept_one(snapshot[i]);
-
-			if (ret < 0)
-				return progress;
-			if (!ret)
-				continue;
-			budget--;
-			progress = true;
-			round_progress = true;
-		}
-		if (!round_progress)
-			break;
+		ret = tcpcc_service_accept_one(entry);
+		if (ret < 0)
+			return progress;
+		if (!ret)
+			continue;
+		budget--;
+		progress = true;
 	}
 
-	if (!budget && tcpcc_service_snapshot_listeners(snapshot, true))
+	if (!budget && tcpcc_service_ready_pending())
 		complete(&tcpcc_service.work_ready);
 	return progress;
 }
@@ -380,6 +442,7 @@ static void tcpcc_service_reset_start(
 {
 	memset(&tcpcc_service.stats, 0, sizeof(tcpcc_service.stats));
 	INIT_LIST_HEAD(&tcpcc_service.listeners);
+	INIT_LIST_HEAD(&tcpcc_service.ready_list);
 	INIT_LIST_HEAD(&tcpcc_service.bridges);
 	init_completion(&tcpcc_service.work_ready);
 	init_completion(&tcpcc_service.drained);
@@ -404,6 +467,8 @@ static bool tcpcc_service_policy_matches(
 static void tcpcc_service_unlink_listener(
 				struct tcpcc_service_listener *entry)
 {
+	tcpcc_service_restore_listener_callback(entry);
+	tcpcc_service_remove_ready_listener(entry);
 	mutex_lock(&tcpcc_service_lock);
 	if (!list_empty(&entry->node)) {
 		list_del_init(&entry->node);
@@ -411,7 +476,6 @@ static void tcpcc_service_unlink_listener(
 			tcpcc_service.listener_count--;
 	}
 	mutex_unlock(&tcpcc_service_lock);
-	tcpcc_service_restore_listener_callback(entry);
 }
 
 int tcpcc_service_start(struct socket *listener,
@@ -420,6 +484,8 @@ int tcpcc_service_start(struct socket *listener,
 {
 	struct tcpcc_service_listener *entry;
 	struct task_struct *task;
+	bool notifier_installed = false;
+	unsigned int listener_number;
 	bool first;
 	int ret;
 
@@ -437,6 +503,7 @@ int tcpcc_service_start(struct socket *listener,
 	if (!entry)
 		return -ENOMEM;
 	INIT_LIST_HEAD(&entry->node);
+	INIT_LIST_HEAD(&entry->ready_node);
 	entry->listener = listener;
 	entry->config = *config;
 
@@ -454,28 +521,27 @@ int tcpcc_service_start(struct socket *listener,
 		ret = -ENOSPC;
 		goto unlock_free;
 	}
+	list_add_tail(&entry->node, &tcpcc_service.listeners);
+	tcpcc_service.listener_count++;
+	listener_number = tcpcc_service.listener_count;
 	mutex_unlock(&tcpcc_service_lock);
 
 	if (first) {
 		ret = tcpcc_bridge_set_completion_notifier(tcpcc_service_wake,
 						   &tcpcc_service);
 		if (ret)
-			goto reset_first;
+			goto fail_listener;
+		notifier_installed = true;
 	}
 	ret = tcpcc_service_install_listener_callback(entry);
 	if (ret)
-		goto clear_first;
-
-	mutex_lock(&tcpcc_service_lock);
-	list_add_tail(&entry->node, &tcpcc_service.listeners);
-	tcpcc_service.listener_count++;
-	mutex_unlock(&tcpcc_service_lock);
+		goto fail_listener;
 
 	if (first) {
 		task = kthread_run(tcpcc_service_thread, NULL, "tcpcc-m9-service");
 		if (IS_ERR(task)) {
 			ret = PTR_ERR(task);
-			goto unlink_first;
+			goto fail_listener;
 		}
 		get_task_struct(task);
 		mutex_lock(&tcpcc_service_lock);
@@ -484,7 +550,7 @@ int tcpcc_service_start(struct socket *listener,
 	}
 
 	*handle = TCPCC_SERVICE_HANDLE;
-	complete(&tcpcc_service.work_ready);
+	tcpcc_service_queue_listener(entry);
 	if (first) {
 		if (config->max_connections)
 			pr_notice("tcpcc: M9.2 hosted service %d started (max %u, accept batch %u)\n",
@@ -495,26 +561,22 @@ int tcpcc_service_start(struct socket *listener,
 				  *handle, config->accept_batch);
 	} else {
 		pr_notice("tcpcc: M9.2 hosted service %d added listener %u (backend 127.0.0.1:%u)\n",
-			  *handle, tcpcc_service.listener_count,
-			  config->backend_port);
+			  *handle, listener_number, config->backend_port);
 	}
 	return 0;
 
-unlink_first:
+fail_listener:
 	tcpcc_service_unlink_listener(entry);
-clear_first:
-	if (first)
+	if (notifier_installed)
 		tcpcc_bridge_clear_completion_notifier(tcpcc_service_wake,
 						       &tcpcc_service);
-reset_first:
 	if (first) {
 		mutex_lock(&tcpcc_service_lock);
 		tcpcc_service.allocated = false;
 		tcpcc_service.listener_count = 0;
 		mutex_unlock(&tcpcc_service_lock);
+		tcpcc_service_clear_ready();
 	}
-	if (entry->callback_installed)
-		tcpcc_service_restore_listener_callback(entry);
 	kfree(entry);
 	return ret;
 
@@ -554,6 +616,7 @@ int tcpcc_service_drain(int handle, unsigned long timeout,
 		tcpcc_service.stats.state = TCPCC_CONTROL_SERVICE_DRAINING;
 	mutex_unlock(&tcpcc_service_lock);
 
+	tcpcc_service_clear_ready();
 	tcpcc_service_shutdown_listeners();
 	complete(&tcpcc_service.work_ready);
 	if (!wait_for_completion_timeout(&tcpcc_service.drained, timeout))
@@ -577,6 +640,7 @@ static void tcpcc_service_release_listeners(void)
 	struct tcpcc_service_listener *next;
 	LIST_HEAD(release);
 
+	tcpcc_service_clear_ready();
 	mutex_lock(&tcpcc_service_lock);
 	list_splice_init(&tcpcc_service.listeners, &release);
 	tcpcc_service.listener_count = 0;
@@ -585,6 +649,7 @@ static void tcpcc_service_release_listeners(void)
 	list_for_each_entry_safe(entry, next, &release, node) {
 		list_del_init(&entry->node);
 		tcpcc_service_restore_listener_callback(entry);
+		tcpcc_service_remove_ready_listener(entry);
 		if (entry->listener) {
 			kernel_sock_shutdown(entry->listener, SHUT_RDWR);
 			sock_release(entry->listener);
@@ -613,6 +678,7 @@ int tcpcc_service_stop(int handle, unsigned long timeout,
 	listeners = tcpcc_service.listener_count;
 	mutex_unlock(&tcpcc_service_lock);
 
+	tcpcc_service_clear_ready();
 	tcpcc_service_shutdown_listeners();
 	tcpcc_service_cancel_bridges();
 	complete(&tcpcc_service.work_ready);
