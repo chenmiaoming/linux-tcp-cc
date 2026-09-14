@@ -50,11 +50,12 @@ enum tcpcc_control_op {
 };
 
 /* Capabilities returned by TCPCC_CONTROL_HELLO. */
-#define TCPCC_CONTROL_FEATURE_BRIDGE_RESULT (1U << 0)
+#define TCPCC_CONTROL_FEATURE_BRIDGE_RESULT  (1U << 0)
 #define TCPCC_CONTROL_FEATURE_HOSTED_SERVICE (1U << 1)
-#define TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS (1U << 2)
-#define TCPCC_CONTROL_FEATURE_IP_ENDPOINTS  (1U << 3)
-#define TCPCC_CONTROL_FEATURE_PAGE_RECLAIM  (1U << 4)
+#define TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS  (1U << 2)
+#define TCPCC_CONTROL_FEATURE_IP_ENDPOINTS   (1U << 3)
+#define TCPCC_CONTROL_FEATURE_PAGE_RECLAIM   (1U << 4)
+#define TCPCC_CONTROL_FEATURE_MULTI_LISTENER (1U << 5)
 
 /* Project values deliberately match the IP version, not Linux AF_* values. */
 #define TCPCC_CONTROL_IP_VERSION_4 4U
@@ -101,7 +102,7 @@ struct tcpcc_control_response {
 };
 
 /*
- * Stable project-side subset of Linux struct tcp_info.  Keep this independent
+ * Stable project-side subset of Linux struct tcp_info. Keep this independent
  * of the upstream UAPI struct's future growth.
  */
 struct tcpcc_control_tcp_info {
@@ -151,9 +152,8 @@ struct tcpcc_bridge_result {
 #define TCPCC_CONTROL_RELEASE_LENGTH 64U
 
 /*
- * Version-1 capability handshake.  A future event-driven service ABI will be
- * advertised with new feature bits without making a native host guess limits
- * from build-time constants.
+ * Version-1 capability handshake. Feature bits make optional extensions
+ * explicit without making a native host guess from build-time constants.
  */
 struct tcpcc_control_hello {
 	__u32 control_version;
@@ -165,12 +165,20 @@ struct tcpcc_control_hello {
 	char linux_release[TCPCC_CONTROL_RELEASE_LENGTH];
 };
 
-/* Payload for SERVICE_START; the listener is supplied in request.handle. */
+/*
+ * Payload for SERVICE_START; the listener is supplied in request.handle.
+ *
+ * With TCPCC_CONTROL_FEATURE_MULTI_LISTENER, SERVICE_START may be repeated for
+ * additional listeners. Each successful call transfers ownership of that
+ * listener to the same aggregate service handle. max_connections and
+ * accept_batch are service-wide policy and must match the first listener;
+ * backend_ipv4/backend_port are per-listener forwarding targets.
+ */
 struct tcpcc_control_service_config {
 	__u32 backend_ipv4;
 	__u16 backend_port;
 	__u16 reserved;
-	__u32 max_connections; /* Zero disables the admission-policy limit. */
+	__u32 max_connections; /* Zero disables the service-wide admission limit. */
 	__u32 accept_batch;
 };
 
@@ -182,7 +190,7 @@ enum tcpcc_control_service_state {
 	TCPCC_CONTROL_SERVICE_FAILED,
 };
 
-/* Fixed 88-byte aggregate snapshot; no per-flow hot-path reporting. */
+/* Fixed 88-byte aggregate snapshot across every listener in the service. */
 struct tcpcc_control_service_stats {
 	__u64 accepted_connections;
 	__u64 completed_connections;
