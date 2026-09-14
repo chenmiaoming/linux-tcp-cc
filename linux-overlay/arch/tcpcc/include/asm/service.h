@@ -9,6 +9,7 @@ struct socket;
 
 #define TCPCC_SERVICE_HANDLE 1
 #define TCPCC_SERVICE_MAX_ACCEPT_BATCH 64U
+#define TCPCC_SERVICE_MAX_LISTENERS 64U
 
 int tcpcc_service_start(struct socket *listener,
 			const struct tcpcc_control_service_config *config,
