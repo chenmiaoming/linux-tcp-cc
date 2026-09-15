@@ -92,7 +92,9 @@ jobs:
           python3 -m json.tool benchmarks/m7/scenarios-v1.json >/dev/null
           bash scripts/test-release-trigger.sh
 
-      - name: Exercise stable CLI and hosted runtime fault boundaries
+      # Historical Python lifecycle/control model. The installed native CLI
+      # contract is covered by native-check and the privileged ingress suites.
+      - name: Exercise legacy Python supervisor/control fault model
         run: python3 scripts/test-tcpcc-cli.py
 
       - name: Execute hosted M6.1 native BBR/default-fq regression
