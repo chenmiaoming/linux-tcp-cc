@@ -52,8 +52,7 @@ $(NATIVE_BUILD_DIR)/tcpcc_event.o: native/tcpcc_event.c \
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-c -o $@ native/tcpcc_event.c
 
-$(NATIVE_BUILD_DIR)/tcpcc_entry.o: native/tcpcc_entry.c \
-		native/tcpcc_config.h native/tcpcc_process.h native/tcpcc_control.h | $(NATIVE_BUILD_DIR)
+$(NATIVE_BUILD_DIR)/tcpcc_entry.o: native/tcpcc_entry.c | $(NATIVE_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-c -o $@ native/tcpcc_entry.c
 
@@ -63,7 +62,8 @@ $(NATIVE_BUILD_DIR)/tcpcc_config.o: native/tcpcc_config.c \
 		-c -o $@ native/tcpcc_config.c
 
 $(NATIVE_BUILD_DIR)/tcpcc_cli.o: native/tcpcc_cli.c \
-		native/tcpcc_control.h native/tcpcc_event.h native/tcpcc_process.h \
+		native/tcpcc_config.h native/tcpcc_control.h native/tcpcc_event.h \
+		native/tcpcc_process.h \
 		linux-overlay/arch/tcpcc/include/asm/tcpcc_control_abi.h | $(NATIVE_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-Dmain=tcpcc_cli_main -c -o $@ native/tcpcc_cli.c
