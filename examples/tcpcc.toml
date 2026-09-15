@@ -1,0 +1,26 @@
+# tcpcc configuration schema version, not the tcpcc program version.
+version = 1
+
+cc = "bbr"
+memory_mib = 128
+firewall_backend = "nft-lib"
+
+# Optional hosted TCP send autotune ceiling. Omit to keep the hosted Linux
+# RAM-derived default.
+# tcp_wmem_max_kib = 16384
+
+# Optional network/runtime tuning.
+# tun_name = "tcpcc0"
+# tun_host_address = "198.18.0.1"
+# tun_guest_address = "198.18.0.2"
+# backlog = 128
+# max_connections = 0
+# shutdown_grace_period = 5.0
+
+[[forward]]
+listen = "203.0.113.10:443"
+backend = "127.0.0.1:8443"
+
+[[forward]]
+listen = "203.0.113.10:8443"
+backend = "127.0.0.1:9443"
