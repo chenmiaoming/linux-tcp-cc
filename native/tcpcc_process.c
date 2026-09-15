@@ -185,22 +185,13 @@ static void tcpcc_reap_failed_child(pid_t pid)
 }
 
 static int tcpcc_tcp_wmem_argument(char *buffer, size_t size,
+				   unsigned long value,
 				   struct tcpcc_control_error *error)
 {
-	const char *environment = getenv(TCPCC_TCP_WMEM_MAX_KIB_ENV);
-	unsigned long value = 0;
-	char *end = NULL;
-
-	if (environment && environment[0]) {
-		errno = 0;
-		value = strtoul(environment, &end, 10);
-		if (errno || !end || *end ||
-		    value < TCPCC_TCP_WMEM_MAX_KIB_MINIMUM ||
-		    value > TCPCC_TCP_WMEM_MAX_KIB_LIMIT)
-			return tcpcc_process_fail(error, EINVAL,
-				"invalid %s value '%s'",
-				TCPCC_TCP_WMEM_MAX_KIB_ENV, environment);
-	}
+	if (value && (value < TCPCC_TCP_WMEM_MAX_KIB_MINIMUM ||
+		      value > TCPCC_TCP_WMEM_MAX_KIB_LIMIT))
+		return tcpcc_process_fail(error, EINVAL,
+			"hosted tcp_wmem maximum is out of range");
 	if (snprintf(buffer, size, "--tcp-wmem-max-kib=%lu", value) >=
 	    (int)size)
 		return tcpcc_process_fail(error, EOVERFLOW,
@@ -210,7 +201,9 @@ static int tcpcc_tcp_wmem_argument(char *buffer, size_t size,
 
 int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 			       const char *kernel_path,
-			       unsigned long memory_mib, int tun_fd,
+			       unsigned long memory_mib,
+			       unsigned long tcp_wmem_max_kib,
+			       int tun_fd,
 			       struct tcpcc_control_error *error)
 {
 	char memory_argument[64];
@@ -234,7 +227,8 @@ int tcpcc_hosted_process_start(struct tcpcc_hosted_process *process,
 		return tcpcc_process_fail(error, EOVERFLOW,
 			"hosted memory argument is too large");
 	if (tcpcc_tcp_wmem_argument(tcp_wmem_argument,
-				    sizeof(tcp_wmem_argument), error))
+				    sizeof(tcp_wmem_argument),
+				    tcp_wmem_max_kib, error))
 		return -1;
 	*process = (struct tcpcc_hosted_process) {
 		.pid = -1,

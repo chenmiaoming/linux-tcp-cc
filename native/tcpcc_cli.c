@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #define _GNU_SOURCE
 
+#include "tcpcc_config.h"
 #include "tcpcc_control.h"
 #include "tcpcc_event.h"
 #include "tcpcc_process.h"
@@ -41,6 +42,7 @@
 #define TCPCC_TUN_MTU "1500"
 #define TCPCC_SIGNAL_TOKEN 1U
 #define TCPCC_CHILD_TOKEN 2U
+#define TCPCC_CONFIG_OPTION "--config="
 
 enum tcpcc_firewall_kind {
 	TCPCC_FIREWALL_NFT_LIB,
@@ -66,6 +68,7 @@ struct tcpcc_cli_config {
 	char cc[16];
 	char kernel[4096];
 	unsigned long memory_mib;
+	unsigned long tcp_wmem_max_kib;
 	enum tcpcc_firewall_kind firewall;
 	char firewall_name[16];
 	char iptables_variant[32];
@@ -110,7 +113,8 @@ static int tcpcc_firewall_inspect_ownership(const struct tcpcc_cli_config *confi
 static void tcpcc_usage(FILE *stream)
 {
 	fprintf(stream,
-		"usage: tcpcc --forward LISTEN=127.0.0.1:PORT [--forward LISTEN=127.0.0.1:PORT ...] --cc NAME [options]\n"
+		"usage: tcpcc --config FILE [--check]\n"
+		"       tcpcc --forward LISTEN=127.0.0.1:PORT [--forward LISTEN=127.0.0.1:PORT ...] --cc NAME [options]\n"
 		"\n"
 		"Terminate public TCP inside the hosted Linux stack and forward each\n"
 		"public listener to its fixed local backend. Repeat --forward to add\n"
@@ -118,17 +122,19 @@ static void tcpcc_usage(FILE *stream)
 		"family and distinct ports.\n"
 		"The installed command has no Python dependency.\n"
 		"\n"
+		"  --config FILE                  load versioned TOML service configuration\n"
 		"  --forward LISTEN=BACKEND      fixed public-listener/backend mapping (repeatable)\n"
 		"  --check                        validate host prerequisites without mutation\n"
-		"  --kernel PATH       hosted vmlinux (or TCPCC_KERNEL)\n"
-		"  --memory-mib MIB    hosted memory, minimum %lu (default %lu)\n"
+		"  --kernel PATH                 hosted vmlinux (or TCPCC_KERNEL)\n"
+		"  --memory-mib MIB              hosted memory, minimum %lu (default %lu)\n"
+		"  --tcp-wmem-max-kib KIB        hosted TCP send autotune ceiling (default auto)\n"
 		"  --firewall-backend NAME       nft-lib, nft-exec, or iptables\n"
 		"  --iptables-variant NAME       iptables, iptables-nft, or iptables-legacy\n"
-		"  --tun-name NAME     exclusive nonpersistent TUN name\n"
+		"  --tun-name NAME               exclusive nonpersistent TUN name\n"
 		"  --tun-host-address IP         host-side point-to-point address\n"
 		"  --tun-guest-address IP        hosted point-to-point address\n"
-		"  --backlog N         listener backlog (default 128)\n"
-		"  --max-connections N 0 means no policy limit (default 0)\n"
+		"  --backlog N                   listener backlog (default 128)\n"
+		"  --max-connections N           0 means no policy limit (default 0)\n"
 		"  --shutdown-grace-period SEC   graceful drain timeout (default 5)\n",
 		TCPCC_HOSTED_MINIMUM_MEMORY_MIB,
 		TCPCC_HOSTED_DEFAULT_MEMORY_MIB);
@@ -325,11 +331,27 @@ static int tcpcc_validate_new_listen(const struct tcpcc_cli_config *config,
 	return 0;
 }
 
-static int tcpcc_parse_forward(const char *text,
-			       struct tcpcc_cli_config *config)
+static int tcpcc_add_forward(struct tcpcc_cli_config *config,
+			     const char *listen_text, const char *backend_text)
 {
 	struct tcpcc_endpoint listen;
 	struct tcpcc_endpoint backend;
+	int result;
+
+	if (tcpcc_parse_endpoint(listen_text, &listen))
+		return tcpcc_error("forward listener must use literal IPv4:port or [IPv6]:port syntax");
+	if (tcpcc_parse_endpoint(backend_text, &backend) ||
+	    backend.version != 4 || strcmp(backend.address, "127.0.0.1"))
+		return tcpcc_error("forward backend must use 127.0.0.1:port");
+	result = tcpcc_validate_new_listen(config, &listen);
+	if (!result)
+		result = tcpcc_append_route(config, &listen, &backend);
+	return result;
+}
+
+static int tcpcc_parse_forward(const char *text,
+			       struct tcpcc_cli_config *config)
+{
 	char *mapping;
 	char *separator;
 	int result;
@@ -344,27 +366,266 @@ static int tcpcc_parse_forward(const char *text,
 		return tcpcc_error("--forward must use LISTEN=BACKEND syntax");
 	}
 	*separator = '\0';
-	if (tcpcc_parse_endpoint(mapping, &listen)) {
-		free(mapping);
-		return tcpcc_error("forward listener must use literal IPv4:port or [IPv6]:port syntax");
-	}
-	if (tcpcc_parse_endpoint(separator + 1, &backend) ||
-	    backend.version != 4 || strcmp(backend.address, "127.0.0.1")) {
-		free(mapping);
-		return tcpcc_error("forward backend must use 127.0.0.1:port");
-	}
-	result = tcpcc_validate_new_listen(config, &listen);
-	if (!result)
-		result = tcpcc_append_route(config, &listen, &backend);
+	result = tcpcc_add_forward(config, mapping, separator + 1);
 	free(mapping);
 	return result;
 }
 
-static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *config)
+static int tcpcc_config_init(struct tcpcc_cli_config *config, const char *argv0)
+{
+	memset(config, 0, sizeof(*config));
+	config->memory_mib = TCPCC_HOSTED_DEFAULT_MEMORY_MIB;
+	config->firewall = TCPCC_FIREWALL_NFT_LIB;
+	strcpy(config->firewall_name, "nft-lib");
+	strcpy(config->iptables_variant, "iptables");
+	config->backlog = TCPCC_DEFAULT_BACKLOG;
+	config->grace_ms = TCPCC_DEFAULT_GRACE_MS;
+	if (tcpcc_default_kernel(config->kernel, sizeof(config->kernel), argv0))
+		return tcpcc_error("cannot resolve the default hosted kernel path");
+	return 0;
+}
+
+static int tcpcc_config_set_cc(struct tcpcc_cli_config *config, const char *value)
+{
+	if (!tcpcc_valid_name(value, 15, true))
+		return tcpcc_error("cc must contain 1-15 lowercase letters, digits, underscores, or hyphens");
+	strcpy(config->cc, value);
+	return 0;
+}
+
+static int tcpcc_config_set_kernel(struct tcpcc_cli_config *config,
+				   const char *value)
+{
+	if (snprintf(config->kernel, sizeof(config->kernel), "%s", value) >=
+	    (int)sizeof(config->kernel))
+		return tcpcc_error("kernel path is too long");
+	return 0;
+}
+
+static int tcpcc_config_set_memory(struct tcpcc_cli_config *config,
+				   unsigned long value)
+{
+	if (value < TCPCC_HOSTED_MINIMUM_MEMORY_MIB)
+		return tcpcc_memory_error();
+	config->memory_mib = value;
+	return 0;
+}
+
+static int tcpcc_config_set_tcp_wmem(struct tcpcc_cli_config *config,
+				     unsigned long value)
+{
+	if (value < TCPCC_TCP_WMEM_MAX_KIB_MINIMUM ||
+	    value > TCPCC_TCP_WMEM_MAX_KIB_LIMIT)
+		return tcpcc_error("tcp_wmem maximum must be from 64 through 2097151 KiB");
+	config->tcp_wmem_max_kib = value;
+	return 0;
+}
+
+static int tcpcc_config_set_firewall(struct tcpcc_cli_config *config,
+				     const char *value)
+{
+	if (!strcmp(value, "nft-lib"))
+		config->firewall = TCPCC_FIREWALL_NFT_LIB;
+	else if (!strcmp(value, "nft-exec"))
+		config->firewall = TCPCC_FIREWALL_NFT_EXEC;
+	else if (!strcmp(value, "iptables"))
+		config->firewall = TCPCC_FIREWALL_IPTABLES;
+	else
+		return tcpcc_error("firewall backend must be nft-lib, nft-exec, or iptables");
+	strcpy(config->firewall_name, value);
+	return 0;
+}
+
+static int tcpcc_config_set_iptables_variant(struct tcpcc_cli_config *config,
+					     const char *value)
+{
+	if (strcmp(value, "iptables") && strcmp(value, "iptables-nft") &&
+	    strcmp(value, "iptables-legacy"))
+		return tcpcc_error("invalid iptables variant");
+	strcpy(config->iptables_variant, value);
+	return 0;
+}
+
+static int tcpcc_config_set_tun_name(struct tcpcc_cli_config *config,
+				     const char *value)
+{
+	if (!tcpcc_valid_name(value, IFNAMSIZ - 1, false))
+		return tcpcc_error("invalid TUN name");
+	strcpy(config->tun_name, value);
+	return 0;
+}
+
+static int tcpcc_config_set_backlog(struct tcpcc_cli_config *config,
+				    unsigned long value)
+{
+	if (!value || value > TCPCC_MAX_BACKLOG)
+		return tcpcc_error("backlog must be from 1 through 4096");
+	config->backlog = (unsigned int)value;
+	return 0;
+}
+
+static int tcpcc_config_set_max_connections(struct tcpcc_cli_config *config,
+					    unsigned long value)
+{
+	if (value > TCPCC_MAX_CONNECTIONS)
+		return tcpcc_error("max connections must be 0 or at most 1048575");
+	config->max_connections = (unsigned int)value;
+	return 0;
+}
+
+static int tcpcc_config_set_grace(struct tcpcc_cli_config *config,
+				  double seconds)
+{
+	if (seconds != seconds || seconds < 0 || seconds > 300)
+		return tcpcc_error("shutdown grace period must be from 0 through 300 seconds");
+	config->grace_ms = (unsigned int)(seconds * 1000.0);
+	return 0;
+}
+
+static int tcpcc_config_finalize(struct tcpcc_cli_config *config,
+				 const char *host, const char *guest,
+				 bool explicit_iptables)
+{
+	if (!config->route_count || !config->cc[0])
+		return tcpcc_error("at least one --forward and --cc are required");
+	if (explicit_iptables && config->firewall != TCPCC_FIREWALL_IPTABLES)
+		return tcpcc_error("--iptables-variant is valid only with --firewall-backend=iptables");
+	if (!host)
+		host = config->routes[0].listen.version == 4 ? "198.18.0.1" : "fd00:198:18::1";
+	if (!guest)
+		guest = config->routes[0].listen.version == 4 ? "198.18.0.2" : "fd00:198:18::2";
+	if (tcpcc_parse_ip(host, config->routes[0].listen.version, config->tun_host) ||
+	    tcpcc_parse_ip(guest, config->routes[0].listen.version, config->tun_guest) ||
+	    !strcmp(config->tun_host, config->tun_guest))
+		return tcpcc_error("TUN addresses must be distinct usable addresses matching the listener family");
+	return 0;
+}
+
+static int tcpcc_find_config(int argc, char **argv, const char **path,
+			     bool *help)
+{
+	int index;
+
+	*path = NULL;
+	*help = false;
+	for (index = 1; index < argc; index++) {
+		const char *argument = argv[index];
+		const char *candidate = NULL;
+
+		if (!strcmp(argument, "-h") || !strcmp(argument, "--help"))
+			*help = true;
+		if (!strcmp(argument, "--config")) {
+			if (index + 1 >= argc)
+				return tcpcc_error("--config requires an argument");
+			candidate = argv[++index];
+		} else if (!strncmp(argument, TCPCC_CONFIG_OPTION,
+				   sizeof(TCPCC_CONFIG_OPTION) - 1)) {
+			candidate = argument + sizeof(TCPCC_CONFIG_OPTION) - 1;
+		}
+		if (candidate) {
+			if (!candidate[0])
+				return tcpcc_error("--config requires a non-empty path");
+			if (*path)
+				return tcpcc_error("--config may be specified only once");
+			*path = candidate;
+		}
+	}
+	return 0;
+}
+
+static int tcpcc_validate_config_argv(int argc, char **argv)
+{
+	int index;
+
+	for (index = 1; index < argc; index++) {
+		const char *argument = argv[index];
+
+		if (!strcmp(argument, "--check") || !strcmp(argument, "-h") ||
+		    !strcmp(argument, "--help"))
+			continue;
+		if (!strcmp(argument, "--config")) {
+			index++;
+			continue;
+		}
+		if (!strncmp(argument, TCPCC_CONFIG_OPTION,
+				   sizeof(TCPCC_CONFIG_OPTION) - 1))
+			continue;
+		return tcpcc_error("--config cannot be combined with direct service options");
+	}
+	return 0;
+}
+
+static int tcpcc_apply_file_config(struct tcpcc_cli_config *config,
+				   const struct tcpcc_file_config *file,
+				   bool check)
+{
+	size_t index;
+
+	if (tcpcc_config_set_cc(config, file->cc))
+		return -1;
+	for (index = 0; index < file->forward_count; index++)
+		if (tcpcc_add_forward(config, file->forwards[index].listen,
+				      file->forwards[index].backend))
+			return -1;
+	if (file->kernel && tcpcc_config_set_kernel(config, file->kernel))
+		return -1;
+	if (file->has_memory_mib && tcpcc_config_set_memory(config, file->memory_mib))
+		return -1;
+	if (file->has_tcp_wmem_max_kib &&
+	    tcpcc_config_set_tcp_wmem(config, file->tcp_wmem_max_kib))
+		return -1;
+	if (file->firewall_backend &&
+	    tcpcc_config_set_firewall(config, file->firewall_backend))
+		return -1;
+	if (file->iptables_variant &&
+	    tcpcc_config_set_iptables_variant(config, file->iptables_variant))
+		return -1;
+	if (file->tun_name && tcpcc_config_set_tun_name(config, file->tun_name))
+		return -1;
+	if (file->has_backlog && tcpcc_config_set_backlog(config, file->backlog))
+		return -1;
+	if (file->has_max_connections &&
+	    tcpcc_config_set_max_connections(config, file->max_connections))
+		return -1;
+	if (file->has_shutdown_grace_period &&
+	    tcpcc_config_set_grace(config, file->shutdown_grace_period))
+		return -1;
+	config->check_only = check;
+	return tcpcc_config_finalize(config, file->tun_host_address,
+				     file->tun_guest_address,
+				     file->iptables_variant != NULL);
+}
+
+static int tcpcc_parse_file_args(int argc, char **argv, const char *path,
+				 struct tcpcc_cli_config *config)
+{
+	struct tcpcc_file_config file;
+	char error[512];
+	bool check = false;
+	int index;
+	int result;
+
+	if (tcpcc_validate_config_argv(argc, argv))
+		return -1;
+	for (index = 1; index < argc; index++)
+		if (!strcmp(argv[index], "--check"))
+			check = true;
+	if (tcpcc_config_load(path, &file, error, sizeof(error)))
+		return tcpcc_error(error);
+	result = tcpcc_config_init(config, argv[0]);
+	if (!result)
+		result = tcpcc_apply_file_config(config, &file, check);
+	tcpcc_config_free(&file);
+	return result;
+}
+
+static int tcpcc_parse_direct_args(int argc, char **argv,
+				   struct tcpcc_cli_config *config)
 {
 	static const struct option options[] = {
 		{ "forward", required_argument, NULL, 1005 },
 		{ "check", no_argument, NULL, 1006 },
+		{ "tcp-wmem-max-kib", required_argument, NULL, 1007 },
 		{ "cc", required_argument, NULL, 'c' },
 		{ "kernel", required_argument, NULL, 'k' },
 		{ "memory-mib", required_argument, NULL, 'm' },
@@ -379,22 +640,15 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
-	const char *cc = NULL;
 	const char *host = NULL;
 	const char *guest = NULL;
 	bool explicit_iptables = false;
+	bool tcp_wmem_seen = false;
 	int option;
 
-	memset(config, 0, sizeof(*config));
-	config->memory_mib = TCPCC_HOSTED_DEFAULT_MEMORY_MIB;
-	config->firewall = TCPCC_FIREWALL_NFT_LIB;
-	strcpy(config->firewall_name, "nft-lib");
-	strcpy(config->iptables_variant, "iptables");
-	config->backlog = TCPCC_DEFAULT_BACKLOG;
-	config->grace_ms = TCPCC_DEFAULT_GRACE_MS;
-	if (tcpcc_default_kernel(config->kernel, sizeof(config->kernel), argv[0]))
-		return tcpcc_error("cannot resolve the default hosted kernel path");
-
+	if (tcpcc_config_init(config, argv[0]))
+		return -1;
+	optind = 1;
 	while ((option = getopt_long(argc, argv, "c:k:m:f:i:t:h", options,
 				     NULL)) != -1) {
 		unsigned long value;
@@ -409,60 +663,63 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 		case 1006:
 			config->check_only = true;
 			break;
-		case 'c': cc = optarg; break;
+		case 1007:
+			if (tcp_wmem_seen)
+				return tcpcc_error("--tcp-wmem-max-kib may be specified only once");
+			if (tcpcc_parse_unsigned(optarg, TCPCC_TCP_WMEM_MAX_KIB_LIMIT, &value))
+				return tcpcc_error("tcp_wmem maximum must be from 64 through 2097151 KiB");
+			if (tcpcc_config_set_tcp_wmem(config, value))
+				return -1;
+			tcp_wmem_seen = true;
+			break;
+		case 'c':
+			if (tcpcc_config_set_cc(config, optarg))
+				return -1;
+			break;
 		case 'k':
-			if (snprintf(config->kernel, sizeof(config->kernel), "%s", optarg) >=
-			    (int)sizeof(config->kernel))
-				return tcpcc_error("kernel path is too long");
+			if (tcpcc_config_set_kernel(config, optarg))
+				return -1;
 			break;
 		case 'm':
-			if (tcpcc_parse_unsigned(optarg, ~0UL, &value) ||
-			    value < TCPCC_HOSTED_MINIMUM_MEMORY_MIB)
+			if (tcpcc_parse_unsigned(optarg, ~0UL, &value))
 				return tcpcc_memory_error();
-			config->memory_mib = value;
+			if (tcpcc_config_set_memory(config, value))
+				return -1;
 			break;
 		case 'f':
-			if (!strcmp(optarg, "nft-lib"))
-				config->firewall = TCPCC_FIREWALL_NFT_LIB;
-			else if (!strcmp(optarg, "nft-exec"))
-				config->firewall = TCPCC_FIREWALL_NFT_EXEC;
-			else if (!strcmp(optarg, "iptables"))
-				config->firewall = TCPCC_FIREWALL_IPTABLES;
-			else
-				return tcpcc_error("firewall backend must be nft-lib, nft-exec, or iptables");
-			strcpy(config->firewall_name, optarg);
+			if (tcpcc_config_set_firewall(config, optarg))
+				return -1;
 			break;
 		case 'i':
-			if (strcmp(optarg, "iptables") && strcmp(optarg, "iptables-nft") &&
-			    strcmp(optarg, "iptables-legacy"))
-				return tcpcc_error("invalid iptables variant");
-			strcpy(config->iptables_variant, optarg);
+			if (tcpcc_config_set_iptables_variant(config, optarg))
+				return -1;
 			explicit_iptables = true;
 			break;
 		case 't':
-			if (!tcpcc_valid_name(optarg, IFNAMSIZ - 1, false))
-				return tcpcc_error("invalid TUN name");
-			strcpy(config->tun_name, optarg);
+			if (tcpcc_config_set_tun_name(config, optarg))
+				return -1;
 			break;
 		case 1000: host = optarg; break;
 		case 1001: guest = optarg; break;
 		case 1002:
-			if (tcpcc_parse_unsigned(optarg, TCPCC_MAX_BACKLOG, &value) || !value)
+			if (tcpcc_parse_unsigned(optarg, TCPCC_MAX_BACKLOG, &value))
 				return tcpcc_error("backlog must be from 1 through 4096");
-			config->backlog = (unsigned int)value;
+			if (tcpcc_config_set_backlog(config, value))
+				return -1;
 			break;
 		case 1003:
 			if (tcpcc_parse_unsigned(optarg, TCPCC_MAX_CONNECTIONS, &value))
 				return tcpcc_error("max connections must be 0 or at most 1048575");
-			config->max_connections = (unsigned int)value;
+			if (tcpcc_config_set_max_connections(config, value))
+				return -1;
 			break;
 		case 1004:
 			errno = 0;
 			seconds = strtod(optarg, &end);
-			if (errno || !optarg[0] || *end || seconds != seconds ||
-			    seconds < 0 || seconds > 300)
+			if (errno || !optarg[0] || *end)
 				return tcpcc_error("shutdown grace period must be from 0 through 300 seconds");
-			config->grace_ms = (unsigned int)(seconds * 1000.0);
+			if (tcpcc_config_set_grace(config, seconds))
+				return -1;
 			break;
 		case 'h': tcpcc_usage(stdout); exit(0);
 		default: tcpcc_usage(stderr); return -1;
@@ -470,22 +727,23 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 	}
 	if (optind != argc)
 		return tcpcc_error("unexpected positional argument");
-	if (!config->route_count || !cc)
-		return tcpcc_error("at least one --forward and --cc are required");
-	if (!tcpcc_valid_name(cc, 15, true))
-		return tcpcc_error("cc must contain 1-15 lowercase letters, digits, underscores, or hyphens");
-	strcpy(config->cc, cc);
-	if (explicit_iptables && config->firewall != TCPCC_FIREWALL_IPTABLES)
-		return tcpcc_error("--iptables-variant is valid only with --firewall-backend=iptables");
-	if (!host)
-		host = config->routes[0].listen.version == 4 ? "198.18.0.1" : "fd00:198:18::1";
-	if (!guest)
-		guest = config->routes[0].listen.version == 4 ? "198.18.0.2" : "fd00:198:18::2";
-	if (tcpcc_parse_ip(host, config->routes[0].listen.version, config->tun_host) ||
-	    tcpcc_parse_ip(guest, config->routes[0].listen.version, config->tun_guest) ||
-	    !strcmp(config->tun_host, config->tun_guest))
-		return tcpcc_error("TUN addresses must be distinct usable addresses matching the listener family");
-	return 0;
+	return tcpcc_config_finalize(config, host, guest, explicit_iptables);
+}
+
+static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *config)
+{
+	const char *config_path;
+	bool help;
+
+	if (tcpcc_find_config(argc, argv, &config_path, &help))
+		return -1;
+	if (help) {
+		tcpcc_usage(stdout);
+		exit(0);
+	}
+	if (config_path)
+		return tcpcc_parse_file_args(argc, argv, config_path, config);
+	return tcpcc_parse_direct_args(argc, argv, config);
 }
 
 static int tcpcc_run(char *const argv[], const char *input, bool quiet)
@@ -1198,14 +1456,14 @@ static int tcpcc_firewall_close(struct tcpcc_firewall *firewall)
 		char *remove[] = { firewall->command, "--wait", "-t", "nat", "-X",
 			firewall->resource, NULL };
 
-	snprintf(port, sizeof(port), "%u", firewall->port);
-	snprintf(prefix, sizeof(prefix), "%s/%u", firewall->listen,
-		 firewall->version == 4 ? 32U : 128U);
-	snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=%llu tun=%s",
-		 (long)getpid(), firewall->owner_start, firewall->tun_name);
-	if (tcpcc_run(jump, NULL, true)) result = -1;
-	if (tcpcc_run(flush, NULL, true)) result = -1;
-	if (tcpcc_run(remove, NULL, true)) result = -1;
+		snprintf(port, sizeof(port), "%u", firewall->port);
+		snprintf(prefix, sizeof(prefix), "%s/%u", firewall->listen,
+			 firewall->version == 4 ? 32U : 128U);
+		snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=%llu tun=%s",
+			 (long)getpid(), firewall->owner_start, firewall->tun_name);
+		if (tcpcc_run(jump, NULL, true)) result = -1;
+		if (tcpcc_run(flush, NULL, true)) result = -1;
+		if (tcpcc_run(remove, NULL, true)) result = -1;
 	}
 	firewall->installed = false;
 	return result;
@@ -1250,7 +1508,7 @@ static int tcpcc_runtime_start(const struct tcpcc_cli_config *config, int tun_fd
 	if (config->route_count > 1)
 		required_features |= TCPCC_CONTROL_FEATURE_MULTI_LISTENER;
 	if (tcpcc_hosted_process_start(process, config->kernel, config->memory_mib,
-				       tun_fd, &error)) {
+				       config->tcp_wmem_max_kib, tun_fd, &error)) {
 		fprintf(stderr, "tcpcc: error: %s\n", error.message);
 		return -1;
 	}

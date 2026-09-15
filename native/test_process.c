@@ -43,12 +43,10 @@ int main(int argc, char **argv)
 		fail("expected the fake hosted-kernel path");
 
 	test_hosted_mmap_contract();
-	if (setenv(TCPCC_TCP_WMEM_MAX_KIB_ENV, "3072", 1) != 0)
-		fail("tcp_wmem environment setup failed");
 	tun_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
 	if (tun_fd < 3)
 		fail("fake TUN fd creation failed");
-	if (tcpcc_hosted_process_start(&process, argv[1], 512, tun_fd,
+	if (tcpcc_hosted_process_start(&process, argv[1], 512, 3072, tun_fd,
 				       &error) != 0)
 		fail(error.message);
 	close(tun_fd);
@@ -69,7 +67,6 @@ int main(int argc, char **argv)
 		fail(error.message);
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
 		fail("fake hosted process did not exit cleanly");
-	unsetenv(TCPCC_TCP_WMEM_MAX_KIB_ENV);
 	puts("native hosted-process test passed");
 	return 0;
 }

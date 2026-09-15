@@ -45,6 +45,11 @@ sudo tcpcc \
   --cc bbr
 ```
 
+For long-lived deployments, the same service definition may instead come from
+an explicit versioned TOML file via `--config FILE`. Direct CLI and TOML input
+converge on one native runtime configuration and share the same route and
+runtime validation. See [`docs/configuration.md`](docs/configuration.md).
+
 Existing applications do not need to link against tcpcc or understand its
 control ABI. They listen on the loopback backend as usual.
 
@@ -157,7 +162,7 @@ Python.
 The native supervisor owns host lifecycle rather than payload forwarding. Its
 responsibilities are:
 
-1. parse and validate repeated atomic `--forward LISTEN=BACKEND` mappings;
+1. parse either explicit versioned TOML or direct CLI options into one native runtime configuration, sharing route and runtime validation between both inputs;
 2. perform read-only host prerequisite checks;
 3. create and configure one exclusive nonpersistent TUN queue;
 4. inspect ownership markers and reject unsafe stale/malformed state;
@@ -339,13 +344,14 @@ process can reuse reclaimed pages for fresh bidirectional traffic.
 Hosted TCP memory remains upstream-derived by default. After Linux `tcp_init()`
 computes `tcp_wmem[2]` and the aggregate `tcp_mem` low/pressure/high thresholds
 from the configured arena size, tcpcc leaves both values unchanged unless the
-operator supplies `--tcp-wmem-max-kib`. An explicit send ceiling at or below the
-upstream value changes only that ceiling. If an explicit ceiling raises
-`tcp_wmem[2]`, tcpcc raises the aggregate TCP-memory budget only as needed to
-retain approximately the upstream pressure-to-send-ceiling scale, while capping
-the pressure point at 12.5% of hosted RAM and never lowering the upstream
-thresholds. `tcp_rmem` remains upstream-derived. These values are accounting and
-autotuning limits, not eager per-connection allocations.
+operator supplies `--tcp-wmem-max-kib` or TOML `tcp_wmem_max_kib`. An explicit
+send ceiling at or below the upstream value changes only that ceiling. If an
+explicit ceiling raises `tcp_wmem[2]`, tcpcc raises the aggregate TCP-memory
+budget only as needed to retain approximately the upstream pressure-to-send-
+ceiling scale, while capping the pressure point at 12.5% of hosted RAM and never
+lowering the upstream thresholds. `tcp_rmem` remains upstream-derived. These
+values are accounting and autotuning limits, not eager per-connection
+allocations.
 
 The host ELF image is a separate ownership domain from the anonymous guest RAM.
 Discardable `__init` code/data therefore cannot be returned through the guest
@@ -418,7 +424,9 @@ The following are useful non-goals because they prevent architectural drift:
 
 | Area | Primary source |
 | --- | --- |
-| Installed CLI / lifecycle supervisor | `native/tcpcc_cli.c`, `native/tcpcc_process.c`, `native/tcpcc_entry.c` |
+| Installed CLI / unified runtime configuration / lifecycle supervisor | `native/tcpcc_cli.c`, `native/tcpcc_process.c` |
+| TOML schema/parser | `native/tcpcc_config.c` |
+| Process entry / SIGPIPE boundary | `native/tcpcc_entry.c` |
 | Native fixed-record control client | `native/tcpcc_control.c` |
 | Host TUN/firewall lifecycle | native supervisor/lifecycle sources and host helpers |
 | Hosted architecture/runtime | `linux-overlay/arch/tcpcc/` |
