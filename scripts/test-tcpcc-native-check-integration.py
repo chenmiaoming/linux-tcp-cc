@@ -106,7 +106,7 @@ def install_stale_marker(
                 "probe",
                 "counter",
                 "comment",
-                marker,
+                f'"{marker}"',
             )
         )
         return
