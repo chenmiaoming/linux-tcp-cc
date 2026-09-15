@@ -31,8 +31,17 @@ The intended operator interface is deliberately proxy-like:
 
 ```text
 sudo tcpcc \
-  --listen 203.0.113.10:443 \
-  --backend 127.0.0.1:443 \
+  --forward 203.0.113.10:443=127.0.0.1:443 \
+  --cc bbr
+```
+
+One native supervisor may expose multiple fixed forwards by repeating atomic
+`--forward LISTEN=BACKEND` mappings:
+
+```text
+sudo tcpcc \
+  --forward 203.0.113.10:443=127.0.0.1:8443 \
+  --forward 203.0.113.10:8443=127.0.0.1:9443 \
   --cc bbr
 ```
 
@@ -49,7 +58,7 @@ Keeping them separate is the most important fact in the design.
 
 remote client
     |
-    | packets to --listen
+    | packets to public LISTEN endpoint
     v
 +------------------------- outer host/container -------------------------+
 |                                                                        |
@@ -121,12 +130,12 @@ A point-to-point TUN queue is enough because the boundary carries Layer-3 IPv4
 or IPv6 packets. TAP/Ethernet, ARP, and a software Ethernet bridge would add
 state that the product does not need.
 
-The host installs an exact-match DNAT rule for the requested public address and
+The host installs an exact-match DNAT rule for each requested public address and
 TCP port. The first packet is translated to the hosted TUN-side endpoint and
 routed through the TUN queue. Conntrack remembers the mapping and performs the
 reverse translation for replies emitted by hosted Linux.
 
-The rule is deliberately narrow:
+Each rule is deliberately narrow:
 
 - exact public destination address;
 - exact TCP destination port;
@@ -134,8 +143,8 @@ The rule is deliberately narrow:
 - no broad redirect of unrelated host traffic;
 - no implicit SNAT/masquerade policy.
 
-Each tcpcc instance owns only its generated TUN and its instance-scoped
-firewall resource.
+Each tcpcc instance owns only its generated TUN and its generated per-route
+firewall resources.
 
 ## Runtime components and ownership
 
@@ -148,17 +157,17 @@ Python.
 The native supervisor owns host lifecycle rather than payload forwarding. Its
 responsibilities are:
 
-1. parse and validate the operator contract;
+1. parse and validate repeated atomic `--forward LISTEN=BACKEND` mappings;
 2. perform read-only host prerequisite checks;
 3. create and configure one exclusive nonpersistent TUN queue;
 4. inspect ownership markers and reject unsafe stale/malformed state;
-5. install one exact DNAT resource using the selected firewall backend;
+5. install one exact DNAT resource per public route using the selected firewall backend;
 6. `fork`/`execve` the hosted Linux executable;
 7. establish the fixed-record control ABI over the child stdin/stdout;
 8. pass the TUN queue as inherited fd 3;
-9. configure the hosted L3 endpoint and public listener;
+9. configure the hosted L3 endpoint and every public listener;
 10. set/read back `TCP_CONGESTION` inside hosted Linux;
-11. start the hosted service;
+11. start or extend the one aggregate hosted service for every listener;
 12. handle SIGINT/SIGTERM and aggregate runtime events; and
 13. unwind owned resources in reverse order.
 
@@ -228,11 +237,13 @@ listener off the queue until a later readiness callback. `accept_batch` is a
 total service-wide accepted-connection budget for one worker pass, not a
 per-listener budget.
 
-The current installed native CLI still constructs one public listener for one
-tcpcc instance. Multi-listener ownership is therefore a hosted service/control
-capability today; a future operator-facing multi-listener CLI must explicitly
-extend native configuration and host firewall ownership rather than being
-inferred from the hosted ABI alone.
+The native CLI exposes this model directly through repeated atomic
+`--forward LISTEN=BACKEND` mappings. A multi-route startup requires the hosted
+`TCPCC_CONTROL_FEATURE_MULTI_LISTENER` capability and requires every repeated
+`SERVICE_START` to return the same aggregate handle. All routes in one native
+supervisor currently share one TUN/L3 endpoint, one congestion-control choice,
+one service-wide admission policy, one bridge dispatcher, one drain/stop
+lifecycle, and aggregate statistics.
 
 Accepted public Linux sockets stay inside hosted Linux. One bridge dispatcher
 is the mutable owner of active flows. It handles public socket readiness,
@@ -252,7 +263,7 @@ or validation boundaries, not the default product limit.
 
 ## Congestion-control ownership
 
-The requested congestion control belongs to the hosted public listener:
+The requested congestion control belongs to each hosted public listener:
 
 ```text
 create hosted socket
@@ -290,23 +301,24 @@ The TUN queue is created with exclusive, nonpersistent semantics. tcpcc never
 adopts an existing interface. Closing the queue removes the interface and its
 attached address/route state.
 
-The firewall resource is instance-scoped. `nft-lib` is the default transport;
-`nft-exec` and explicit iptables nft/legacy compatibility paths implement the
-same ownership model. Backend selection is explicit. A failed firewall backend
-must not silently fall through to another implementation.
+Firewall ownership is per route. `nft-lib` is the default transport; `nft-exec`
+and explicit iptables nft/legacy compatibility paths implement the same
+ownership model. Backend selection is explicit. A failed firewall backend must
+not silently fall through to another implementation.
 
 Ownership markers include enough process identity to distinguish a live
 instance from PID reuse. Stale or malformed marked resources block mutation and
 produce operator-facing remediation rather than being automatically deleted.
 Unrelated firewall state is not adopted.
 
-On orderly shutdown tcpcc closes admission, allows active flows to drain for the
-configured grace period, cancels only the remainder, stops hosted Linux,
-removes the exact firewall resource, and closes the nonpersistent TUN. If the
-normal hosted control path fails, cleanup attempts `SERVICE_STOP`, then kills
-and reaps the child before rolling host resources back. SIGKILL delivered to the
-supervisor itself cannot execute userspace firewall cleanup, so a surviving
-marked resource is reported on the next startup rather than guessed away.
+On orderly shutdown tcpcc closes admission on every listener, allows active
+flows to drain for the configured grace period, cancels only the remainder,
+stops hosted Linux, removes every exact firewall resource in reverse order, and
+closes the nonpersistent TUN. If the normal hosted control path fails, cleanup
+attempts `SERVICE_STOP`, then kills and reaps the child before rolling host
+resources back. SIGKILL delivered to the supervisor itself cannot execute
+userspace firewall cleanup, so surviving marked resources are reported on the
+next startup rather than guessed away.
 
 ## Memory model
 
@@ -365,9 +377,18 @@ lossless data-path gates.
 
 ## Address-family and backend boundaries
 
-The public endpoint may be IPv4 or IPv6. The selected public family determines
+A public endpoint may be IPv4 or IPv6. The selected public family determines
 the TUN endpoints, forwarding prerequisite, firewall family, hosted listener,
-and hosted route.
+and hosted route. Because one native supervisor currently owns one TUN/L3
+attachment, every public listener in that process must use the same address
+family.
+
+Public TCP ports within one native supervisor must also be unique. Every DNAT
+rule targets the same hosted TUN guest address while preserving destination
+port, so two different public destinations using the same TCP port would
+collapse onto the same hosted `guest-IP:port` and could not select different
+fixed backends. Supporting same-port virtual destinations requires a different
+hosted-address or demultiplexing design rather than weakening this validation.
 
 The application backend is intentionally narrower today: it is an ordinary
 IPv4 loopback endpoint under `127.0.0.1`. Extending the backend contract is a

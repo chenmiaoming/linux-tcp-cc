@@ -17,13 +17,17 @@ int tcpcc_cli_main(int argc, char **argv);
 static void tcpcc_entry_usage(FILE *stream)
 {
 	fprintf(stream,
-		"usage: tcpcc --listen IP:PORT --backend 127.0.0.1:PORT --cc NAME [options]\n"
+		"usage: tcpcc --forward LISTEN=127.0.0.1:PORT [--forward LISTEN=127.0.0.1:PORT ...] --cc NAME [options]\n"
 		"\n"
-		"Terminate public TCP inside the hosted Linux stack and bridge it to\n"
-		"one local backend. The installed command has no Python dependency.\n"
+		"Terminate public TCP inside the hosted Linux stack and forward each\n"
+		"public listener to its fixed local backend. Repeat --forward to add\n"
+		"listeners. All public listeners in one process must use one address\n"
+		"family and distinct ports.\n"
+		"The installed command has no Python dependency.\n"
 		"\n"
+		"  --forward LISTEN=BACKEND      fixed public-listener/backend mapping (repeatable)\n"
 		"  --kernel PATH                 hosted vmlinux (or TCPCC_KERNEL)\n"
-		"  --memory-mib MIB              hosted memory, minimum 32 (default 128)\n"
+		"  --memory-mib MIB              hosted memory, minimum %lu (default %lu)\n"
 		"  --tcp-wmem-max-kib KIB        hosted TCP send autotune ceiling (default auto)\n"
 		"  --firewall-backend NAME       nft-lib, nft-exec, or iptables\n"
 		"  --iptables-variant NAME       iptables, iptables-nft, or iptables-legacy\n"
@@ -32,7 +36,9 @@ static void tcpcc_entry_usage(FILE *stream)
 		"  --tun-guest-address IP        hosted point-to-point address\n"
 		"  --backlog N                   listener backlog (default 128)\n"
 		"  --max-connections N           0 means no policy limit (default 0)\n"
-		"  --shutdown-grace-period SEC   graceful drain timeout (default 5)\n");
+		"  --shutdown-grace-period SEC   graceful drain timeout (default 5)\n",
+		TCPCC_HOSTED_MINIMUM_MEMORY_MIB,
+		TCPCC_HOSTED_DEFAULT_MEMORY_MIB);
 }
 
 static int tcpcc_entry_parse_unsigned(const char *text, unsigned long minimum,
@@ -55,6 +61,13 @@ static int tcpcc_entry_parse_unsigned(const char *text, unsigned long minimum,
 static int tcpcc_entry_error(const char *message)
 {
 	fprintf(stderr, "tcpcc: error: %s\n", message);
+	return 1;
+}
+
+static int tcpcc_entry_memory_error(void)
+{
+	fprintf(stderr, "tcpcc: error: hosted memory must be at least %lu MiB\n",
+		TCPCC_HOSTED_MINIMUM_MEMORY_MIB);
 	return 1;
 }
 
@@ -112,7 +125,7 @@ int main(int argc, char **argv)
 						       TCPCC_HOSTED_MINIMUM_MEMORY_MIB,
 						       ~0UL, &value)) {
 				free(filtered);
-				return tcpcc_entry_error("hosted memory must be at least 32 MiB");
+				return tcpcc_entry_memory_error();
 			}
 		} else if (!strncmp(argument, "--memory-mib=", 13)) {
 			value_text = argument + 13;
@@ -120,7 +133,7 @@ int main(int argc, char **argv)
 						       TCPCC_HOSTED_MINIMUM_MEMORY_MIB,
 						       ~0UL, &value)) {
 				free(filtered);
-				return tcpcc_entry_error("hosted memory must be at least 32 MiB");
+				return tcpcc_entry_memory_error();
 			}
 		}
 

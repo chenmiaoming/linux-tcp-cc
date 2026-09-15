@@ -54,9 +54,14 @@ struct tcpcc_endpoint {
 	uint16_t port;
 };
 
-struct tcpcc_cli_config {
+struct tcpcc_route_config {
 	struct tcpcc_endpoint listen;
 	struct tcpcc_endpoint backend;
+};
+
+struct tcpcc_cli_config {
+	struct tcpcc_route_config *routes;
+	size_t route_count;
 	char cc[16];
 	char kernel[4096];
 	unsigned long memory_mib;
@@ -102,26 +107,39 @@ static int tcpcc_nft_load(struct tcpcc_nft_api *api);
 static void tcpcc_usage(FILE *stream)
 {
 	fprintf(stream,
-		"usage: tcpcc --listen IP:PORT --backend 127.0.0.1:PORT --cc NAME [options]\n"
+		"usage: tcpcc --forward LISTEN=127.0.0.1:PORT [--forward LISTEN=127.0.0.1:PORT ...] --cc NAME [options]\n"
 		"\n"
-		"Terminate public TCP inside the hosted Linux stack and bridge it to\n"
-		"one local backend. The installed command has no Python dependency.\n"
+		"Terminate public TCP inside the hosted Linux stack and forward each\n"
+		"public listener to its fixed local backend. Repeat --forward to add\n"
+		"listeners. All public listeners in one process must use one address\n"
+		"family and distinct ports.\n"
+		"The installed command has no Python dependency.\n"
 		"\n"
-		"  --kernel PATH                 hosted vmlinux (or TCPCC_KERNEL)\n"
-		"  --memory-mib MIB              hosted memory, minimum 128 (default 128)\n"
+		"  --forward LISTEN=BACKEND      fixed public-listener/backend mapping (repeatable)\n"
+		"  --kernel PATH       hosted vmlinux (or TCPCC_KERNEL)\n"
+		"  --memory-mib MIB    hosted memory, minimum %lu (default %lu)\n"
 		"  --firewall-backend NAME       nft-lib, nft-exec, or iptables\n"
 		"  --iptables-variant NAME       iptables, iptables-nft, or iptables-legacy\n"
-		"  --tun-name NAME               exclusive nonpersistent TUN name\n"
+		"  --tun-name NAME     exclusive nonpersistent TUN name\n"
 		"  --tun-host-address IP         host-side point-to-point address\n"
 		"  --tun-guest-address IP        hosted point-to-point address\n"
-		"  --backlog N                   listener backlog (default 128)\n"
-		"  --max-connections N           0 means no policy limit (default 0)\n"
-		"  --shutdown-grace-period SEC   graceful drain timeout (default 5)\n");
+		"  --backlog N         listener backlog (default 128)\n"
+		"  --max-connections N 0 means no policy limit (default 0)\n"
+		"  --shutdown-grace-period SEC   graceful drain timeout (default 5)\n",
+		TCPCC_HOSTED_MINIMUM_MEMORY_MIB,
+		TCPCC_HOSTED_DEFAULT_MEMORY_MIB);
 }
 
 static int tcpcc_error(const char *message)
 {
 	fprintf(stderr, "tcpcc: error: %s\n", message);
+	return -1;
+}
+
+static int tcpcc_memory_error(void)
+{
+	fprintf(stderr, "tcpcc: error: hosted memory must be at least %lu MiB\n",
+		TCPCC_HOSTED_MINIMUM_MEMORY_MIB);
 	return -1;
 }
 
@@ -265,11 +283,83 @@ static int tcpcc_default_kernel(char *buffer, size_t size, const char *argv0)
 	return 0;
 }
 
+static int tcpcc_append_route(struct tcpcc_cli_config *config,
+			      const struct tcpcc_endpoint *listen,
+			      const struct tcpcc_endpoint *backend)
+{
+	struct tcpcc_route_config *routes;
+
+	routes = realloc(config->routes,
+			 (config->route_count + 1) * sizeof(*config->routes));
+	if (!routes)
+		return tcpcc_error("allocating listener configuration failed");
+	config->routes = routes;
+	config->routes[config->route_count].listen = *listen;
+	config->routes[config->route_count].backend = *backend;
+	config->route_count++;
+	return 0;
+}
+
+static int tcpcc_validate_new_listen(const struct tcpcc_cli_config *config,
+				     const struct tcpcc_endpoint *listen)
+{
+	size_t index;
+
+	if (config->route_count &&
+	    config->routes[0].listen.version != listen->version)
+		return tcpcc_error("all public listeners in one tcpcc process must use the same address family");
+	for (index = 0; index < config->route_count; index++) {
+		/*
+		 * Every public rule DNATs to the one hosted TUN guest address while
+		 * preserving the TCP port. Two public listeners with the same port
+		 * would therefore collapse onto one hosted guest endpoint even when
+		 * their public destination addresses differ.
+		 */
+		if (config->routes[index].listen.port == listen->port)
+			return tcpcc_error("public listener ports must be unique within one tcpcc process");
+	}
+	return 0;
+}
+
+static int tcpcc_parse_forward(const char *text,
+			       struct tcpcc_cli_config *config)
+{
+	struct tcpcc_endpoint listen;
+	struct tcpcc_endpoint backend;
+	char *mapping;
+	char *separator;
+	int result;
+
+	mapping = strdup(text);
+	if (!mapping)
+		return tcpcc_error("allocating forward mapping failed");
+	separator = strchr(mapping, '=');
+	if (!separator || separator == mapping || !separator[1] ||
+	    strchr(separator + 1, '=')) {
+		free(mapping);
+		return tcpcc_error("--forward must use LISTEN=BACKEND syntax");
+	}
+	*separator = '\0';
+	if (tcpcc_parse_endpoint(mapping, &listen)) {
+		free(mapping);
+		return tcpcc_error("forward listener must use literal IPv4:port or [IPv6]:port syntax");
+	}
+	if (tcpcc_parse_endpoint(separator + 1, &backend) ||
+	    backend.version != 4 || strcmp(backend.address, "127.0.0.1")) {
+		free(mapping);
+		return tcpcc_error("forward backend must use 127.0.0.1:port");
+	}
+	result = tcpcc_validate_new_listen(config, &listen);
+	if (!result)
+		result = tcpcc_append_route(config, &listen, &backend);
+	free(mapping);
+	return result;
+}
+
 static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *config)
 {
 	static const struct option options[] = {
-		{ "listen", required_argument, NULL, 'l' },
-		{ "backend", required_argument, NULL, 'b' },
+		{ "forward", required_argument, NULL, 1005 },
 		{ "cc", required_argument, NULL, 'c' },
 		{ "kernel", required_argument, NULL, 'k' },
 		{ "memory-mib", required_argument, NULL, 'm' },
@@ -284,8 +374,6 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
-	const char *listen = NULL;
-	const char *backend = NULL;
 	const char *cc = NULL;
 	const char *host = NULL;
 	const char *guest = NULL;
@@ -302,15 +390,17 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 	if (tcpcc_default_kernel(config->kernel, sizeof(config->kernel), argv[0]))
 		return tcpcc_error("cannot resolve the default hosted kernel path");
 
-	while ((option = getopt_long(argc, argv, "l:b:c:k:m:f:i:t:h", options,
+	while ((option = getopt_long(argc, argv, "c:k:m:f:i:t:h", options,
 				     NULL)) != -1) {
 		unsigned long value;
 		char *end;
 		double seconds;
 
 		switch (option) {
-		case 'l': listen = optarg; break;
-		case 'b': backend = optarg; break;
+		case 1005:
+			if (tcpcc_parse_forward(optarg, config))
+				return -1;
+			break;
 		case 'c': cc = optarg; break;
 		case 'k':
 			if (snprintf(config->kernel, sizeof(config->kernel), "%s", optarg) >=
@@ -320,7 +410,7 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 		case 'm':
 			if (tcpcc_parse_unsigned(optarg, ~0UL, &value) ||
 			    value < TCPCC_HOSTED_MINIMUM_MEMORY_MIB)
-				return tcpcc_error("hosted memory must be at least 128 MiB");
+				return tcpcc_memory_error();
 			config->memory_mib = value;
 			break;
 		case 'f':
@@ -370,24 +460,21 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 		default: tcpcc_usage(stderr); return -1;
 		}
 	}
-	if (optind != argc || !listen || !backend || !cc)
-		return tcpcc_error("--listen, --backend, and --cc are required");
-	if (tcpcc_parse_endpoint(listen, &config->listen))
-		return tcpcc_error("listen must use literal IPv4:port or [IPv6]:port syntax");
-	if (tcpcc_parse_endpoint(backend, &config->backend) ||
-	    config->backend.version != 4 || strcmp(config->backend.address, "127.0.0.1"))
-		return tcpcc_error("backend must use 127.0.0.1:port");
+	if (optind != argc)
+		return tcpcc_error("unexpected positional argument");
+	if (!config->route_count || !cc)
+		return tcpcc_error("at least one --forward and --cc are required");
 	if (!tcpcc_valid_name(cc, 15, true))
 		return tcpcc_error("cc must contain 1-15 lowercase letters, digits, underscores, or hyphens");
 	strcpy(config->cc, cc);
 	if (explicit_iptables && config->firewall != TCPCC_FIREWALL_IPTABLES)
 		return tcpcc_error("--iptables-variant is valid only with --firewall-backend=iptables");
 	if (!host)
-		host = config->listen.version == 4 ? "198.18.0.1" : "fd00:198:18::1";
+		host = config->routes[0].listen.version == 4 ? "198.18.0.1" : "fd00:198:18::1";
 	if (!guest)
-		guest = config->listen.version == 4 ? "198.18.0.2" : "fd00:198:18::2";
-	if (tcpcc_parse_ip(host, config->listen.version, config->tun_host) ||
-	    tcpcc_parse_ip(guest, config->listen.version, config->tun_guest) ||
+		guest = config->routes[0].listen.version == 4 ? "198.18.0.2" : "fd00:198:18::2";
+	if (tcpcc_parse_ip(host, config->routes[0].listen.version, config->tun_host) ||
+	    tcpcc_parse_ip(guest, config->routes[0].listen.version, config->tun_guest) ||
 	    !strcmp(config->tun_host, config->tun_guest))
 		return tcpcc_error("TUN addresses must be distinct usable addresses matching the listener family");
 	return 0;
@@ -667,13 +754,13 @@ static int tcpcc_validate_kernel(const char *path)
 	return 0;
 }
 
-static int tcpcc_iptables_command(const struct tcpcc_cli_config *config,
+static int tcpcc_iptables_command(const struct tcpcc_cli_config *config, int version,
 				  char *command, size_t command_size)
 {
 	const char *selected = config->iptables_variant;
 	size_t length;
 
-	if (config->listen.version == 6) {
+	if (version == 6) {
 		if (!strcmp(config->iptables_variant, "iptables"))
 			selected = "ip6tables";
 		else if (!strcmp(config->iptables_variant, "iptables-nft"))
@@ -694,7 +781,8 @@ static int tcpcc_preflight(const struct tcpcc_cli_config *config)
 {
 	char value[4096];
 	char firewall_command[48];
-	const char *forwarding = config->listen.version == 4 ?
+	int version = config->routes[0].listen.version;
+	const char *forwarding = version == 4 ?
 		"/proc/sys/net/ipv4/ip_forward" :
 		"/proc/sys/net/ipv6/conf/all/forwarding";
 	struct stat tun;
@@ -705,7 +793,7 @@ static int tcpcc_preflight(const struct tcpcc_cli_config *config)
 	    access("/dev/net/tun", R_OK | W_OK))
 		return tcpcc_error("/dev/net/tun must be a readable and writable character device");
 	if (tcpcc_read_file(forwarding, value, sizeof(value)) || strcmp(value, "1"))
-		return tcpcc_error(config->listen.version == 4 ?
+		return tcpcc_error(version == 4 ?
 			"net.ipv4.ip_forward must be 1" :
 			"net.ipv6.conf.all.forwarding must be 1");
 	if (!tcpcc_executable_on_path("ip"))
@@ -721,7 +809,7 @@ static int tcpcc_preflight(const struct tcpcc_cli_config *config)
 		dlclose(api.library);
 	}
 	if (config->firewall == TCPCC_FIREWALL_IPTABLES) {
-		if (tcpcc_iptables_command(config, firewall_command,
+		if (tcpcc_iptables_command(config, version, firewall_command,
 					    sizeof(firewall_command)))
 			return tcpcc_error("invalid iptables executable selection");
 		if (!tcpcc_executable_on_path(firewall_command))
@@ -755,6 +843,7 @@ static int tcpcc_tun_open(struct tcpcc_cli_config *config)
 	char host_prefix[INET6_ADDRSTRLEN + 5];
 	char guest_prefix[INET6_ADDRSTRLEN + 5];
 	char generated[11];
+	int version = config->routes[0].listen.version;
 	int fd;
 	char *address[] = { "ip", "address", "add", host_prefix, "peer",
 		guest_prefix, "dev", config->tun_name, NULL };
@@ -778,11 +867,11 @@ static int tcpcc_tun_open(struct tcpcc_cli_config *config)
 		return tcpcc_errno("creating exclusive TUN interface");
 	}
 	snprintf(host_prefix, sizeof(host_prefix), "%s/%u", config->tun_host,
-		 config->listen.version == 4 ? 32U : 128U);
+		 version == 4 ? 32U : 128U);
 	snprintf(guest_prefix, sizeof(guest_prefix), "%s/%u", config->tun_guest,
-		 config->listen.version == 4 ? 32U : 128U);
+		 version == 4 ? 32U : 128U);
 	if (tcpcc_run(address, NULL, false) || tcpcc_run(link, NULL, false) ||
-	    (config->listen.version == 6 && tcpcc_run(route, NULL, false))) {
+	    (version == 6 && tcpcc_run(route, NULL, false))) {
 		close(fd);
 		return tcpcc_error("configuring point-to-point TUN interface failed");
 	}
@@ -955,6 +1044,7 @@ static int tcpcc_firewall_install_iptables(struct tcpcc_firewall *firewall)
 }
 
 static int tcpcc_firewall_install(const struct tcpcc_cli_config *config,
+				  const struct tcpcc_endpoint *listen,
 				  struct tcpcc_firewall *firewall)
 {
 	char ownership[1024 * 1024];
@@ -965,16 +1055,16 @@ static int tcpcc_firewall_install(const struct tcpcc_cli_config *config,
 	if (tcpcc_random_hex(random, 6))
 		return tcpcc_errno("generating firewall resource name");
 	firewall->kind = config->firewall;
-	firewall->version = config->listen.version;
-	firewall->port = config->listen.port;
-	strcpy(firewall->listen, config->listen.address);
+	firewall->version = listen->version;
+	firewall->port = listen->port;
+	strcpy(firewall->listen, listen->address);
 	strcpy(firewall->guest, config->tun_guest);
 	strcpy(firewall->tun_name, config->tun_name);
 	if (tcpcc_process_start_time(getpid(), &firewall->owner_start))
 		return tcpcc_error("cannot read the native supervisor process identity");
 	if (config->firewall == TCPCC_FIREWALL_IPTABLES) {
 		snprintf(firewall->resource, sizeof(firewall->resource), "TCPCC_%s", random);
-		if (tcpcc_iptables_command(config, firewall->command,
+		if (tcpcc_iptables_command(config, listen->version, firewall->command,
 					    sizeof(firewall->command)))
 			return tcpcc_error("invalid iptables executable selection");
 		{
@@ -991,7 +1081,7 @@ static int tcpcc_firewall_install(const struct tcpcc_cli_config *config,
 			return tcpcc_error("installing iptables DNAT policy failed");
 	} else {
 		snprintf(firewall->resource, sizeof(firewall->resource), "tcpcc_%s", random);
-		strcpy(family, config->listen.version == 4 ? "ip" : "ip6");
+		strcpy(family, listen->version == 4 ? "ip" : "ip6");
 		if (config->firewall == TCPCC_FIREWALL_NFT_LIB) {
 			char command[32];
 
@@ -1084,16 +1174,15 @@ static int tcpcc_runtime_start(const struct tcpcc_cli_config *config, int tun_fd
 	struct tcpcc_control_error error;
 	struct tcpcc_control_hello hello;
 	struct tcpcc_control_l3_config l3 = { };
-	struct tcpcc_control_ip_endpoint endpoint = { };
-	struct tcpcc_control_service_config service = {
-		.backend_ipv4 = 0x7f000001U,
-		.backend_port = config->backend.port,
-		.max_connections = config->max_connections,
-		.accept_batch = TCPCC_DEFAULT_ACCEPT_BATCH,
-	};
-	int listener;
+	uint32_t required_features = TCPCC_CONTROL_FEATURE_HOSTED_SERVICE |
+		TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS |
+		TCPCC_CONTROL_FEATURE_IP_ENDPOINTS;
+	int version = config->routes[0].listen.version;
+	size_t index;
 	int result;
 
+	if (config->route_count > 1)
+		required_features |= TCPCC_CONTROL_FEATURE_MULTI_LISTENER;
 	if (tcpcc_hosted_process_start(process, config->kernel, config->memory_mib,
 				       tun_fd, &error)) {
 		fprintf(stderr, "tcpcc: error: %s\n", error.message);
@@ -1108,55 +1197,68 @@ static int tcpcc_runtime_start(const struct tcpcc_cli_config *config, int tun_fd
 		return tcpcc_error("hosted HELLO payload is invalid");
 	memcpy(&hello, response.data, sizeof(hello));
 	if (hello.control_version != TCPCC_CONTROL_VERSION ||
-	    (hello.feature_bits & (TCPCC_CONTROL_FEATURE_HOSTED_SERVICE |
-		TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS | TCPCC_CONTROL_FEATURE_IP_ENDPOINTS)) !=
-	    (TCPCC_CONTROL_FEATURE_HOSTED_SERVICE |
-		TCPCC_CONTROL_FEATURE_DYNAMIC_FLOWS | TCPCC_CONTROL_FEATURE_IP_ENDPOINTS) ||
+	    (hello.feature_bits & required_features) != required_features ||
 	    config->max_connections > hello.session_limit)
 		return tcpcc_error("hosted kernel lacks the required native-service ABI or capacity");
-	l3.address.version = (uint8_t)config->listen.version;
+	l3.address.version = (uint8_t)version;
 	/* The hosted endpoint lives at the TUN guest address, not the public address. */
-	if (inet_pton(config->listen.version == 4 ? AF_INET : AF_INET6,
+	if (inet_pton(version == 4 ? AF_INET : AF_INET6,
 		      config->tun_guest, l3.address.bytes) != 1)
 		return tcpcc_error("encoding hosted TUN address failed");
-	l3.prefix_len = config->listen.version == 4 ? 32 : 128;
+	l3.prefix_len = version == 4 ? 32 : 128;
 	result = tcpcc_control_call(client, TCPCC_CONTROL_L3_ATTACH_IP,
 				    TCPCC_HOSTED_TUN_FD, 0, &l3, sizeof(l3), &response);
 	if (result || response.handle <= 0)
 		return tcpcc_error("hosted L3 attach failed");
 	*ifindex = response.handle;
-	result = tcpcc_control_call(client, TCPCC_CONTROL_SOCKET_IP, 0,
-				    config->listen.version, NULL, 0, &response);
-	if (result || response.handle <= 0)
-		return tcpcc_error("hosted listener socket creation failed");
-	listener = response.handle;
-	result = tcpcc_control_call(client, TCPCC_CONTROL_SET_CC, listener, 0,
-				    config->cc, (uint32_t)strlen(config->cc), &response);
-	if (result)
-		return -1;
-	result = tcpcc_control_call(client, TCPCC_CONTROL_GET_CC, listener, 0, NULL, 0,
-				    &response);
-	if (result || response.length != (uint32_t)strlen(config->cc) ||
-	    memcmp(response.data, config->cc, response.length))
-		return tcpcc_error("hosted listener congestion-control verification failed");
-	endpoint.address.version = (uint8_t)config->listen.version;
-	if (inet_pton(config->listen.version == 4 ? AF_INET : AF_INET6,
-		      config->tun_guest, endpoint.address.bytes) != 1)
-		return tcpcc_error("encoding hosted listener address failed");
-	endpoint.port = config->listen.port;
-	result = tcpcc_control_call(client, TCPCC_CONTROL_BIND_IP, listener, 0,
-				    &endpoint, sizeof(endpoint), &response);
-	if (result)
-		return -1;
-	result = tcpcc_control_call(client, TCPCC_CONTROL_LISTEN, listener,
-				    config->backlog, NULL, 0, &response);
-	if (result)
-		return -1;
-	result = tcpcc_control_call(client, TCPCC_CONTROL_SERVICE_START, listener, 0,
-				    &service, sizeof(service), &response);
-	if (result || response.handle <= 0)
-		return tcpcc_error("hosted event-driven service start failed");
-	*service_handle = response.handle;
+
+	for (index = 0; index < config->route_count; index++) {
+		const struct tcpcc_route_config *route = &config->routes[index];
+		struct tcpcc_control_ip_endpoint endpoint = { };
+		struct tcpcc_control_service_config service = {
+			.backend_ipv4 = 0x7f000001U,
+			.backend_port = route->backend.port,
+			.max_connections = config->max_connections,
+			.accept_batch = TCPCC_DEFAULT_ACCEPT_BATCH,
+		};
+		int listener;
+
+		result = tcpcc_control_call(client, TCPCC_CONTROL_SOCKET_IP, 0,
+					    route->listen.version, NULL, 0, &response);
+		if (result || response.handle <= 0)
+			return tcpcc_error("hosted listener socket creation failed");
+		listener = response.handle;
+		result = tcpcc_control_call(client, TCPCC_CONTROL_SET_CC, listener, 0,
+					    config->cc, (uint32_t)strlen(config->cc), &response);
+		if (result)
+			return -1;
+		result = tcpcc_control_call(client, TCPCC_CONTROL_GET_CC, listener, 0,
+					    NULL, 0, &response);
+		if (result || response.length != (uint32_t)strlen(config->cc) ||
+		    memcmp(response.data, config->cc, response.length))
+			return tcpcc_error("hosted listener congestion-control verification failed");
+		endpoint.address.version = (uint8_t)route->listen.version;
+		if (inet_pton(route->listen.version == 4 ? AF_INET : AF_INET6,
+			      config->tun_guest, endpoint.address.bytes) != 1)
+			return tcpcc_error("encoding hosted listener address failed");
+		endpoint.port = route->listen.port;
+		result = tcpcc_control_call(client, TCPCC_CONTROL_BIND_IP, listener, 0,
+					    &endpoint, sizeof(endpoint), &response);
+		if (result)
+			return -1;
+		result = tcpcc_control_call(client, TCPCC_CONTROL_LISTEN, listener,
+					    config->backlog, NULL, 0, &response);
+		if (result)
+			return -1;
+		result = tcpcc_control_call(client, TCPCC_CONTROL_SERVICE_START,
+					    listener, 0, &service, sizeof(service), &response);
+		if (result || response.handle <= 0)
+			return tcpcc_error("hosted event-driven service start failed");
+		if (!index)
+			*service_handle = response.handle;
+		else if (response.handle != *service_handle)
+			return tcpcc_error("hosted multi-listener service returned inconsistent aggregate handles");
+	}
 	return 0;
 }
 
@@ -1176,22 +1278,35 @@ static int tcpcc_service_stats(struct tcpcc_control_client *client, int handle,
 }
 
 static void tcpcc_emit_ready(const struct tcpcc_cli_config *config,
-			     const struct tcpcc_firewall *firewall, int ifindex,
+			     const struct tcpcc_firewall *firewalls, int ifindex,
 			     pid_t pid)
 {
+	const struct tcpcc_route_config *first = &config->routes[0];
+	size_t index;
+
 	printf("{\"backend\":\"%s:%u\",\"cc\":\"%s\",\"event\":\"ready\","
 	       "\"firewall_backend\":\"%s\",\"firewall_resource\":\"%s\","
 	       "\"hosted_address\":\"%s\",\"hosted_ifindex\":%d,"
 	       "\"hosted_memory_mib\":%lu,\"hosted_pid\":%ld,\"listen\":\"%s%s%s:%u\","
-	       "\"max_connections\":%u,\"schema\":\"%s\","
-	       "\"shutdown_grace_period\":%.3f,\"tun\":\"%s\"}\n",
-	       config->backend.address, config->backend.port, config->cc,
-	       config->firewall_name, firewall->resource, config->tun_guest, ifindex,
+	       "\"listener_count\":%zu,\"max_connections\":%u,\"routes\":[",
+	       first->backend.address, first->backend.port, config->cc,
+	       config->firewall_name, firewalls[0].resource, config->tun_guest, ifindex,
 	       config->memory_mib, (long)pid,
-	       config->listen.version == 6 ? "[" : "", config->listen.address,
-	       config->listen.version == 6 ? "]" : "", config->listen.port,
-	       config->max_connections, TCPCC_EVENT_SCHEMA,
-	       (double)config->grace_ms / 1000.0, config->tun_name);
+	       first->listen.version == 6 ? "[" : "", first->listen.address,
+	       first->listen.version == 6 ? "]" : "", first->listen.port,
+	       config->route_count, config->max_connections);
+	for (index = 0; index < config->route_count; index++) {
+		const struct tcpcc_route_config *route = &config->routes[index];
+
+		printf("%s{\"backend\":\"%s:%u\",\"firewall_resource\":\"%s\","
+		       "\"listen\":\"%s%s%s:%u\"}",
+		       index ? "," : "", route->backend.address, route->backend.port,
+		       firewalls[index].resource,
+		       route->listen.version == 6 ? "[" : "", route->listen.address,
+		       route->listen.version == 6 ? "]" : "", route->listen.port);
+	}
+	printf("],\"schema\":\"%s\",\"shutdown_grace_period\":%.3f,\"tun\":\"%s\"}\n",
+	       TCPCC_EVENT_SCHEMA, (double)config->grace_ms / 1000.0, config->tun_name);
 	fflush(stdout);
 }
 
@@ -1304,7 +1419,7 @@ static int tcpcc_shutdown_runtime(const struct tcpcc_cli_config *config,
 int main(int argc, char **argv)
 {
 	struct tcpcc_cli_config config;
-	struct tcpcc_firewall firewall = { };
+	struct tcpcc_firewall *firewalls = NULL;
 	struct tcpcc_hosted_process process = {
 		.pid = -1, .pid_fd = -1, .request_fd = -1, .response_fd = -1,
 	};
@@ -1319,15 +1434,26 @@ int main(int argc, char **argv)
 	int wait_status = 0;
 	int result = 1;
 	bool runtime_stopped = false;
+	size_t index;
 
-	if (tcpcc_parse_args(argc, argv, &config) || tcpcc_preflight(&config))
+	if (tcpcc_parse_args(argc, argv, &config))
 		return 1;
+	if (tcpcc_preflight(&config)) {
+		free(config.routes);
+		return 1;
+	}
+	firewalls = calloc(config.route_count, sizeof(*firewalls));
+	if (!firewalls) {
+		tcpcc_error("allocating firewall ownership state failed");
+		free(config.routes);
+		return 1;
+	}
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGINT);
 	sigaddset(&mask, SIGTERM);
 	if (sigprocmask(SIG_BLOCK, &mask, NULL)) {
 		tcpcc_errno("blocking shutdown signals");
-		return 1;
+		goto cleanup;
 	}
 	signal_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
 	if (signal_fd < 0) {
@@ -1337,14 +1463,18 @@ int main(int argc, char **argv)
 	tun_fd = tcpcc_tun_open(&config);
 	if (tun_fd < 0)
 		goto cleanup;
-	if (tcpcc_firewall_install(&config, &firewall))
-		goto cleanup;
+	for (index = 0; index < config.route_count; index++) {
+		if (tcpcc_firewall_install(&config, &config.routes[index].listen,
+					   &firewalls[index]))
+			goto cleanup;
+	}
 	if (tcpcc_runtime_start(&config, tun_fd, &process, &client, &ifindex,
 				&service_handle))
 		goto cleanup;
-	tcpcc_emit_ready(&config, &firewall, ifindex, process.pid);
-	fprintf(stderr, "tcpcc: ready on %s:%u with %s; native service via %s\n",
-		config.listen.address, config.listen.port, config.cc, config.tun_name);
+	tcpcc_emit_ready(&config, firewalls, ifindex, process.pid);
+	fprintf(stderr, "tcpcc: ready with %zu listener%s using %s; native service via %s\n",
+		config.route_count, config.route_count == 1 ? "" : "s", config.cc,
+		config.tun_name);
 	if (tcpcc_wait_signal_or_child(&process, signal_fd, &requested_signal))
 		goto cleanup;
 	if (tcpcc_shutdown_runtime(&config, &process, &client, service_handle,
@@ -1370,8 +1500,10 @@ cleanup:
 		tcpcc_hosted_process_close_channels(&process);
 		tcpcc_hosted_process_wait(&process, NULL, NULL);
 	}
-	if (tcpcc_firewall_close(&firewall))
-		result = 1;
+	for (index = config.route_count; index > 0; index--) {
+		if (tcpcc_firewall_close(&firewalls[index - 1]))
+			result = 1;
+	}
 	if (tun_fd >= 0)
 		close(tun_fd);
 	if (signal_fd >= 0)
@@ -1383,5 +1515,7 @@ cleanup:
 		fflush(stdout);
 		fprintf(stderr, "tcpcc: stopped cleanly\n");
 	}
+	free(firewalls);
+	free(config.routes);
 	return result;
 }

@@ -224,8 +224,7 @@ def integration(args: argparse.Namespace) -> int:
                 ns(
                     router,
                     str(ROOT / "tcpcc"),
-                    "--listen", f"[{PUBLIC_ADDRESS}]:{PUBLIC_PORT}",
-                    "--backend", f"127.0.0.1:{BACKEND_PORT}",
+                    "--forward", f"[{PUBLIC_ADDRESS}]:{PUBLIC_PORT}=127.0.0.1:{BACKEND_PORT}",
                     "--cc", "bbr",
                     "--kernel", str(kernel),
                     "--firewall-backend", "nft-lib",

@@ -42,10 +42,25 @@ The stable operator-facing shape is:
 
 ```bash
 sudo tcpcc \
-  --listen 203.0.113.10:443 \
-  --backend 127.0.0.1:443 \
+  --forward 203.0.113.10:443=127.0.0.1:443 \
   --cc bbr
 ```
+
+One tcpcc process may own multiple fixed public forwards by repeating the
+atomic `--forward LISTEN=BACKEND` option:
+
+```bash
+sudo tcpcc \
+  --forward 203.0.113.10:443=127.0.0.1:8443 \
+  --forward 203.0.113.10:8443=127.0.0.1:9443 \
+  --cc bbr
+```
+
+Each `--forward` is one complete public-listener/backend mapping, so pairing does
+not depend on option ordering. Routes in one process currently share one TUN/L3
+endpoint and therefore must use one public address family and distinct public
+TCP ports. The loopback backend remains IPv4 `127.0.0.1:<port>`. `--forward` is the sole operator-facing mapping syntax; separate
+`--listen` and `--backend` options are not supported.
 
 The public connection and the backend connection are deliberately different
 TCP legs. `--cc` belongs to the hosted public listener. The outer host's default
@@ -121,10 +136,12 @@ four-way native/TCPCC CUBIC/BBR transoceanic experiment is documented in
 [`docs/m8-high-bdp-iperf.md`](docs/m8-high-bdp-iperf.md).
 
 M9 migrated the installed runtime from Python to a native C supervisor and a
-single-owner, event-driven hosted bridge, then removed the fixed connection
-admission model. The process boundary, dynamic-flow model, capacity work, and
-CI gates are described in
-[`docs/m9-native-event-runtime.md`](docs/m9-native-event-runtime.md).
+single-owner, event-driven hosted bridge, removed the fixed connection admission
+model, and extended one aggregate hosted service plus the native CLI to own
+multiple fixed listener/backend routes. The process boundary, dynamic-flow
+model, capacity work, multi-listener service/CLI contract, and CI gates are
+described in [`docs/m9-native-event-runtime.md`](docs/m9-native-event-runtime.md)
+and [`docs/m9-multi-listener-service.md`](docs/m9-multi-listener-service.md).
 
 M10 made hosted memory demand-backed and reclaimable, added full memory
 lifecycle/stability evidence, and concluded that true online guest-memory
@@ -164,7 +181,7 @@ IPv4 listeners require `net.ipv4.ip_forward=1`; IPv6 listeners require
 `net.ipv6.conf.all.forwarding=1`. Only the forwarding switch for the selected
 public address family is required. The outer host's default and available TCP
 congestion-control algorithms are deliberately **not** prerequisites: `--cc`
-is applied to the public listener inside the hosted Linux stack and read back
+is applied to every public listener inside the hosted Linux stack and read back
 there before the listener is exposed. An outer host using CUBIC, or one that
 does not provide BBR at all, can therefore front a hosted BBR endpoint.
 
@@ -177,13 +194,16 @@ IPv6 literals use brackets, as in:
 
 ```bash
 sudo tcpcc \
-  --listen '[2001:db8::10]:443' \
-  --backend 127.0.0.1:443 \
+  --forward '[2001:db8::10]:443=127.0.0.1:443' \
   --cc bbr
 ```
 
 The public endpoint and TUN are IPv4 or IPv6 together; the local application
-bridge deliberately remains an ordinary IPv4 loopback connection.
+bridge deliberately remains an ordinary IPv4 loopback connection. When multiple
+routes are configured in one process, all public listeners must use that same
+family. Their public TCP ports must be distinct because DNAT maps every route to
+the same hosted TUN guest address while preserving the port; duplicate ports
+would collapse onto one hosted endpoint and could not select distinct backends.
 
 The CLI applies no connection admission limit by default and uses a five-second
 graceful-shutdown window. Hosted RAM defaults to a 128-MiB guest-capacity arena,
@@ -193,8 +213,7 @@ or opt into a policy limit explicitly:
 
 ```bash
 sudo tcpcc \
-  --listen 203.0.113.10:443 \
-  --backend 127.0.0.1:443 \
+  --forward 203.0.113.10:443=127.0.0.1:443 \
   --cc bbr \
   --memory-mib 64 \
   --max-connections 16384 \
@@ -203,10 +222,11 @@ sudo tcpcc \
 
 `--max-connections 0` (the default) disables the admission-policy limit; a
 positive value opts into a proxy-style `maxconn` limit up to the current
-1048575 handle-encoding boundary. The dynamic bridge allocates 16-KiB direction
-buffers only while data is ready and shares a 256-KiB aggregate payload-buffer
-budget. Capacity CI, rather than the default configuration, measures the
-practical limit in explicit stages.
+1048575 handle-encoding boundary. With multiple listeners this is one aggregate
+service-wide limit, not a per-listener limit. The dynamic bridge allocates
+16-KiB direction buffers only while data is ready and shares a 256-KiB aggregate
+payload-buffer budget. Capacity CI, rather than the default configuration,
+measures the practical limit in explicit stages.
 
 `--memory-mib` defaults to 128 MiB, accepts an opt-in minimum of 32 MiB, and has
 no project-defined upper bound. It remains the startup guest buddy-allocator
@@ -227,8 +247,7 @@ ceiling explicitly, for example:
 
 ```bash
 sudo tcpcc \
-  --listen 203.0.113.10:443 \
-  --backend 127.0.0.1:443 \
+  --forward 203.0.113.10:443=127.0.0.1:443 \
   --cc bbr \
   --memory-mib 128 \
   --tcp-wmem-max-kib 3072
@@ -246,16 +265,19 @@ selected by `--cc`; the ordinary loopback connection to the application is a
 separate stream bridge. `nft-lib` is the default packet-steering implementation.
 `nft-exec` and the `iptables-nft`/`iptables-legacy` compatibility paths are
 selected explicitly with `--firewall-backend` and `--iptables-variant`; an
-error never triggers a silent fallback.
+error never triggers a silent fallback. Each configured public route owns a
+separate exact firewall resource under the same supervisor lifecycle.
 
 Readiness and shutdown are emitted as newline-delimited `tcpcc.runtime.v1` JSON
 on stdout. The native runtime emits aggregate lifecycle events rather than a
-per-flow event stream. On SIGINT or SIGTERM tcpcc closes the hosted listener,
-lets active streams finish for the configured grace period, cancels only the
-remainder, stops the hosted kernel, removes its exact DNAT resource, and finally
-closes the nonpersistent TUN. Signal handling, SIGPIPE behavior, child death,
-and hosted boot readiness are specified in
-[`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md).
+per-flow event stream. The `ready` event keeps the legacy first-route fields and,
+for route-aware consumers, includes `listener_count` plus the complete `routes`
+listen/backend/firewall-resource map. On SIGINT or SIGTERM tcpcc closes every
+hosted listener, lets active streams finish for the configured grace period,
+cancels only the remainder, stops the hosted kernel, removes all owned exact
+DNAT resources in reverse order, and finally closes the nonpersistent TUN.
+Signal handling, SIGPIPE behavior, child death, and hosted boot readiness are
+specified in [`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md).
 
 ## Fetch the pinned Linux source
 
