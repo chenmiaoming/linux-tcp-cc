@@ -982,15 +982,21 @@ static int tcpcc_firewall_inspect_ownership(const struct tcpcc_cli_config *confi
 	if (!ownership)
 		return tcpcc_error("allocating firewall ownership inspection buffer failed");
 	if (config->firewall == TCPCC_FIREWALL_IPTABLES) {
-		char save_command[48];
+		char save_command[64];
 		char *save[] = { save_command, "-t", "nat", NULL };
+		int length;
 
 		if (tcpcc_iptables_command(config, version, firewall_command,
 					    sizeof(firewall_command))) {
 			tcpcc_error("invalid iptables executable selection");
 			goto out;
 		}
-		snprintf(save_command, sizeof(save_command), "%s-save", firewall_command);
+		length = snprintf(save_command, sizeof(save_command), "%s-save",
+				  firewall_command);
+		if (length < 0 || length >= (int)sizeof(save_command)) {
+			tcpcc_error("selected iptables-save executable name is too long");
+			goto out;
+		}
 		if (tcpcc_capture(save, ownership, 1024U * 1024U)) {
 			tcpcc_error("iptables ownership inspection failed");
 			goto out;
@@ -1192,14 +1198,14 @@ static int tcpcc_firewall_close(struct tcpcc_firewall *firewall)
 		char *remove[] = { firewall->command, "--wait", "-t", "nat", "-X",
 			firewall->resource, NULL };
 
-		snprintf(port, sizeof(port), "%u", firewall->port);
-		snprintf(prefix, sizeof(prefix), "%s/%u", firewall->listen,
-			 firewall->version == 4 ? 32U : 128U);
-		snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=%llu tun=%s",
-			 (long)getpid(), firewall->owner_start, firewall->tun_name);
-		if (tcpcc_run(jump, NULL, true)) result = -1;
-		if (tcpcc_run(flush, NULL, true)) result = -1;
-		if (tcpcc_run(remove, NULL, true)) result = -1;
+	snprintf(port, sizeof(port), "%u", firewall->port);
+	snprintf(prefix, sizeof(prefix), "%s/%u", firewall->listen,
+		 firewall->version == 4 ? 32U : 128U);
+	snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=%llu tun=%s",
+		 (long)getpid(), firewall->owner_start, firewall->tun_name);
+	if (tcpcc_run(jump, NULL, true)) result = -1;
+	if (tcpcc_run(flush, NULL, true)) result = -1;
+	if (tcpcc_run(remove, NULL, true)) result = -1;
 	}
 	firewall->installed = false;
 	return result;
