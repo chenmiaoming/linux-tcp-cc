@@ -1254,10 +1254,8 @@ def start_tcpcc_case(
             ns_command(
                 names["server_ns"],
                 str(ROOT / "tcpcc"),
-                "--listen",
-                f"{SERVER_ADDRESS}:{public_port}",
-                "--backend",
-                f"127.0.0.1:{TCPCC_BACKEND_PORT}",
+                "--forward",
+                f"{SERVER_ADDRESS}:{public_port}=127.0.0.1:{TCPCC_BACKEND_PORT}",
                 "--cc",
                 cc_name,
                 "--kernel",
