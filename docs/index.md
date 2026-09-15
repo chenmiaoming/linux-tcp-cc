@@ -75,8 +75,9 @@ current footprint, and the evidence threshold for any further memory work.
 Public server-ingress design, TUN/DNAT lifecycle, firewall ownership,
 transactional cleanup, host preflight, and the original path from a hosted TCP
 listener to a local backend. M9 later replaced the per-flow runtime/control
-model; use `ARCHITECTURE.md` and the M9 document for the current runtime event
-model.
+model and the installed native CLI now uses atomic `--forward LISTEN=BACKEND`
+mappings instead of M8's historical separate `--listen` / `--backend` options;
+use `ARCHITECTURE.md` and the M9 documents for the current contract.
 
 ### `docs/m8-high-bdp-iperf.md`
 
