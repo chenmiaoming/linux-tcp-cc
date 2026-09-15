@@ -99,7 +99,13 @@ native-check: $(NATIVE_BUILD_DIR)/test-control \
 	$(NATIVE_BUILD_DIR)/test-sigpipe $(NATIVE_CLI)
 	$(NATIVE_CLI) --help >$(NATIVE_BUILD_DIR)/help.out
 	grep -F -- '--forward LISTEN=BACKEND' $(NATIVE_BUILD_DIR)/help.out
+	grep -F -- '--check' $(NATIVE_BUILD_DIR)/help.out
 	! grep -E -- '--listen|--backend' $(NATIVE_BUILD_DIR)/help.out
+	! $(NATIVE_CLI) --check \
+		--forward 203.0.113.10:443=192.0.2.1:8443 --cc bbr \
+		2>$(NATIVE_BUILD_DIR)/check-parser.err
+	grep -F 'forward backend must use 127.0.0.1:port' \
+		$(NATIVE_BUILD_DIR)/check-parser.err
 	! $(NATIVE_CLI) --forward 203.0.113.10:443=127.0.0.1:8443 \
 		--forward 203.0.113.11:443=127.0.0.1:9443 --cc bbr \
 		2>$(NATIVE_BUILD_DIR)/duplicate-port.err
