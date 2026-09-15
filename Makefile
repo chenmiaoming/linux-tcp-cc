@@ -11,6 +11,7 @@ NATIVE_CPPFLAGS := -Ilinux-overlay/arch/tcpcc/include
 NATIVE_CFLAGS := -O2 -Wall -Wextra -Werror -std=gnu11
 NATIVE_LIBRARY := $(NATIVE_BUILD_DIR)/libtcpcc-native.a
 NATIVE_CLI := $(NATIVE_BUILD_DIR)/tcpcc
+TOML_C_HEADER := native/third_party/toml-c/header/toml-c.h
 NATIVE_OBJECTS := \
 	$(NATIVE_BUILD_DIR)/tcpcc_control.o \
 	$(NATIVE_BUILD_DIR)/tcpcc_event.o \
@@ -29,6 +30,10 @@ install: $(NATIVE_CLI)
 
 $(NATIVE_BUILD_DIR):
 	mkdir -p $@
+
+$(TOML_C_HEADER): .gitmodules
+	git submodule update --init --depth 1 native/third_party/toml-c
+	test -f "$@"
 
 $(NATIVE_BUILD_DIR)/tcpcc_control.o: native/tcpcc_control.c \
 		native/tcpcc_control.h \
@@ -53,7 +58,7 @@ $(NATIVE_BUILD_DIR)/tcpcc_entry.o: native/tcpcc_entry.c \
 		-c -o $@ native/tcpcc_entry.c
 
 $(NATIVE_BUILD_DIR)/tcpcc_config.o: native/tcpcc_config.c \
-		native/tcpcc_config.h native/third_party/toml-c/header/toml-c.h | $(NATIVE_BUILD_DIR)
+		native/tcpcc_config.h $(TOML_C_HEADER) | $(NATIVE_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-c -o $@ native/tcpcc_config.c
 
