@@ -47,7 +47,9 @@ jobs:
           python3 -m py_compile tools/tcpcc_cli.py
           python3 -m py_compile tools/tcpcc_control.py
 
-      - name: Exercise stable CLI and hosted runtime fault boundaries
+      # Historical Python lifecycle/control model. The installed native CLI
+      # contract is covered by native-check and the privileged ingress suites.
+      - name: Exercise legacy Python supervisor/control fault model
         run: python3 scripts/test-tcpcc-cli.py
 
       - name: Exercise deterministic host preflight
