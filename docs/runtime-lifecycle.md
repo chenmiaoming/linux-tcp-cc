@@ -10,7 +10,10 @@ shut down.
 
 The installed `tcpcc` command is the native C supervisor. It owns host-side
 lifecycle and resource rollback; the hosted `ARCH=tcpcc` Linux image owns the
-public TCP listener, packet processing, congestion control, and stream bridge.
+public TCP listeners, packet processing, congestion control, and stream bridge.
+One supervisor may configure one or more fixed listener/backend routes, but they
+share one hosted process, one TUN/L3 attachment, and one aggregate hosted
+service lifecycle.
 
 The supervisor starts the hosted image with `fork()`/`execv()`. Before `execv()`
 the child:
@@ -53,17 +56,17 @@ epoll wakeup
 record requested signal
         |
         v
-SERVICE_DRAIN
+aggregate SERVICE_DRAIN
         |
         | wait up to --shutdown-grace-period
         v
-SERVICE_STOP
+aggregate SERVICE_STOP
         |
         v
 wait for hosted kernel exit
         |
         v
-remove exact firewall resource
+remove all exact per-route firewall resources (reverse order)
         |
         v
 close nonpersistent TUN
@@ -71,7 +74,7 @@ close nonpersistent TUN
 
 The default drain grace period is five seconds. A drain timeout is reported but
 does not abandon cleanup: the supervisor proceeds to `SERVICE_STOP` and tears
-down the owned resources.
+down every owned route resource plus the TUN.
 
 A clean signal-driven shutdown currently exits with status 0 and records the
 received signal in the final `tcpcc.runtime.v1` `stopped` event. This is the
@@ -88,7 +91,7 @@ runtime startup.
 
 This is required for transactional teardown. Runtime/status output is commonly
 piped through `tee`, `logger`, or another consumer. If that consumer disappears,
-a shutdown log write must not terminate the supervisor before it removes the
+a shutdown log write must not terminate the supervisor before it removes all
 owned firewall state and closes the TUN queue. With `SIGPIPE` ignored, failed
 writes report `EPIPE` and the cleanup path can continue.
 
@@ -100,15 +103,22 @@ a process-boundary change and regression-tested rather than altered implicitly.
 
 ## Failure cleanup
 
-The normal shutdown path asks the hosted service to drain and stop cleanly. If
-that path fails while the hosted process is still alive, supervisor cleanup is
-more aggressive:
+The normal shutdown path asks the aggregate hosted service to drain and stop
+cleanly. If that path fails while the hosted process is still alive, supervisor
+cleanup is more aggressive:
 
 1. attempt `SERVICE_STOP` when a service handle exists;
 2. send `SIGKILL` to the hosted process;
 3. close control channels and reap the child;
-4. remove the exact instance-owned firewall resource; and
+4. remove every exact instance-owned per-route firewall resource in reverse
+   acquisition order; and
 5. close the TUN fd, deleting the exclusive nonpersistent interface.
+
+The same rollback rule applies to partial startup. If route N fails after earlier
+routes already acquired firewall state or transferred listeners to the aggregate
+service, supervisor cleanup stops the aggregate service when possible, kills and
+reaps the hosted child if necessary, then walks acquired firewall ownership in
+reverse order before closing the TUN.
 
 `SIGKILL` delivered to the supervisor itself cannot run userspace cleanup. The
 firewall ownership markers therefore exist so the next startup can detect and

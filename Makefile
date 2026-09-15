@@ -97,6 +97,29 @@ native-check: $(NATIVE_BUILD_DIR)/test-control \
 	$(NATIVE_BUILD_DIR)/test-process $(NATIVE_BUILD_DIR)/test-hosted-child
 	$(NATIVE_BUILD_DIR)/test-event
 	$(NATIVE_BUILD_DIR)/test-sigpipe $(NATIVE_CLI)
+	$(NATIVE_CLI) --help >$(NATIVE_BUILD_DIR)/help.out
+	grep -F -- '--forward LISTEN=BACKEND' $(NATIVE_BUILD_DIR)/help.out
+	! grep -E -- '--listen|--backend' $(NATIVE_BUILD_DIR)/help.out
+	! $(NATIVE_CLI) --forward 203.0.113.10:443=127.0.0.1:8443 \
+		--forward 203.0.113.11:443=127.0.0.1:9443 --cc bbr \
+		2>$(NATIVE_BUILD_DIR)/duplicate-port.err
+	grep -F 'public listener ports must be unique within one tcpcc process' \
+		$(NATIVE_BUILD_DIR)/duplicate-port.err
+	! $(NATIVE_CLI) --forward 203.0.113.10:443=127.0.0.1:8443 \
+		--forward '[2001:db8::10]:444=127.0.0.1:9443' --cc bbr \
+		2>$(NATIVE_BUILD_DIR)/mixed-family.err
+	grep -F 'all public listeners in one tcpcc process must use the same address family' \
+		$(NATIVE_BUILD_DIR)/mixed-family.err
+	! $(NATIVE_CLI) --forward 203.0.113.10:443 \
+		--cc bbr 2>$(NATIVE_BUILD_DIR)/malformed-forward.err
+	grep -F -- '--forward must use LISTEN=BACKEND syntax' \
+		$(NATIVE_BUILD_DIR)/malformed-forward.err
+	! $(NATIVE_CLI) --listen 203.0.113.10:443 --cc bbr \
+		2>$(NATIVE_BUILD_DIR)/removed-listen.err
+	grep -F -- '--forward LISTEN=BACKEND' $(NATIVE_BUILD_DIR)/removed-listen.err
+	! $(NATIVE_CLI) --backend 127.0.0.1:8443 --cc bbr \
+		2>$(NATIVE_BUILD_DIR)/removed-backend.err
+	grep -F -- '--forward LISTEN=BACKEND' $(NATIVE_BUILD_DIR)/removed-backend.err
 
 release-package: $(NATIVE_CLI)
 	VMLINUX="$(VMLINUX)" scripts/package-release.sh

@@ -28,6 +28,7 @@ on:
       - 'scripts/run-tcpcc-capacity-discovery.py'
       - 'scripts/test-tcpcc-cli.py'
       - 'scripts/test-tcpcc-cli-integration.py'
+      - 'scripts/test-tcpcc-native-multi-listener-integration.py'
       - 'scripts/test-tcpcc-ipv6-integration.py'
       - 'scripts/collect-m7-hosted-report.py'
       - 'tools/tcpcc_cli.py'
@@ -82,6 +83,7 @@ jobs:
           python3 -m py_compile scripts/run-tcpcc-capacity-discovery.py
           python3 -m py_compile scripts/test-tcpcc-cli.py
           python3 -m py_compile scripts/test-tcpcc-cli-integration.py
+          python3 -m py_compile scripts/test-tcpcc-native-multi-listener-integration.py
           python3 -m py_compile scripts/test-tcpcc-ipv6-integration.py
           python3 -m py_compile scripts/collect-m7-hosted-report.py
           python3 -m py_compile tools/tcpcc_cli.py
@@ -90,7 +92,9 @@ jobs:
           python3 -m json.tool benchmarks/m7/scenarios-v1.json >/dev/null
           bash scripts/test-release-trigger.sh
 
-      - name: Exercise stable CLI and hosted runtime fault boundaries
+      # Historical Python lifecycle/control model. The installed native CLI
+      # contract is covered by native-check and the privileged ingress suites.
+      - name: Exercise legacy Python supervisor/control fault model
         run: python3 scripts/test-tcpcc-cli.py
 
       - name: Execute hosted M6.1 native BBR/default-fq regression
@@ -254,12 +258,23 @@ jobs:
             --kernel .build/tcpcc-bootstrap-out/vmlinux \
             --output-dir '.build/m85-cli-${{ matrix.name }}'
 
+      - name: Prove one native supervisor owns two fixed listener routes
+        run: |
+          sudo -n python3 scripts/test-tcpcc-native-multi-listener-integration.py \
+            --integration \
+            --firewall-backend '${{ matrix.backend }}' \
+            --iptables-variant '${{ matrix.iptables_variant }}' \
+            --kernel .build/tcpcc-bootstrap-out/vmlinux \
+            --output-dir '.build/m9-native-multi-${{ matrix.name }}'
+
       - name: Upload M8.5 ingress diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tcpcc-m85-cli-${{ matrix.name }}
-          path: .build/m85-cli-${{ matrix.name }}
+          path: |
+            .build/m85-cli-${{ matrix.name }}
+            .build/m9-native-multi-${{ matrix.name }}
           if-no-files-found: warn
 
   capacity-discovery:

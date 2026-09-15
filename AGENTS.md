@@ -66,8 +66,17 @@ environments, can use upstream Linux congestion control such as BBR on its
 load, or select that algorithm.
 
 ```text
-sudo tcpcc --listen ADDRESS:PORT --backend 127.0.0.1:PORT --cc ALGORITHM
+sudo tcpcc --forward ADDRESS:PORT=127.0.0.1:PORT --cc ALGORITHM
 ```
+
+The native CLI repeats the atomic `--forward LISTEN=BACKEND` option when one
+hosted kernel should own multiple fixed public forwards. Pairing is explicit in
+each argument rather than inferred from option order. All public listeners in
+one process currently use the same address family and distinct TCP ports; one
+process owns one TUN guest address, so duplicate public ports would collapse to
+the same hosted endpoint. `--forward` is the sole operator-facing listener to
+backend mapping syntax; do not reintroduce separate `--listen` / `--backend`
+options or an argument-translation compatibility layer.
 
 The public TCP endpoint belongs to hosted Linux. The outer host provides the
 TUN/netfilter packet path and a separate loopback TCP connection to the local
@@ -93,12 +102,20 @@ networking framework, or reimplementation of BBR/CUBIC.
 
 ## Boundaries that should not drift accidentally
 
-- `--cc` is set and read back on the hosted public listener; outer-host BBR is
+- `--cc` is set and read back on every hosted public listener; outer-host BBR is
   not a prerequisite.
 - The current public data plane is one nonpersistent TUN plus exact DNAT and
   conntrack; forwarding remains an outer-host prerequisite.
+- One native supervisor may own multiple fixed listener/backend routes, exposed
+  canonically as repeated atomic `--forward LISTEN=BACKEND` mappings. Those
+  public listeners currently share one address family, one TUN guest address,
+  one `--cc`, and service-wide admission/drain/statistics. Public ports must
+  therefore be unique within that supervisor.
+- Each native route owns a separate exact firewall resource. Startup and
+  shutdown must roll route-owned firewall resources back in reverse order;
+  unrelated or merely stale state must never be guessed away.
 - The loopback backend TCP leg is separate from the public congestion-control
-  contract.
+  contract and remains IPv4 `127.0.0.1:<port>`.
 - The hosted bridge has one mutable dispatcher owner, not per-flow forwarding
   threads.
 - One aggregate hosted service may own multiple public listeners; listener
