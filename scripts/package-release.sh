@@ -63,6 +63,13 @@ fi
 
 release_commit="$(git -C "$ROOT" rev-parse HEAD)"
 toml_c_commit="$(git -C "$TOML_C_DIR" rev-parse HEAD)"
+toml_c_pinned_commit="$(git -C "$ROOT" ls-tree HEAD native/third_party/toml-c | awk '{print $3}')"
+if [[ -z "$toml_c_pinned_commit" || "$toml_c_commit" != "$toml_c_pinned_commit" ]]; then
+  echo "toml-c submodule HEAD does not match the release commit gitlink" >&2
+  echo "  pinned: ${toml_c_pinned_commit:-missing}" >&2
+  echo "  actual: $toml_c_commit" >&2
+  exit 1
+fi
 source_date_epoch="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" show -s --format=%ct HEAD)}"
 package_name="tcpcc-${LINUX_VERSION}-${TARGET}"
 archive="$OUTPUT_DIR/$package_name.tar.xz"
