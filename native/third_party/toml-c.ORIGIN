@@ -1,0 +1,9 @@
+Project: arp242/toml-c
+Upstream: https://github.com/arp242/toml-c
+Commit: 6a38d404184a3b399d61821dbfff229579d59a00
+Vendored file: header/toml-c.h
+License: MIT; see toml-c.LICENSE
+
+The vendored header is built directly into tcpcc. Runtime operation does not
+require libtoml or network access. Update this file whenever the vendored
+upstream commit changes.
