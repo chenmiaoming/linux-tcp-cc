@@ -26,6 +26,7 @@ static void tcpcc_entry_usage(FILE *stream)
 		"The installed command has no Python dependency.\n"
 		"\n"
 		"  --forward LISTEN=BACKEND      fixed public-listener/backend mapping (repeatable)\n"
+		"  --check                        validate host prerequisites without mutation\n"
 		"  --kernel PATH                 hosted vmlinux (or TCPCC_KERNEL)\n"
 		"  --memory-mib MIB              hosted memory, minimum %lu (default %lu)\n"
 		"  --tcp-wmem-max-kib KIB        hosted TCP send autotune ceiling (default auto)\n"

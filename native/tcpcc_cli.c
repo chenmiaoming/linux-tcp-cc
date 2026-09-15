@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 #define TCPCC_EVENT_SCHEMA "tcpcc.runtime.v1"
+#define TCPCC_CHECK_SCHEMA "tcpcc.check.v1"
 #define TCPCC_DEFAULT_BACKLOG 128U
 #define TCPCC_DEFAULT_ACCEPT_BATCH 64U
 #define TCPCC_MAX_BACKLOG 4096U
@@ -74,6 +75,7 @@ struct tcpcc_cli_config {
 	unsigned int backlog;
 	unsigned int max_connections;
 	unsigned int grace_ms;
+	bool check_only;
 };
 
 struct tcpcc_firewall {
@@ -103,6 +105,7 @@ struct tcpcc_nft_api {
 };
 
 static int tcpcc_nft_load(struct tcpcc_nft_api *api);
+static int tcpcc_firewall_inspect_ownership(const struct tcpcc_cli_config *config);
 
 static void tcpcc_usage(FILE *stream)
 {
@@ -116,6 +119,7 @@ static void tcpcc_usage(FILE *stream)
 		"The installed command has no Python dependency.\n"
 		"\n"
 		"  --forward LISTEN=BACKEND      fixed public-listener/backend mapping (repeatable)\n"
+		"  --check                        validate host prerequisites without mutation\n"
 		"  --kernel PATH       hosted vmlinux (or TCPCC_KERNEL)\n"
 		"  --memory-mib MIB    hosted memory, minimum %lu (default %lu)\n"
 		"  --firewall-backend NAME       nft-lib, nft-exec, or iptables\n"
@@ -360,6 +364,7 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 {
 	static const struct option options[] = {
 		{ "forward", required_argument, NULL, 1005 },
+		{ "check", no_argument, NULL, 1006 },
 		{ "cc", required_argument, NULL, 'c' },
 		{ "kernel", required_argument, NULL, 'k' },
 		{ "memory-mib", required_argument, NULL, 'm' },
@@ -400,6 +405,9 @@ static int tcpcc_parse_args(int argc, char **argv, struct tcpcc_cli_config *conf
 		case 1005:
 			if (tcpcc_parse_forward(optarg, config))
 				return -1;
+			break;
+		case 1006:
+			config->check_only = true;
 			break;
 		case 'c': cc = optarg; break;
 		case 'k':
@@ -962,6 +970,64 @@ close_library:
 	return result;
 }
 
+static int tcpcc_firewall_inspect_ownership(const struct tcpcc_cli_config *config)
+{
+	char *ownership;
+	char family[4];
+	char firewall_command[48];
+	int version = config->routes[0].listen.version;
+	int result = -1;
+
+	ownership = malloc(1024U * 1024U);
+	if (!ownership)
+		return tcpcc_error("allocating firewall ownership inspection buffer failed");
+	if (config->firewall == TCPCC_FIREWALL_IPTABLES) {
+		char save_command[64];
+		char *save[] = { save_command, "-t", "nat", NULL };
+		int length;
+
+		if (tcpcc_iptables_command(config, version, firewall_command,
+					    sizeof(firewall_command))) {
+			tcpcc_error("invalid iptables executable selection");
+			goto out;
+		}
+		length = snprintf(save_command, sizeof(save_command), "%s-save",
+				  firewall_command);
+		if (length < 0 || length >= (int)sizeof(save_command)) {
+			tcpcc_error("selected iptables-save executable name is too long");
+			goto out;
+		}
+		if (tcpcc_capture(save, ownership, 1024U * 1024U)) {
+			tcpcc_error("iptables ownership inspection failed");
+			goto out;
+		}
+	} else {
+		strcpy(family, version == 4 ? "ip" : "ip6");
+		if (config->firewall == TCPCC_FIREWALL_NFT_LIB) {
+			char command[32];
+
+			snprintf(command, sizeof(command), "list ruleset %s\n", family);
+			if (tcpcc_nft_lib_capture(command, ownership, 1024U * 1024U)) {
+				tcpcc_error("nftables ownership inspection failed");
+				goto out;
+			}
+		} else {
+			char *list[] = { "nft", "list", "ruleset", family, NULL };
+
+			if (tcpcc_capture(list, ownership, 1024U * 1024U)) {
+				tcpcc_error("nftables ownership inspection failed");
+				goto out;
+			}
+		}
+	}
+	if (tcpcc_check_ownership_text(ownership))
+		goto out;
+	result = 0;
+out:
+	free(ownership);
+	return result;
+}
+
 static int tcpcc_nft_exec_run(const char *batch, bool dry_run, bool quiet)
 {
 	char *check[] = { "nft", "--check", "--file", "-", NULL };
@@ -1132,14 +1198,14 @@ static int tcpcc_firewall_close(struct tcpcc_firewall *firewall)
 		char *remove[] = { firewall->command, "--wait", "-t", "nat", "-X",
 			firewall->resource, NULL };
 
-		snprintf(port, sizeof(port), "%u", firewall->port);
-		snprintf(prefix, sizeof(prefix), "%s/%u", firewall->listen,
-			 firewall->version == 4 ? 32U : 128U);
-		snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=%llu tun=%s",
-			 (long)getpid(), firewall->owner_start, firewall->tun_name);
-		if (tcpcc_run(jump, NULL, true)) result = -1;
-		if (tcpcc_run(flush, NULL, true)) result = -1;
-		if (tcpcc_run(remove, NULL, true)) result = -1;
+	snprintf(port, sizeof(port), "%u", firewall->port);
+	snprintf(prefix, sizeof(prefix), "%s/%u", firewall->listen,
+		 firewall->version == 4 ? 32U : 128U);
+	snprintf(marker, sizeof(marker), "tcpcc.owner.v1 pid=%ld start=%llu tun=%s",
+		 (long)getpid(), firewall->owner_start, firewall->tun_name);
+	if (tcpcc_run(jump, NULL, true)) result = -1;
+	if (tcpcc_run(flush, NULL, true)) result = -1;
+	if (tcpcc_run(remove, NULL, true)) result = -1;
 	}
 	firewall->installed = false;
 	return result;
@@ -1438,9 +1504,19 @@ int main(int argc, char **argv)
 
 	if (tcpcc_parse_args(argc, argv, &config))
 		return 1;
-	if (tcpcc_preflight(&config)) {
+	if (tcpcc_preflight(&config) || tcpcc_firewall_inspect_ownership(&config)) {
 		free(config.routes);
 		return 1;
+	}
+	if (config.check_only) {
+		printf("{\"address_family\":\"ipv%d\",\"event\":\"check\","
+		       "\"firewall_backend\":\"%s\",\"forward_count\":%zu,"
+		       "\"ok\":true,\"schema\":\"%s\"}\n",
+		       config.routes[0].listen.version, config.firewall_name,
+		       config.route_count, TCPCC_CHECK_SCHEMA);
+		fflush(stdout);
+		free(config.routes);
+		return 0;
 	}
 	firewalls = calloc(config.route_count, sizeof(*firewalls));
 	if (!firewalls) {
