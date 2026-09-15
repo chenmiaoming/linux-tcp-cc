@@ -57,6 +57,13 @@ and the mainline canary.
 Current release, packaging, LTS branch, stable-update, and artifact publication
 contract.
 
+### `docs/configuration.md`
+
+Current installed-native configuration-file contract: explicit `--config FILE`
+selection, schema `version = 1`, supported TOML keys, `[[forward]]` mappings,
+strict validation, no CLI/config precedence mixing, the pinned `toml-c`
+submodule, and the startup-only/no-hot-reload policy.
+
 ## Detailed implementation records
 
 These documents contain both useful current mechanism and the history of how it
