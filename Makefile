@@ -97,22 +97,33 @@ $(NATIVE_BUILD_DIR)/test-sigpipe: native/test_sigpipe.c $(NATIVE_CLI)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-o $@ native/test_sigpipe.c
 
+$(NATIVE_BUILD_DIR)/test-config: native/test_config.c native/tcpcc_config.h \
+		$(NATIVE_BUILD_DIR)/tcpcc_config.o
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
+		-o $@ native/test_config.c $(NATIVE_BUILD_DIR)/tcpcc_config.o
+
 native-build: $(NATIVE_LIBRARY) $(NATIVE_CLI)
 
 native-check: $(NATIVE_BUILD_DIR)/test-control \
 		$(NATIVE_BUILD_DIR)/test-hosted-child \
 		$(NATIVE_BUILD_DIR)/test-process \
 		$(NATIVE_BUILD_DIR)/test-event \
-		$(NATIVE_BUILD_DIR)/test-sigpipe
+		$(NATIVE_BUILD_DIR)/test-sigpipe \
+		$(NATIVE_BUILD_DIR)/test-config
 	$(NATIVE_BUILD_DIR)/test-control
 	$(NATIVE_BUILD_DIR)/test-process $(NATIVE_BUILD_DIR)/test-hosted-child
 	$(NATIVE_BUILD_DIR)/test-event
 	$(NATIVE_BUILD_DIR)/test-sigpipe $(NATIVE_CLI)
+	$(NATIVE_BUILD_DIR)/test-config examples/tcpcc.toml
 	$(NATIVE_CLI) --help >$(NATIVE_BUILD_DIR)/help.out
 	grep -F -- '--config FILE' $(NATIVE_BUILD_DIR)/help.out
 	grep -F -- '--forward LISTEN=BACKEND' $(NATIVE_BUILD_DIR)/help.out
 	grep -F -- '--check' $(NATIVE_BUILD_DIR)/help.out
 	! grep -E -- '--listen|--backend' $(NATIVE_BUILD_DIR)/help.out
+	! $(NATIVE_CLI) --config examples/tcpcc.toml --cc bbr \
+		2>$(NATIVE_BUILD_DIR)/mixed-config-cli.err
+	grep -F -- '--config cannot be combined with direct service options' \
+		$(NATIVE_BUILD_DIR)/mixed-config-cli.err
 	! $(NATIVE_CLI) --check \
 		--forward 203.0.113.10:443=192.0.2.1:8443 --cc bbr \
 		2>$(NATIVE_BUILD_DIR)/check-parser.err
