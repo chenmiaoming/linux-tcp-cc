@@ -124,6 +124,17 @@ native-check: $(NATIVE_BUILD_DIR)/test-control \
 		2>$(NATIVE_BUILD_DIR)/mixed-config-cli.err
 	grep -F -- '--config cannot be combined with direct service options' \
 		$(NATIVE_BUILD_DIR)/mixed-config-cli.err
+	printf '%s\n' \
+		'version = 1' \
+		'cc = "bbr"' \
+		'[[forward]]' \
+		'listen = "203.0.113.10:443"' \
+		'backend = "192.0.2.1:8443"' \
+		>$(NATIVE_BUILD_DIR)/bad-config-backend.toml
+	! $(NATIVE_CLI) --check --config $(NATIVE_BUILD_DIR)/bad-config-backend.toml \
+		2>$(NATIVE_BUILD_DIR)/bad-config-backend.err
+	grep -F 'forward backend must use 127.0.0.1:port' \
+		$(NATIVE_BUILD_DIR)/bad-config-backend.err
 	! $(NATIVE_CLI) --check \
 		--forward 203.0.113.10:443=192.0.2.1:8443 --cc bbr \
 		2>$(NATIVE_BUILD_DIR)/check-parser.err
