@@ -22,10 +22,10 @@ static void expect(bool condition, const char *message)
 		fail(message);
 }
 
-static void write_all(int fd, const char *text)
+static void write_bytes(int fd, const void *data, size_t length)
 {
-	size_t left = strlen(text);
-	const char *cursor = text;
+	const unsigned char *cursor = data;
+	size_t left = length;
 
 	while (left) {
 		ssize_t written = write(fd, cursor, left);
@@ -39,7 +39,8 @@ static void write_all(int fd, const char *text)
 	}
 }
 
-static void expect_invalid(const char *text, const char *needle)
+static void expect_invalid_bytes(const void *data, size_t length,
+				 const char *needle)
 {
 	char path[] = "/tmp/tcpcc-config-XXXXXX";
 	struct tcpcc_file_config config;
@@ -49,7 +50,7 @@ static void expect_invalid(const char *text, const char *needle)
 
 	if (fd < 0)
 		fail("creating temporary config failed");
-	write_all(fd, text);
+	write_bytes(fd, data, length);
 	if (close(fd) != 0)
 		fail("closing temporary config failed");
 	result = tcpcc_config_load(path, &config, error, sizeof(error));
@@ -65,8 +66,17 @@ static void expect_invalid(const char *text, const char *needle)
 	}
 }
 
+static void expect_invalid(const char *text, const char *needle)
+{
+	expect_invalid_bytes(text, strlen(text), needle);
+}
+
 int main(int argc, char **argv)
 {
+	static const char nul_config[] =
+		"version = 1\n\0cc = \"bbr\"\n"
+		"[[forward]]\nlisten = \"203.0.113.10:443\"\n"
+		"backend = \"127.0.0.1:8443\"\n";
 	struct tcpcc_file_config config;
 	char error[512];
 
@@ -114,6 +124,8 @@ int main(int argc, char **argv)
 		"[[forward]]\nlisten = \"203.0.113.10:443\"\n"
 		"backend = \"127.0.0.1:8443\"\n",
 		"key already defined");
+	expect_invalid_bytes(nul_config, sizeof(nul_config) - 1,
+			     "must not contain NUL bytes");
 
 	return 0;
 }
