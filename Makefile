@@ -17,7 +17,8 @@ NATIVE_OBJECTS := \
 	$(NATIVE_BUILD_DIR)/tcpcc_process.o
 NATIVE_CLI_OBJECTS := \
 	$(NATIVE_BUILD_DIR)/tcpcc_entry.o \
-	$(NATIVE_BUILD_DIR)/tcpcc_cli.o
+	$(NATIVE_BUILD_DIR)/tcpcc_cli.o \
+	$(NATIVE_BUILD_DIR)/tcpcc_config.o
 .PHONY: install native-build native-check release-package
 install: $(NATIVE_CLI)
 	test -x "$(VMLINUX)"
@@ -47,9 +48,14 @@ $(NATIVE_BUILD_DIR)/tcpcc_event.o: native/tcpcc_event.c \
 		-c -o $@ native/tcpcc_event.c
 
 $(NATIVE_BUILD_DIR)/tcpcc_entry.o: native/tcpcc_entry.c \
-		native/tcpcc_process.h native/tcpcc_control.h | $(NATIVE_BUILD_DIR)
+		native/tcpcc_config.h native/tcpcc_process.h native/tcpcc_control.h | $(NATIVE_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-c -o $@ native/tcpcc_entry.c
+
+$(NATIVE_BUILD_DIR)/tcpcc_config.o: native/tcpcc_config.c \
+		native/tcpcc_config.h native/third_party/toml-c.h | $(NATIVE_BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
+		-c -o $@ native/tcpcc_config.c
 
 $(NATIVE_BUILD_DIR)/tcpcc_cli.o: native/tcpcc_cli.c \
 		native/tcpcc_control.h native/tcpcc_event.h native/tcpcc_process.h \
@@ -98,6 +104,7 @@ native-check: $(NATIVE_BUILD_DIR)/test-control \
 	$(NATIVE_BUILD_DIR)/test-event
 	$(NATIVE_BUILD_DIR)/test-sigpipe $(NATIVE_CLI)
 	$(NATIVE_CLI) --help >$(NATIVE_BUILD_DIR)/help.out
+	grep -F -- '--config FILE' $(NATIVE_BUILD_DIR)/help.out
 	grep -F -- '--forward LISTEN=BACKEND' $(NATIVE_BUILD_DIR)/help.out
 	grep -F -- '--check' $(NATIVE_BUILD_DIR)/help.out
 	! grep -E -- '--listen|--backend' $(NATIVE_BUILD_DIR)/help.out
