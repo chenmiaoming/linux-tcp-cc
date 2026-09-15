@@ -2,7 +2,7 @@
 #define _GNU_SOURCE
 
 #include "tcpcc_config.h"
-#include "third_party/toml-c.h"
+#include "third_party/toml-c/header/toml-c.h"
 
 /* toml-c's single-header implementation intentionally poisons these names. */
 #undef calloc
