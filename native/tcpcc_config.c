@@ -17,7 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define TCPCC_CONFIG_VERSION 1UL
 #define TCPCC_CONFIG_MAX_BYTES (1024U * 1024U)
@@ -33,6 +32,50 @@ static int tcpcc_config_error(char *error, size_t error_size,
 		va_end(arguments);
 	}
 	return -1;
+}
+
+static int tcpcc_config_read(const char *path, char **result,
+			     char *error, size_t error_size)
+{
+	char *buffer;
+	FILE *stream;
+	size_t count;
+	int saved_errno;
+
+	stream = fopen(path, "rb");
+	if (!stream)
+		return tcpcc_config_error(error, error_size,
+			"opening configuration '%s' failed: %s", path, strerror(errno));
+	buffer = malloc((size_t)TCPCC_CONFIG_MAX_BYTES + 2U);
+	if (!buffer) {
+		fclose(stream);
+		return tcpcc_config_error(error, error_size,
+			"allocating configuration input failed");
+	}
+	errno = 0;
+	count = fread(buffer, 1, (size_t)TCPCC_CONFIG_MAX_BYTES + 1U, stream);
+	saved_errno = errno;
+	if (ferror(stream)) {
+		free(buffer);
+		fclose(stream);
+		return tcpcc_config_error(error, error_size,
+			"reading configuration '%s' failed: %s", path,
+			strerror(saved_errno ? saved_errno : EIO));
+	}
+	fclose(stream);
+	if (count > (size_t)TCPCC_CONFIG_MAX_BYTES) {
+		free(buffer);
+		return tcpcc_config_error(error, error_size,
+			"configuration '%s' exceeds the 1 MiB limit", path);
+	}
+	if (memchr(buffer, '\0', count)) {
+		free(buffer);
+		return tcpcc_config_error(error, error_size,
+			"configuration '%s' must not contain NUL bytes", path);
+	}
+	buffer[count] = '\0';
+	*result = buffer;
+	return 0;
 }
 
 static bool tcpcc_table_has_key(const toml_table_t *table, const char *name)
@@ -257,11 +300,10 @@ void tcpcc_config_free(struct tcpcc_file_config *config)
 int tcpcc_config_load(const char *path, struct tcpcc_file_config *config,
 		      char *error, size_t error_size)
 {
-	FILE *stream = NULL;
-	struct stat status;
 	toml_table_t *root = NULL;
 	unsigned long version = 0;
 	char toml_error[256];
+	char *input = NULL;
 	int result = -1;
 
 	if (!path || !path[0] || !config)
@@ -270,22 +312,10 @@ int tcpcc_config_load(const char *path, struct tcpcc_file_config *config,
 	memset(config, 0, sizeof(*config));
 	if (error && error_size)
 		error[0] = '\0';
+	if (tcpcc_config_read(path, &input, error, error_size))
+		return -1;
 
-	stream = fopen(path, "r");
-	if (!stream)
-		return tcpcc_config_error(error, error_size,
-			"opening configuration '%s' failed: %s", path, strerror(errno));
-	if (fstat(fileno(stream), &status) != 0) {
-		tcpcc_config_error(error, error_size,
-			"stat of configuration '%s' failed: %s", path, strerror(errno));
-		goto out;
-	}
-	if (status.st_size > (off_t)TCPCC_CONFIG_MAX_BYTES) {
-		tcpcc_config_error(error, error_size,
-			"configuration '%s' exceeds the 1 MiB limit", path);
-		goto out;
-	}
-	root = toml_parse_file(stream, toml_error, sizeof(toml_error));
+	root = toml_parse(input, toml_error, sizeof(toml_error));
 	if (!root) {
 		tcpcc_config_error(error, error_size,
 			"invalid TOML in '%s': %s", path,
@@ -334,7 +364,7 @@ int tcpcc_config_load(const char *path, struct tcpcc_file_config *config,
 out:
 	if (root)
 		toml_free(root);
-	fclose(stream);
+	free(input);
 	if (result)
 		tcpcc_config_free(config);
 	return result;
