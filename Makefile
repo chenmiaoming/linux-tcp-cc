@@ -53,7 +53,7 @@ $(NATIVE_BUILD_DIR)/tcpcc_entry.o: native/tcpcc_entry.c \
 		-c -o $@ native/tcpcc_entry.c
 
 $(NATIVE_BUILD_DIR)/tcpcc_config.o: native/tcpcc_config.c \
-		native/tcpcc_config.h native/third_party/toml-c.h | $(NATIVE_BUILD_DIR)
+		native/tcpcc_config.h native/third_party/toml-c/header/toml-c.h | $(NATIVE_BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(NATIVE_CFLAGS) \
 		-c -o $@ native/tcpcc_config.c
 
