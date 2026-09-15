@@ -1,0 +1,3 @@
+[submodule "native/third_party/toml-c"]
+	path = native/third_party/toml-c
+	url = https://github.com/chenmiaoming/toml-c.git
