@@ -124,6 +124,9 @@ native-check: $(NATIVE_BUILD_DIR)/test-control \
 		2>$(NATIVE_BUILD_DIR)/mixed-config-cli.err
 	grep -F -- '--config cannot be combined with direct service options' \
 		$(NATIVE_BUILD_DIR)/mixed-config-cli.err
+	! $(NATIVE_CLI) --check --config examples/tcpcc.toml \
+		2>$(NATIVE_BUILD_DIR)/config-preflight.err
+	grep -F 'CAP_NET_ADMIN is required' $(NATIVE_BUILD_DIR)/config-preflight.err
 	printf '%s\n' \
 		'version = 1' \
 		'cc = "bbr"' \
