@@ -168,6 +168,40 @@ sudo make install
 source checkout, run `make native-build`, then use `sudo ./tcpcc` with either
 the default `.build/tcpcc-bootstrap-out/vmlinux` or `--kernel PATH`.
 
+## TOML service configuration
+
+Long-lived deployments may use an explicit, versioned TOML configuration file
+instead of spelling out service options on every invocation. tcpcc never loads
+a configuration file implicitly; the operator selects it with `--config FILE`.
+A minimal configuration is:
+
+```toml
+version = 1
+cc = "bbr"
+memory_mib = 128
+
+[[forward]]
+listen = "203.0.113.10:443"
+backend = "127.0.0.1:8443"
+```
+
+Validate the host prerequisites without creating the TUN, firewall rules, or
+hosted process, then start the service with the same file:
+
+```bash
+sudo tcpcc --check --config /etc/tcpcc/tcpcc.toml
+sudo tcpcc --config /etc/tcpcc/tcpcc.toml
+```
+
+`--check` is the only command-line service option that may be combined with
+`--config`. Direct service options such as `--forward`, `--cc`, `--memory-mib`,
+`--tcp-wmem-max-kib`, and firewall/TUN tuning are rejected when a config file is
+selected rather than defining an override-precedence layer. The version-1
+schema also supports the same memory, TCP send-autotuning, firewall, TUN,
+listener, connection-limit, and shutdown settings used by direct CLI operation.
+See [`docs/configuration.md`](docs/configuration.md) for the complete schema and
+[`examples/tcpcc.toml`](examples/tcpcc.toml) for a commented starting point.
+
 Before startup, the operator must provide a usable TUN device, the selected
 firewall backend, and forwarding for the public address family. tcpcc reports
 missing packet-path prerequisites but does not change global sysctls:
