@@ -4,16 +4,21 @@
 > path. Some sections deliberately describe intermediate M8 behavior. For the
 > current composed product architecture and runtime ownership model, start with
 > [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+>
+> **CLI history:** M8 originally exposed separate `--listen` and `--backend`
+> options. The installed native CLI has superseded that syntax: the sole current
+> operator mapping is atomic `--forward LISTEN=BACKEND`. Any separate
+> `--listen` / `--backend` examples retained below describe historical M8
+> delivery, not a supported compatibility interface.
 
 M8 turns the hosted Linux TCP stack into an inbound server-side TCP front end.
 It is not a SOCKS5 or HTTP CONNECT proxy.
 
-The target operator interface is:
+The current operator interface descended from this design is:
 
 ```text
 sudo tcpcc \
-  --listen 203.0.113.10:443 \
-  --backend 127.0.0.1:443 \
+  --forward 203.0.113.10:443=127.0.0.1:443 \
   --cc bbr
 ```
 
@@ -33,16 +38,22 @@ no longer installed. The default prefix is `/usr/local`; `VMLINUX` can select
 another already-built hosted image. An uninstalled checkout can instead pass
 `--kernel` or set `TCPCC_KERNEL`.
 
-The three product arguments are mandatory and strictly parsed before any host
-mutation. Public addresses are literal IPv4 or bracketed IPv6, ports are
-1-65535, and the current backend boundary deliberately accepts only
-`127.0.0.1`:
+The original M8 command used separate listener and backend options. That syntax
+is now historical. The current installed native command requires one or more
+atomic forward mappings plus the congestion-control selection, all strictly
+parsed before host mutation. Public addresses are literal IPv4 or bracketed
+IPv6, ports are 1-65535, and the current backend boundary deliberately accepts
+only `127.0.0.1`:
 
 ```text
---listen IPv4:PORT | [IPv6]:PORT
---backend 127.0.0.1:PORT
+--forward (IPv4:PORT | [IPv6]:PORT)=127.0.0.1:PORT
 --cc ALGORITHM
 ```
+
+Separate `--listen` and `--backend` operator options are intentionally rejected
+rather than translated for compatibility. Repeated `--forward` mappings are the
+current multi-listener form; see `ARCHITECTURE.md` and
+`m9-multi-listener-service.md` for the current aggregate-service semantics.
 
 The original M8 gate limited `--max-connections` to 8. M9.4 replaced that fixed
 table with dynamic flows. M9.6 makes `0` the default, meaning that no admission
@@ -133,7 +144,7 @@ through `nft-lib`, `nft-exec`, `iptables-nft`, and `iptables-legacy`.
 ```text
 remote client
     |
-    | TCP to --listen
+    | TCP to public LISTEN endpoint
     v
 host PREROUTING DNAT / conntrack
     |
@@ -143,7 +154,7 @@ hosted Linux TCP listener (--cc)
     |
     | userspace byte-stream bridge
     v
-host TCP socket to --backend
+host TCP socket to mapped BACKEND
 ```
 
 TUN is the production M8-derived data plane. The link is point-to-point IPv4 or
@@ -151,10 +162,10 @@ IPv6 and does not require Ethernet headers, ARP, or a bridge, so TAP adds
 complexity without helping this product path. A future AF_PACKET backend can be
 evaluated separately; it is not a prerequisite for the current product.
 
-DNAT applies only to TCP packets whose destination exactly matches
-`--listen`. A loopback backend such as `127.0.0.1:443` therefore does not enter
-the public listener again. Conntrack performs the reverse translation for
-packets emitted by the hosted stack.
+DNAT applies only to TCP packets whose destination exactly matches the public
+side of a configured `--forward` mapping. A loopback backend such as
+`127.0.0.1:443` therefore does not enter the public listener again. Conntrack
+performs the reverse translation for packets emitted by the hosted stack.
 
 ## Host authority and lifecycle
 
@@ -385,8 +396,9 @@ responsibility and is selected by `--cc`.
    multi-connection stream bridge to host backend sockets.
 3. Add transactional TUN and DNAT lifecycle management plus read-only
    prerequisite checks.
-4. Expose the stable `--listen`, `--backend`, and `--cc` CLI and run an
-   end-to-end nginx-compatible test.
+4. Expose the then-stable M8 `--listen`, `--backend`, and `--cc` CLI and run an
+   end-to-end nginx-compatible test. The separate mapping options are now
+   superseded by atomic `--forward LISTEN=BACKEND` in the installed native CLI.
 5. Harden concurrency, backpressure, half-close, reset, shutdown, recovery,
    resource limits, and long-duration behavior before packaging a release.
 
