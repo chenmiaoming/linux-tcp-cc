@@ -259,7 +259,7 @@ def integration(args: argparse.Namespace) -> int:
                 args.iptables_variant,
                 tun_name,
             )
-            checked = run(command[:3] + ["--check"] + command[3:])
+            checked = run(command[:5] + ["--check"] + command[5:])
             success_log.write_text(checked.stdout, encoding="utf-8")
             success_err.write_text(checked.stderr, encoding="utf-8")
             lines = [line for line in checked.stdout.splitlines() if line.strip()]
