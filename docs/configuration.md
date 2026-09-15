@@ -92,6 +92,12 @@ For an ordinary git clone, `make native-build` initializes the pinned submodule
 on demand. Once the submodule is present, normal rebuilds require no network
 access.
 
+GitHub-generated source ZIP/TAR archives do not embed git submodule contents.
+Building from those archives therefore requires obtaining the pinned
+`chenmiaoming/toml-c` submodule separately; the published tcpcc binary packages
+already contain the parser code and its MIT license and have no runtime fetch or
+TOML-library dependency.
+
 The submodule commit is part of the parent repository tree, so updates to the
 fork's `main` branch do not silently change tcpcc builds. Updating the parser is
 an explicit reviewed change to the gitlink commit.
