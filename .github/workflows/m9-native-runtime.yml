@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/m9-native-runtime.yml'
       - '.github/workflows/release.yml'
+      - '.gitmodules'
       - 'Makefile'
       - 'tcpcc'
       - 'docs/m9-native-event-runtime.md'
@@ -36,6 +37,8 @@ jobs:
     steps:
       - name: Checkout linux-tcp-cc
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Build the native host boundary
         run: make native-build
@@ -55,6 +58,8 @@ jobs:
     steps:
       - name: Checkout linux-tcp-cc
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Build and test inside Alpine
         run: |
