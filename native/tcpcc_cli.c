@@ -666,8 +666,9 @@ static int tcpcc_parse_direct_args(int argc, char **argv,
 		case 1007:
 			if (tcp_wmem_seen)
 				return tcpcc_error("--tcp-wmem-max-kib may be specified only once");
-			if (tcpcc_parse_unsigned(optarg, TCPCC_TCP_WMEM_MAX_KIB_LIMIT, &value) ||
-			    tcpcc_config_set_tcp_wmem(config, value))
+			if (tcpcc_parse_unsigned(optarg, TCPCC_TCP_WMEM_MAX_KIB_LIMIT, &value))
+				return tcpcc_error("tcp_wmem maximum must be from 64 through 2097151 KiB");
+			if (tcpcc_config_set_tcp_wmem(config, value))
 				return -1;
 			tcp_wmem_seen = true;
 			break;
@@ -680,9 +681,10 @@ static int tcpcc_parse_direct_args(int argc, char **argv,
 				return -1;
 			break;
 		case 'm':
-			if (tcpcc_parse_unsigned(optarg, ~0UL, &value) ||
-			    tcpcc_config_set_memory(config, value))
+			if (tcpcc_parse_unsigned(optarg, ~0UL, &value))
 				return tcpcc_memory_error();
+			if (tcpcc_config_set_memory(config, value))
+				return -1;
 			break;
 		case 'f':
 			if (tcpcc_config_set_firewall(config, optarg))
@@ -700,20 +702,23 @@ static int tcpcc_parse_direct_args(int argc, char **argv,
 		case 1000: host = optarg; break;
 		case 1001: guest = optarg; break;
 		case 1002:
-			if (tcpcc_parse_unsigned(optarg, TCPCC_MAX_BACKLOG, &value) ||
-			    tcpcc_config_set_backlog(config, value))
+			if (tcpcc_parse_unsigned(optarg, TCPCC_MAX_BACKLOG, &value))
+				return tcpcc_error("backlog must be from 1 through 4096");
+			if (tcpcc_config_set_backlog(config, value))
 				return -1;
 			break;
 		case 1003:
-			if (tcpcc_parse_unsigned(optarg, TCPCC_MAX_CONNECTIONS, &value) ||
-			    tcpcc_config_set_max_connections(config, value))
+			if (tcpcc_parse_unsigned(optarg, TCPCC_MAX_CONNECTIONS, &value))
+				return tcpcc_error("max connections must be 0 or at most 1048575");
+			if (tcpcc_config_set_max_connections(config, value))
 				return -1;
 			break;
 		case 1004:
 			errno = 0;
 			seconds = strtod(optarg, &end);
-			if (errno || !optarg[0] || *end ||
-			    tcpcc_config_set_grace(config, seconds))
+			if (errno || !optarg[0] || *end)
+				return tcpcc_error("shutdown grace period must be from 0 through 300 seconds");
+			if (tcpcc_config_set_grace(config, seconds))
 				return -1;
 			break;
 		case 'h': tcpcc_usage(stdout); exit(0);
