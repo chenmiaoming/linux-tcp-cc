@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "evidence_id": "transoceanic-pr105-2026-08-31",
+  "evidence_class": "controlled_qualification",
+  "observed_at": "2026-08-31",
+  "purpose": "Record the three-repetition four-way native/tcpcc CUBIC/BBR observation on the checked-in transoceanic impairment scenario.",
+  "provenance": {
+    "pull_request": 105,
+    "workflow_run_id": 33376288062,
+    "workflow_job_id": 99438399799,
+    "tested_merge_commit": "73c7ab9679d1cf0833cdd4e77bccdf0d15f33eed",
+    "runner": "ubuntu-24.04",
+    "native_kernel_release": "6.17.0-1022-azure",
+    "iperf_version": "iperf 3.16 (cJSON 1.7.15)"
+  },
+  "scenario": {
+    "scenario_id": "transoceanic-1g-200ms-loss10-v1",
+    "rate_mbps": 1000,
+    "rtt_ms": 200,
+    "random_loss_percent_each_direction": 10,
+    "mtu": 1500,
+    "duration_seconds": 15,
+    "omit_seconds": 5,
+    "repetitions": 3,
+    "parallel_streams": 1,
+    "configured_bdp_bytes": 25000000,
+    "performance_is_observational": true
+  },
+  "measurements": {
+    "native_cubic": {
+      "goodput_mbps": [
+        0.13981021721946366,
+        0.13981000284399736,
+        0.0699051785149523
+      ],
+      "median_goodput_mbps": 0.13981000284399736,
+      "minimum_goodput_mbps": 0.0699051785149523,
+      "maximum_goodput_mbps": 0.13981021721946366,
+      "median_iperf_retransmits": 25,
+      "retransmit_scope": "public_wan_sender"
+    },
+    "native_bbr": {
+      "goodput_mbps": [
+        9.227203671681165,
+        15.868361270510219,
+        28.240025955843468
+      ],
+      "median_goodput_mbps": 15.868361270510219,
+      "minimum_goodput_mbps": 9.227203671681165,
+      "maximum_goodput_mbps": 28.240025955843468,
+      "median_iperf_retransmits": 2308,
+      "retransmit_scope": "public_wan_sender"
+    },
+    "tcpcc_cubic": {
+      "goodput_mbps": [
+        0.1398101240126584,
+        0.13981045023702052,
+        0.1398102638229129
+      ],
+      "median_goodput_mbps": 0.1398102638229129,
+      "minimum_goodput_mbps": 0.1398101240126584,
+      "maximum_goodput_mbps": 0.13981045023702052,
+      "median_iperf_retransmits": 0,
+      "retransmit_scope": "backend_loopback_sender"
+    },
+    "tcpcc_bbr": {
+      "goodput_mbps": [
+        20.761849091944732,
+        40.54751208210015,
+        12.583186313461633
+      ],
+      "median_goodput_mbps": 20.761849091944732,
+      "minimum_goodput_mbps": 12.583186313461633,
+      "maximum_goodput_mbps": 40.54751208210015,
+      "median_iperf_retransmits": 51,
+      "retransmit_scope": "backend_loopback_sender"
+    }
+  },
+  "comparisons": {
+    "native_bbr_over_native_cubic": 113.49947033629944,
+    "tcpcc_bbr_over_native_bbr": 1.3083801621361228,
+    "tcpcc_bbr_over_tcpcc_cubic": 148.5001782003802,
+    "tcpcc_cubic_over_native_cubic": 1.0000018666684087
+  },
+  "path_validation": {
+    "observed_median_rtt_ms": 200,
+    "observed_ack_direction_loss_percent": 9.86308858833876,
+    "observed_data_direction_loss_percent": 9.894585732973175,
+    "tcpcc_cubic_inherited_cc": "cubic",
+    "tcpcc_bbr_inherited_cc": "bbr",
+    "tcpcc_cubic_clean_shutdown": true,
+    "tcpcc_bbr_clean_shutdown": true
+  },
+  "interpretation": [
+    "The experiment is a controlled topology/behavior qualification and an observational performance comparison under intentionally extreme random loss.",
+    "The result proves that both tcpcc public listeners inherited the requested congestion-control algorithm and completed the impaired-path measurements with clean shutdown.",
+    "Do not compare native and tcpcc iperf retransmit counts directly: native retransmits describe the public WAN sender, while tcpcc iperf retransmits describe the backend loopback sender because hosted public-socket retransmits were not exported by this run.",
+    "Do not generalize the observed BBR/CUBIC ranking or the tcpcc/native BBR ratio beyond this scenario and run."
+  ]
+}
