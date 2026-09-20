@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "evidence_id": "openvz-128m-realhost-2026-09-11",
+  "evidence_class": "field_observation",
+  "observed_at": "2026-09-11",
+  "purpose": "Validate tcpcc on the target constrained OpenVZ deployment class and record throughput, CPU, RSS, and OpenVZ physical-page accounting.",
+  "provenance": {
+    "source": "project lab notebook",
+    "exact_source_commit": null,
+    "limitation": "The original field run recorded Linux 6.18.49-dirty and related PR state, but not an immutable tcpcc source commit. Treat this snapshot as an operational observation, not a release benchmark.",
+    "hosted_kernel": "Linux 6.18.49-dirty",
+    "related_pull_requests": [
+      115,
+      116,
+      117
+    ]
+  },
+  "environment": {
+    "virtualization": "OpenVZ",
+    "guest_distribution": "Alpine Linux",
+    "vcpu": 1,
+    "ram_mib": 128,
+    "swap": false,
+    "outer_kernel_visible": "Linux 4.19.0/OpenVZ",
+    "host_tcp_sysctls_available_to_tenant": false,
+    "backend": "iperf3 on 127.0.0.1",
+    "public_address_family": "IPv6",
+    "client": "China-local WSL host",
+    "approximate_rtt_ms": 270,
+    "tcpcc_memory_mib": 128,
+    "root_qdisc": "fq"
+  },
+  "observations": {
+    "native_reverse_single_stream": {
+      "sender_mbps": 6.2,
+      "receiver_mbps": 6.15,
+      "sender_retransmits": 187
+    },
+    "native_reverse_four_stream_aggregate_mbps_approx": 25,
+    "tcpcc_cubic": {
+      "representative_60s_sender_mbps": 35.2,
+      "representative_60s_receiver_mbps": 35.4,
+      "note": "Several adjacent runs were broadly normal, but the public path also produced severe outliers."
+    },
+    "tcpcc_bbr": {
+      "complete_30s_receiver_mbps_observed": 57.6,
+      "bad_run_receiver_mbps_examples": [
+        11.5,
+        12.6
+      ],
+      "note": "Bad runs correlated with severe memory pressure in at least some 128 MiB observations; later experiments also proved that the WAN path itself could independently collapse."
+    },
+    "resources": {
+      "supervisor_rss_mib_approx": 2,
+      "supervisor_cpu_percent_approx": 0,
+      "hosted_vmlinux_idle_rss_mib_approx": 6.1,
+      "hosted_vmlinux_peak_rss_mib_observed": 17.6,
+      "hosted_vmlinux_post_flow_rss_mib_approx": 6.2,
+      "hosted_vmlinux_cpu_percent_typical_range": [
+        33,
+        39
+      ],
+      "hosted_vmlinux_cpu_percent_peak_approx": 40
+    },
+    "openvz_physpages": {
+      "limit_pages": 32768,
+      "baseline_pages": 19134,
+      "bad_bbr_run_pages": 32636,
+      "bad_bbr_run_limit_fraction": 0.996
+    }
+  },
+  "interpretation": [
+    "tcpcc successfully booted and served public TCP on the intended 128 MiB OpenVZ deployment class even though the tenant could not select host TCP congestion control.",
+    "The 128 MiB guest arena was demand-backed rather than permanently resident at 128 MiB.",
+    "CPU was not the limiting resource in the observed high-throughput run.",
+    "The public WAN path was non-stationary; throughput values from this observation must not be used as a controlled native-vs-tcpcc speedup claim.",
+    "Follow-up work corrected the temporary tcp_wmem/tcp_mem policy mismatch and preserved upstream Linux RAM-derived TCP memory policy by default."
+  ]
+}

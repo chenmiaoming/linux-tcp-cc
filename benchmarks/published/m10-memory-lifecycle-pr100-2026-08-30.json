@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "evidence_id": "m10-memory-lifecycle-pr100-2026-08-30",
+  "evidence_class": "controlled_qualification",
+  "observed_at": "2026-08-30",
+  "purpose": "Record the successful 512 MiB / 16,384-flow hosted-memory lifecycle and six-round post-reclaim stability observation.",
+  "provenance": {
+    "pull_request": 100,
+    "workflow_run_id": 33296346132,
+    "workflow_job_id": 99216866951,
+    "tested_merge_commit": "635a980dbe6e2164a9181d8a030c23ea34026855",
+    "tested_head_commit": "9e23dbb23925104585252c7029b14d9b98a4a32d"
+  },
+  "configuration": {
+    "hosted_memory_mib": 512,
+    "max_connections": 0,
+    "stage_targets": [
+      64,
+      256,
+      1024,
+      2048,
+      4095,
+      8192,
+      16384
+    ],
+    "stability_rounds": 6,
+    "stability_connections_per_round": 8192,
+    "stability_drift_allowance_kib": 8192
+  },
+  "ready": {
+    "anonymous_kib": 12680,
+    "rss_kib": 14812,
+    "host_fds": 6,
+    "cpu_ticks": 1
+  },
+  "stages": [
+    {
+      "connections": 64,
+      "anonymous_kib": 12680,
+      "rss_kib": 14812,
+      "host_fds": 70,
+      "cpu_ticks": 2
+    },
+    {
+      "connections": 256,
+      "anonymous_kib": 14728,
+      "rss_kib": 16860,
+      "host_fds": 262,
+      "cpu_ticks": 3
+    },
+    {
+      "connections": 1024,
+      "anonymous_kib": 16776,
+      "rss_kib": 18908,
+      "host_fds": 1030,
+      "cpu_ticks": 11
+    },
+    {
+      "connections": 2048,
+      "anonymous_kib": 18824,
+      "rss_kib": 20956,
+      "host_fds": 2054,
+      "cpu_ticks": 25
+    },
+    {
+      "connections": 4095,
+      "anonymous_kib": 27016,
+      "rss_kib": 29148,
+      "host_fds": 4101,
+      "cpu_ticks": 64
+    },
+    {
+      "connections": 8192,
+      "anonymous_kib": 41016,
+      "rss_kib": 43148,
+      "host_fds": 8198,
+      "cpu_ticks": 173
+    },
+    {
+      "connections": 16384,
+      "anonymous_kib": 69040,
+      "rss_kib": 71172,
+      "host_fds": 16390,
+      "cpu_ticks": 497
+    }
+  ],
+  "drain_and_reclaim": {
+    "immediate_post_drain_anonymous_kib": 83712,
+    "immediate_post_drain_rss_kib": 85844,
+    "post_drain_idle_anonymous_kib": 58080,
+    "reclaim_samples": [
+      {
+        "elapsed_seconds": 0.000797,
+        "anonymous_kib": 58080,
+        "rss_kib": 60212
+      },
+      {
+        "elapsed_seconds": 1.002102,
+        "anonymous_kib": 58080,
+        "rss_kib": 60212
+      },
+      {
+        "elapsed_seconds": 2.003302,
+        "anonymous_kib": 48656,
+        "rss_kib": 50788
+      },
+      {
+        "elapsed_seconds": 3.004693,
+        "anonymous_kib": 48656,
+        "rss_kib": 50788
+      },
+      {
+        "elapsed_seconds": 4.006024,
+        "anonymous_kib": 43328,
+        "rss_kib": 45460
+      },
+      {
+        "elapsed_seconds": 5.007412,
+        "anonymous_kib": 43328,
+        "rss_kib": 45460
+      },
+      {
+        "elapsed_seconds": 6.008729,
+        "anonymous_kib": 41152,
+        "rss_kib": 43284
+      },
+      {
+        "elapsed_seconds": 7.009953,
+        "anonymous_kib": 41152,
+        "rss_kib": 43284
+      },
+      {
+        "elapsed_seconds": 8.011295,
+        "anonymous_kib": 40128,
+        "rss_kib": 42260
+      }
+    ],
+    "reclaim_result": {
+      "status": "passed",
+      "ready_anonymous_kib": 12680,
+      "peak_anonymous_kib": 69040,
+      "observed_anonymous_kib": 40128,
+      "load_delta_kib": 56360,
+      "recovered_load_delta_ratio": 0.512988,
+      "successful_discard_delta_bytes": 48594944
+    },
+    "reuse": {
+      "connections": 64,
+      "bidirectional_payload_verified": true,
+      "anonymous_kib": 40152,
+      "rss_kib": 42284
+    }
+  },
+  "stability": {
+    "baseline_anonymous_kib": 40128,
+    "ceiling_anonymous_kib": 48320,
+    "post_reclaim_anonymous_kib": [
+      42960,
+      42776,
+      48196,
+      48204,
+      48080,
+      47980
+    ],
+    "maximum_drift_kib": 8076,
+    "final_drift_kib": 7852,
+    "late_round_span_kib": 224,
+    "status": "passed"
+  },
+  "interpretation": [
+    "Guest-visible 512 MiB capacity was demand-backed rather than resident at startup.",
+    "Anonymous residency rose with connection load, reached 69,040 KiB at 16,384 active flows, and then fell to a 40,128 KiB post-reclaim baseline without restarting the hosted kernel.",
+    "The same process completed fresh bidirectional reuse traffic after reclaim.",
+    "Six additional 8,192-connection rounds remained below the fixed non-rebased 48,320 KiB post-reclaim ceiling; the final three floors spanned 224 KiB."
+  ]
+}
