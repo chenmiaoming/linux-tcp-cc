@@ -86,7 +86,7 @@ default branch is the newest supported LTS series.
 
 Current branch: `6.18.y`
 
-Current pinned upstream baseline: Linux `v6.18.53` from the kernel.org stable
+Current pinned upstream baseline: Linux `v6.18.54` from the kernel.org stable
 tree.
 
 Patch-level releases inside this branch follow Linux 6.18.y stable updates
