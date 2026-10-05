@@ -37,6 +37,19 @@ Authoritative current system model. It defines:
 When another document describes an old milestone state that conflicts with the
 current architecture, this document wins and the stale text should be repaired.
 
+### `docs/upstream-linux-fidelity.md`
+
+Design rationale for making the hosted upstream Linux TCP implementation the
+product feature rather than reimplementing BBR/recovery semantics in a smaller
+stack. It records the fidelity claim, its limits, the footprint tradeoff, and
+the relationship to the maintainer's lwIP-based `tcp-shift` project.
+
+### `docs/prior-art.md`
+
+Prior art and related projects, especially the OpenVZ LKL + HAProxy lineage.
+It records what is inherited conceptually, what tcpcc changes in the
+application/runtime boundary, and claims the project should explicitly avoid.
+
 ### `docs/runtime-lifecycle.md`
 
 Current process and lifecycle mechanics: supervisor/hosted-process ownership,

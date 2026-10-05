@@ -74,7 +74,12 @@ It is not an embedded-Linux project, SOCKS/HTTP proxy, or generic userspace
 network stack.
 
 For the current ownership model, data path, lifecycle, memory/CPU model, and
-non-goals, read [`ARCHITECTURE.md`](ARCHITECTURE.md). Exact supervisor signal,
+non-goals, read [`ARCHITECTURE.md`](ARCHITECTURE.md). The deliberate choice to
+preserve upstream Linux TCP semantics rather than reproduce them in a smaller
+userspace stack is explained in
+[`docs/upstream-linux-fidelity.md`](docs/upstream-linux-fidelity.md), and the
+LKL/OpenVZ lineage plus related projects are recorded in
+[`docs/prior-art.md`](docs/prior-art.md). Exact supervisor signal,
 child-process, hosted boot-finalization, and shutdown ordering is documented in
 [`docs/runtime-lifecycle.md`](docs/runtime-lifecycle.md). The repository
 knowledge map is [`docs/index.md`](docs/index.md).
