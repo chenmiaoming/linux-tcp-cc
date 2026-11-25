@@ -54,8 +54,8 @@ vmlinux_size=$(stat -c '%s' "$OUT/vmlinux")
 vmlinux_bss_size=$(section_size .bss)
 percpu_size=$(section_size .data..percpu)
 config_enabled_count=$(wc -l < "$ROOT/.build/tcpcc-enabled.config")
-# CC_HAS_* entries are compiler capability probes, not independent kernel
-# features. A toolchain upgrade may add probes without changing the defconfig.
+# Record config counts for comparison, not as footprint limits. Compiler
+# capability probes may change without any change to the defconfig.
 config_compiler_probe_count=$(awk '/^CONFIG_CC_HAS_/ { n++ } END { print n+0 }' \
   "$ROOT/.build/tcpcc-enabled.config")
 config_nonprobe_enabled_count=$((config_enabled_count - config_compiler_probe_count))
@@ -65,10 +65,6 @@ vmlinux_max_bytes=${TCPCC_VMLINUX_MAX_BYTES:-3407872}
 # Keep permanent zero-initialized state bounded.  Temporary diagnostics belong
 # in reclaimable guest RAM rather than in the process-lifetime ELF BSS.
 vmlinux_bss_max_bytes=${TCPCC_VMLINUX_BSS_MAX_BYTES:-196608}
-# Preserve the v6.18.56 baseline: 116 total minus 12 compiler probes.
-config_max_nonprobe_enabled=${TCPCC_CONFIG_MAX_NONPROBE_ENABLED:-104}
-# Keep an explicit legacy raw ceiling as an additional limit when supplied.
-config_max_enabled=${TCPCC_CONFIG_MAX_ENABLED:-$((config_max_nonprobe_enabled + config_compiler_probe_count))}
 read -r gnu_text_size gnu_data_size gnu_bss_size gnu_allocated_size _ _ \
   < <(tail -n 1 "$ROOT/.build/tcpcc-vmlinux.size")
 
@@ -89,17 +85,6 @@ fi
 if (( percpu_size != 0 )); then
   printf 'runtime .data..percpu (%d bytes) overlaps discardable init image\n' \
     "$percpu_size" >&2
-  exit 1
-fi
-if (( config_nonprobe_enabled_count > config_max_nonprobe_enabled )); then
-  printf 'non-probe enabled config count %d exceeds production ceiling %d (total %d, compiler probes %d)\n' \
-    "$config_nonprobe_enabled_count" "$config_max_nonprobe_enabled" \
-    "$config_enabled_count" "$config_compiler_probe_count" >&2
-  exit 1
-fi
-if (( config_enabled_count > config_max_enabled )); then
-  printf 'enabled config count %d exceeds production ceiling %d\n' \
-    "$config_enabled_count" "$config_max_enabled" >&2
   exit 1
 fi
 if (( eh_frame_size != 0 )); then
@@ -131,8 +116,6 @@ LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
   echo "CONFIG_ENABLED_COUNT=$config_enabled_count"
   echo "CONFIG_COMPILER_PROBE_COUNT=$config_compiler_probe_count"
   echo "CONFIG_NONPROBE_ENABLED_COUNT=$config_nonprobe_enabled_count"
-  echo "CONFIG_MAX_NONPROBE_ENABLED=$config_max_nonprobe_enabled"
-  echo "CONFIG_MAX_ENABLED=$config_max_enabled"
 } > "$ROOT/.build/tcpcc-link.env"
 
 cat > "$ROOT/.build/tcpcc-footprint.md" <<EOF
@@ -154,7 +137,6 @@ cat > "$ROOT/.build/tcpcc-footprint.md" <<EOF
 | enabled CONFIG=y/m (raw) | $config_enabled_count |
 | compiler capability probes | $config_compiler_probe_count |
 | enabled CONFIG=y/m (excluding CC_HAS_*) | $config_nonprobe_enabled_count |
-| non-probe enabled config ceiling | $config_max_nonprobe_enabled |
 | final config SHA-256 | \`$config_sha256\` |
 
 ### Largest linked symbols
