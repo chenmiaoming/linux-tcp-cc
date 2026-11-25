@@ -30,6 +30,19 @@ if (( config_count != enabled_count )); then
   exit 1
 fi
 
+probe_count=$(awk '/^CONFIG_CC_HAS_/ { n++ } END { print n+0 }' \
+  "$ROOT/.build/tcpcc-enabled.config")
+nonprobe_count=$((config_count - probe_count))
+for metric in \
+  "CONFIG_ENABLED_COUNT=$config_count" \
+  "CONFIG_COMPILER_PROBE_COUNT=$probe_count" \
+  "CONFIG_NONPROBE_ENABLED_COUNT=$nonprobe_count"; do
+  if ! grep -Fxq "$metric" "$ROOT/.build/tcpcc-link.env"; then
+    echo "tcpcc-link.env config metric mismatch: expected $metric" >&2
+    exit 1
+  fi
+done
+
 if ! grep -q '^GNU_SIZE_ALLOCATED=' "$ROOT/.build/tcpcc-link.env"; then
   echo "tcpcc-link.env is missing GNU_SIZE_ALLOCATED" >&2
   exit 1
