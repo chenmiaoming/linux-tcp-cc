@@ -51,8 +51,9 @@ the composed production image reports 62,817 bytes of `.bss`, a reduction of
 about 80.6%. PR #127 is intentionally different: it barely changes static ELF
 size, but removes a 96 KiB resident host ELF mapping after boot.
 
-The resolved production configuration remains 116 enabled `CONFIG_*=y/m`
-symbols across these accepted footprint changes.
+Across the accepted footprint changes, the historical resolved configuration
+had 116 enabled `CONFIG_*=y/m` symbols. Config counts are retained as
+observational metrics, not production acceptance limits, as described below.
 
 ## First resolved-Kconfig audit
 
@@ -82,6 +83,44 @@ In particular, upstream `CONFIG_NET` unconditionally selects the small base
 JIT facilities, and higher-level eBPF features disabled. Removing the remaining
 base interpreter would require generic networking surgery for a comparatively
 small text saving, so it is not a current footprint target.
+
+## Kconfig counts are diagnostic only
+
+PR #143 exposed a false positive in the raw enabled-symbol limit. The successful
+Linux 6.18.56 build (GCC 13.3) has 116 enabled symbols, including 12
+`CONFIG_CC_HAS_*` probes. The linked Linux 6.18.57 build (GCC 15.2) has
+121 enabled symbols, including 17 such probes. The enabled-symbol lists differ
+only by these five compiler capability flags:
+
+- `CC_HAS_COUNTED_BY`
+- `CC_HAS_MULTIDIMENSIONAL_NONSTRING`
+- `CC_HAS_MIN_FUNCTION_ALIGNMENT`
+- `CC_HAS_SANE_FUNCTION_ALIGNMENT`
+- `CC_HAS_KASAN_SW_TAGS`
+
+Neither the TCPCC defconfig nor the set of enabled non-probe symbols changed.
+Both builds therefore have exactly 104 enabled symbols after excluding
+`CONFIG_CC_HAS_*`. In particular, compiler support for KASAN software tags
+does not enable KASAN itself.
+
+The intermediate non-probe ceiling also used a proxy rather than measuring
+resource consumption: upstream may split a symbol or change dependencies
+without adding a costly subsystem, while a single symbol can add substantial
+code or memory. PR #143 therefore removes both raw and non-probe count ceilings.
+Neither `TCPCC_CONFIG_MAX_ENABLED` nor `TCPCC_CONFIG_MAX_NONPROBE_ENABLED`
+is read by the link validator anymore.
+
+`scripts/validate-tcpcc-link.sh` retains the full resolved config, raw enabled
+list, config hash, raw count, compiler-probe count and non-probe count for
+comparison across builds. `scripts/check-footprint-artifacts.sh` still checks
+that the reported counts match the exported configuration. A count increase by
+itself does not fail CI. Explicit architecture configuration requirements,
+protected-source verification, image-size, BSS, per-CPU and unwind-metadata
+checks, and hosted M10/M11 runtime tests remain unchanged.
+
+Evidence: [v6.18.56 successful build](https://github.com/chenmiaoming/linux-tcp-cc/actions/runs/38240440574)
+and [v6.18.57 linked-image diagnostics](https://github.com/chenmiaoming/linux-tcp-cc/actions/runs/45558072345).
+The full hosted runtime suite remains necessary to qualify the updated kernel.
 
 ## Rejected SLUB_TINY experiment
 

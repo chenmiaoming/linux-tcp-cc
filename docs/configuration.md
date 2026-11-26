@@ -102,6 +102,13 @@ The submodule commit is part of the parent repository tree, so updates to the
 fork's `main` branch do not silently change tcpcc builds. Updating the parser is
 an explicit reviewed change to the gitlink commit.
 
+The Linux 6.18.57 update (PR #143) pins a const-correctness fix in the fork:
+[`d2473aa`](https://github.com/chenmiaoming/toml-c/commit/d2473aaaf9c1142fb15ad90e50ec3fde49e043bc).
+Newer host toolchains can preserve the input pointer's const qualifier in
+`strchr()`. The parser's decimal-point validation only reads that pointer, so
+the fix uses `const char *` in both `toml.c` and its generated single header.
+The native build retains `-Werror`; no parser behavior or schema changes.
+
 ## Lifecycle
 
 Configuration is startup-only. tcpcc does not watch the file and does not

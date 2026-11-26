@@ -50,10 +50,15 @@ from generic initialization and asks the architecture only for zone limits.
 `arch/tcpcc/kernel/compat_time.c` owns the high-resolution timer readiness
 probe; the port relies on the public timer resolution rather than the
 `hrtimer_is_hres_active()` helper removed in Linux 7.3.
-`arch/tcpcc/kernel/compat_socket.c` owns kernel bind/connect address typing;
-Linux 7.3 changed those two helpers from `sockaddr` to `sockaddr_unsized`, while
-the control and data-plane callers continue to pass their concrete IPv4 or IPv6
-address structures through a stable project interface.
+`arch/tcpcc/kernel/compat_socket.c` owns kernel bind/connect address typing.
+The control and data-plane callers pass their concrete IPv4 or IPv6 address
+structures through a stable `void *` project interface. Linux stable trees can
+backport these API changes independently: v6.18.57 changed `kernel_bind()` to
+`struct sockaddr_unsized *` (stable commit `946dc5835c8f`), while
+`kernel_connect()` still takes `struct sockaddr *`. Forward the address pointer
+and length directly to each helper, letting the actual kernel prototype select
+the pointer type rather than guessing from `LINUX_VERSION_CODE`. The existing
+kernel-link, hosted-bootstrap and mainline-canary builds exercise this boundary.
 
 The hosted init-image ownership is a separate portability concern from guest
 page allocation. `arch/tcpcc/kernel/initmem.c` overrides `free_initmem()` because

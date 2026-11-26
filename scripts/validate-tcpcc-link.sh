@@ -54,13 +54,17 @@ vmlinux_size=$(stat -c '%s' "$OUT/vmlinux")
 vmlinux_bss_size=$(section_size .bss)
 percpu_size=$(section_size .data..percpu)
 config_enabled_count=$(wc -l < "$ROOT/.build/tcpcc-enabled.config")
+# Record config counts for comparison, not as footprint limits. Compiler
+# capability probes may change without any change to the defconfig.
+config_compiler_probe_count=$(awk '/^CONFIG_CC_HAS_/ { n++ } END { print n+0 }' \
+  "$ROOT/.build/tcpcc-enabled.config")
+config_nonprobe_enabled_count=$((config_enabled_count - config_compiler_probe_count))
 config_sha256=$(sha256sum "$OUT/.config" | awk '{print $1}')
 eh_frame_size=$(section_size .eh_frame)
 vmlinux_max_bytes=${TCPCC_VMLINUX_MAX_BYTES:-3407872}
 # Keep permanent zero-initialized state bounded.  Temporary diagnostics belong
 # in reclaimable guest RAM rather than in the process-lifetime ELF BSS.
 vmlinux_bss_max_bytes=${TCPCC_VMLINUX_BSS_MAX_BYTES:-196608}
-config_max_enabled=${TCPCC_CONFIG_MAX_ENABLED:-116}
 read -r gnu_text_size gnu_data_size gnu_bss_size gnu_allocated_size _ _ \
   < <(tail -n 1 "$ROOT/.build/tcpcc-vmlinux.size")
 
@@ -81,11 +85,6 @@ fi
 if (( percpu_size != 0 )); then
   printf 'runtime .data..percpu (%d bytes) overlaps discardable init image\n' \
     "$percpu_size" >&2
-  exit 1
-fi
-if (( config_enabled_count > config_max_enabled )); then
-  printf 'enabled config count %d exceeds production ceiling %d\n' \
-    "$config_enabled_count" "$config_max_enabled" >&2
   exit 1
 fi
 if (( eh_frame_size != 0 )); then
@@ -115,7 +114,8 @@ LINUX_SRC="$SRC" bash "$ROOT/scripts/verify-protected.sh"
   echo "GNU_SIZE_ALLOCATED=$gnu_allocated_size"
   echo "CONFIG_SHA256=$config_sha256"
   echo "CONFIG_ENABLED_COUNT=$config_enabled_count"
-  echo "CONFIG_MAX_ENABLED=$config_max_enabled"
+  echo "CONFIG_COMPILER_PROBE_COUNT=$config_compiler_probe_count"
+  echo "CONFIG_NONPROBE_ENABLED_COUNT=$config_nonprobe_enabled_count"
 } > "$ROOT/.build/tcpcc-link.env"
 
 cat > "$ROOT/.build/tcpcc-footprint.md" <<EOF
@@ -134,7 +134,9 @@ cat > "$ROOT/.build/tcpcc-footprint.md" <<EOF
 | ELF .bss | $vmlinux_bss_size B |
 | ELF .bss ceiling | $vmlinux_bss_max_bytes B |
 | ELF .data..percpu | $percpu_size B |
-| enabled CONFIG=y/m | $config_enabled_count |
+| enabled CONFIG=y/m (raw) | $config_enabled_count |
+| compiler capability probes | $config_compiler_probe_count |
+| enabled CONFIG=y/m (excluding CC_HAS_*) | $config_nonprobe_enabled_count |
 | final config SHA-256 | \`$config_sha256\` |
 
 ### Largest linked symbols
